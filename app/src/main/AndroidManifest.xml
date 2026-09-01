@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OpenCode Mobile — P1 skeleton.
+
+     usesCleartextTraffic: app talks ONLY to the in-process loopback server
+     (127.0.0.1:4096). P2 will scope this with networkSecurityConfig.
+
+     FOREGROUND_SERVICE: hosts `opencode serve` for the whole app lifetime.
+     No foregroundServiceType needed — enforcement applies to apps targeting
+     API 34+, and we deliberately target 28.
+
+     POST_NOTIFICATIONS: intentionally NOT requested at runtime — apps with
+     targetSdk < 33 are granted it automatically on Android 13+. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- P3 sandbox: legacy storage for the agent's /sdcard bind (Termux
+         pattern — targetSdk 28 + these = legacy view on modern Android). -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+
+    <application
+        android:label="OpenCode"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/AppTheme"
+        android:allowBackup="false">
+
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ChatActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"/>
+
+        <activity
+            android:name=".SessionsActivity"
+            android:exported="false"/>
+
+        <service android:name=".ServerService" android:exported="false"/>
+    </application>
+</manifest>

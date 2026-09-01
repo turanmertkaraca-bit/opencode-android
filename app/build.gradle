@@ -1,0 +1,31 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'ai.opencode.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'ai.opencode.app'
+        minSdk 28
+        // targetSdk 28 stays DELIBERATE in P1 — same Termux exec trick the P0
+        // probe VERIFIED on-device (API 36, 1412ms, exit 0). Raising targetSdk
+        // would move us into the W^X-restricted SELinux domain and break
+        // exec() of the 175 MB opencode binary from app-private storage.
+        targetSdk 28
+        versionCode 7
+        versionName '0.5.0-p5'
+    }
+
+    buildTypes {
+        release { minifyEnabled false }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+// deliberately zero dependencies: 100% framework views/APIs (no androidx).
+// Same constraint as the P0 probe — build speed, reproducibility, and no
+// external artifact chain until P5.
