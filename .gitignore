@@ -7,3 +7,4 @@ captures/
 .externalNativeBuild/
 .cxx/
 *.apk.idsig
+oc_pkg.bin

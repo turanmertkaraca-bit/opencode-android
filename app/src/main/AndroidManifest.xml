@@ -44,6 +44,12 @@
             android:name=".SessionsActivity"
             android:exported="false"/>
 
+        <activity
+            android:name=".ProviderSetupActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:label="Connect APIs"/>
+
         <service android:name=".ServerService" android:exported="false"/>
     </application>
 </manifest>

@@ -16,6 +16,8 @@
     <color name="user_text">#FFFFFF</color>
     <color name="ok">#81C995</color>
     <color name="err">#F28B82</color>
+    <!-- P6 tool-card status dots -->
+    <color name="warn">#FDD663</color>
     <!-- P5 launcher icon background -->
     <color name="ic_bg">#0B57D0</color>
 </resources>

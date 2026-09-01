@@ -29,6 +29,49 @@ public final class Binaries {
         return new File(c.getFilesDir(), "opencode");
     }
 
+    /** Ready = present + valid ELF (the only gate the server needs). */
+    public static boolean binaryReady(Context c) {
+        File b = binaryFile(c);
+        return b.exists() && isElf(b);
+    }
+
+    /**
+     * P6: extract the opencode binary BUNDLED in the APK (asset oc_pkg.bin —
+     * the same opencode-linux-arm64 tarball, renamed so aapt2 cannot
+     * decompress or rename it). Fresh installs skip the SAF import dance
+     * entirely. Throws on any failure so the UI can show a real error.
+     */
+    public static void extractBundled(Context c, TarGz.Progress cb) throws IOException {
+        File bin = binaryFile(c);
+        if (bin.exists()) bin.delete();
+        InputStream in;
+        try {
+            in = c.getAssets().open("oc_pkg.bin");
+        } catch (Exception e) {
+            try {
+                in = c.getAssets().open("oc_pkg");
+            } catch (Exception e2) {
+                throw new IOException("bundled package missing from APK");
+            }
+        }
+        boolean gz;
+        try {
+            byte[] m = new byte[2];
+            int n = in.read(m);
+            gz = (n == 2 && m[0] == 0x1f && m[1] == (byte) 0x8b);
+            in.close();
+            in = c.getAssets().open(gz ? "oc_pkg.bin" : "oc_pkg");
+        } catch (IOException e) {
+            throw new IOException("cannot read bundled package");
+        }
+        try (InputStream src = in) {
+            TarGz.extractAll(src, c.getFilesDir(), gz, cb);
+        }
+        if (!isElf(bin))
+            throw new IOException("bundled package did not produce an ELF binary");
+        makeExec(bin);
+    }
+
     public static File homeDir(Context c) {
         File f = new File(c.getFilesDir(), "home");
         if (!f.exists()) f.mkdirs();

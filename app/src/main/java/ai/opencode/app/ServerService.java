@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
 import android.os.IBinder;
@@ -66,6 +67,21 @@ public class ServerService extends Service {
     public static int getState() { return state; }
     public static String getTail() { synchronized (tail) { return tail.toString(); } }
     public static boolean healthy() { return state == ST_HEALTHY; }
+
+    /**
+     * P6: stop + start again (after auth/config changes so the server picks
+     * them up; cold start is ~5 s). Safe to call from any foreground screen.
+     */
+    public static void restart(Context c) {
+        Intent stop = new Intent(c, ServerService.class).setAction(ACTION_STOP);
+        try { c.startService(stop); } catch (Exception ignored) {}
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            if (Binaries.binaryReady(c)) {
+                try { c.startForegroundService(new Intent(c, ServerService.class)); }
+                catch (Exception ignored) {}
+            }
+        }, 1200);
+    }
 
     public static void subscribe(Evt e) { listeners.add(e); }
     public static void unsubscribe(Evt e) { listeners.remove(e); }

@@ -1,5 +1,10 @@
 plugins { id 'com.android.application' }
 
+// P6: persistent debug keystore (signature continuity across sandbox wipes).
+// Falls back to the default ~/.android/debug.keystore when absent (e.g. a
+// fresh clone from GitHub), so building from source never breaks.
+def persistentDebugKeystore = new File(rootDir, '../keystore/debug.keystore')
+
 android {
     namespace 'ai.opencode.app'
     compileSdk 34
@@ -7,17 +12,35 @@ android {
     defaultConfig {
         applicationId 'ai.opencode.app'
         minSdk 28
-        // targetSdk 28 stays DELIBERATE in P1 — same Termux exec trick the P0
+        // targetSdk 28 stays DELIBERATE — same Termux exec trick the P0
         // probe VERIFIED on-device (API 36, 1412ms, exit 0). Raising targetSdk
         // would move us into the W^X-restricted SELinux domain and break
-        // exec() of the 175 MB opencode binary from app-private storage.
+        // exec() of the opencode binary from app-private storage.
         targetSdk 28
-        versionCode 7
-        versionName '0.5.0-p5'
+        versionCode 8
+        versionName '0.6.0-p6'
+    }
+
+    signingConfigs {
+        debug {
+            if (persistentDebugKeystore.exists()) {
+                storeFile persistentDebugKeystore
+                storePassword 'android'
+                keyAlias 'androiddebugkey'
+                keyPassword 'android'
+            }
+        }
     }
 
     buildTypes {
         release { minifyEnabled false }
+    }
+
+    // P6: the bundled opencode package (asset oc_pkg.bin, ~60 MB tar.gz) must
+    // be STORED, not recompressed — and the .bin suffix keeps aapt2 from
+    // "helpfully" decompressing + renaming it (the P3a rootfs.tar.gz lesson).
+    androidResources {
+        noCompress += ['bin']
     }
 
     lint {
@@ -28,4 +51,4 @@ android {
 
 // deliberately zero dependencies: 100% framework views/APIs (no androidx).
 // Same constraint as the P0 probe — build speed, reproducibility, and no
-// external artifact chain until P5.
+// external artifact chain.

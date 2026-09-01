@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- IDs used by programmatic views (ProviderSetupActivity). -->
+<resources>
+    <item name="psuRoot" type="id"/>
+    <item name="psuList" type="id"/>
+</resources>

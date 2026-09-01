@@ -122,4 +122,55 @@ public final class Json {
         b.append('"');
         return b.toString();
     }
+
+    // ------------------------------------------------------------------ write
+    // P6: serializer for the files WE produce (auth.json, opencode.json).
+    // Accepts Map / List / String / Number / Boolean / null — the same plain
+    // Java types parse() produces, so read→modify→write round-trips cleanly.
+
+    public static String write(Object o) {
+        StringBuilder b = new StringBuilder(256);
+        writeValue(o, b);
+        return b.toString();
+    }
+
+    private static void writeValue(Object o, StringBuilder b) {
+        if (o == null) { b.append("null"); return; }
+        if (o instanceof Map) {
+            b.append('{');
+            boolean first = true;
+            for (Map.Entry<?, ?> e : ((Map<?, ?>) o).entrySet()) {
+                if (!first) b.append(',');
+                first = false;
+                b.append(quote(String.valueOf(e.getKey()))).append(':');
+                writeValue(e.getValue(), b);
+            }
+            b.append('}');
+        } else if (o instanceof List) {
+            b.append('[');
+            boolean first = true;
+            for (Object v : (List<?>) o) {
+                if (!first) b.append(',');
+                first = false;
+                writeValue(v, b);
+            }
+            b.append(']');
+        } else if (o instanceof String) {
+            b.append(quote((String) o));
+        } else if (o instanceof Double) {
+            double d = (Double) o;
+            if (!Double.isNaN(d) && !Double.isInfinite(d) && d == Math.rint(d)
+                    && Math.abs(d) < 9.0e15) {
+                b.append((long) d);
+            } else {
+                b.append(Double.toString(d));
+            }
+        } else if (o instanceof Number) {
+            b.append(o.toString());
+        } else if (o instanceof Boolean) {
+            b.append(o.toString());
+        } else {
+            b.append(quote(String.valueOf(o)));
+        }
+    }
 }

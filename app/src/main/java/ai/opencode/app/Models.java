@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * P5: model catalog + selection.
+ * P6 model catalog: EVERY provider the server knows, grouped, searchable.
  *
  * Endpoint verified against the shipped v1.18.25 binary:
  *   GET /config/providers
@@ -15,64 +15,132 @@ import java.util.Map;
  *   {"parts":[...], "model":{"providerID":..,"modelID":..}}
  * (scan evidence: "variant:Ze,model:{providerID:k,modelID:be},parts:[...").
  *
- * Parsing is defensive: the response shape may be {"providers":[...]} or a
- * bare array; each provider carries models as EITHER a map (id -> info) or
- * an array of info objects. Whatever parses, parses; nothing throws.
+ * Parsing stays defensive: the response may be {"providers":[...]} / a bare
+ * array / an object keyed by provider id; models may be a map or an array.
+ * Whatever parses, parses; nothing throws. Model info fields seen in the
+ * models.dev catalog embedded server-side: id, name, description, pricing.
  */
 public final class Models {
 
-    /** One selectable (providerID, modelID) pair. */
+    /** One selectable (providerID, modelID) pair (flat form, kept for compat). */
     public static final class Item {
         public String provider, id, label;
     }
 
+    /** Grouped provider, P6. */
+    public static final class Prov {
+        public String id, name;
+        public boolean configured;          // has a key in auth.json
+        public final List<Mdl> models = new ArrayList<>();
+    }
+
+    public static final class Mdl {
+        public String id, name, desc;
+    }
+
+    /** Last successful fetch — the picker reuses it for instant re-opens. */
+    private static volatile List<Prov> lastFetch = new ArrayList<>();
+
     private Models() {}
 
-    /** Fetch the provider/model list from the running server. Never null. */
+    public static List<Prov> lastFetch() {
+        return lastFetch;
+    }
+
+    /** Fetch ALL providers + models from the running server. Never null. */
     @SuppressWarnings("unchecked")
-    public static List<Item> fetch() {
-        List<Item> out = new ArrayList<>();
+    public static List<Prov> fetch(Context c) {
+        List<Prov> out = new ArrayList<>();
         try {
             Api.Resp r = Api.get("/config/providers");
-            if (!r.ok()) return out;
+            if (!r.ok()) { lastFetch = out; return out; }
             Object root = Json.parse(r.body);
             Map<String, Object> m = Json.obj(root);
-            Object provs = (m != null) ? m.get("providers") : root;
-            List<Object> pl = Json.arr(provs);
-            if (pl == null && m != null) pl = Json.list(m, "providers");
-            if (pl == null) return out;
-            for (Object po : pl) {
-                Map<String, Object> p = Json.obj(po);
-                if (p == null) continue;
-                String pid = Json.str(p, "id");
-                if (pid == null || pid.isEmpty()) continue;
-                String pname = Json.str(p, "name");
-                Object models = p.get("models");
-                if (models instanceof Map) {
-                    for (Object mo : ((Map<String, Object>) models).values()) {
-                        addModel(out, pid, pname, Json.obj(mo));
+
+            List<Object> pl = null;
+            if (m != null) {
+                pl = Json.arr(m.get("providers"));
+                if (pl == null) {
+                    Map<String, Object> pm = Json.map(m, "providers");
+                    if (pm != null) {
+                        // object keyed by provider id
+                        for (Map.Entry<String, Object> e : pm.entrySet()) {
+                            Map<String, Object> p = Json.obj(e.getValue());
+                            if (p == null) continue;
+                            if (Json.str(p, "id") == null) p.put("id", e.getKey());
+                            collectProvider(out, p, c);
+                        }
+                        lastFetch = out;
+                        return out;
                     }
-                } else {
-                    List<Object> ml = Json.arr(models);
-                    if (ml != null) for (Object mo : ml) addModel(out, pid, pname, Json.obj(mo));
+                }
+            } else {
+                pl = Json.arr(root);
+            }
+            if (pl != null) {
+                for (Object po : pl) {
+                    Map<String, Object> p = Json.obj(po);
+                    if (p != null) collectProvider(out, p, c);
                 }
             }
         } catch (Exception ignored) {}
+        lastFetch = out;
         return out;
     }
 
-    private static void addModel(List<Item> out, String pid, String pname,
-                                 Map<String, Object> mm) {
+    @SuppressWarnings("unchecked")
+    private static void collectProvider(List<Prov> out, Map<String, Object> p,
+                                        Context c) {
+        String pid = Json.str(p, "id");
+        if (pid == null || pid.isEmpty()) return;
+        Prov prov = new Prov();
+        prov.id = pid;
+        String pname = Json.str(p, "name");
+        prov.name = (pname == null || pname.isEmpty()) ? pid : pname;
+        prov.configured = AuthStore.hasKey(c, pid);
+
+        Object models = p.get("models");
+        if (models instanceof Map) {
+            for (Map.Entry<String, Object> e
+                    : ((Map<String, Object>) models).entrySet()) {
+                Map<String, Object> mm = Json.obj(e.getValue());
+                if (mm == null) continue;
+                if (Json.str(mm, "id") == null) mm.put("id", e.getKey());
+                addModel(prov, mm);
+            }
+        } else {
+            List<Object> ml = Json.arr(models);
+            if (ml != null) for (Object mo : ml) addModel(prov, Json.obj(mo));
+        }
+        out.add(prov);
+    }
+
+    private static void addModel(Prov prov, Map<String, Object> mm) {
         if (mm == null) return;
         String mid = Json.str(mm, "id");
         if (mid == null || mid.isEmpty()) return;
-        Item it = new Item();
-        it.provider = pid;
-        it.id = mid;
+        Mdl mdl = new Mdl();
+        mdl.id = mid;
         String mn = Json.str(mm, "name");
-        String display = (mn == null || mn.isEmpty()) ? mid : mn;
-        it.label = display + "   ·   " + pid;
-        out.add(it);
+        mdl.name = (mn == null || mn.isEmpty()) ? mid : mn;
+        String d = Json.str(mm, "description");
+        mdl.desc = (d == null || d.isEmpty()) ? null : d;
+        prov.models.add(mdl);
+    }
+
+    /** Flatten to a plain item list (kept for send-path compatibility). */
+    public static List<Item> flatten(List<Prov> provs) {
+        List<Item> out = new ArrayList<>();
+        for (Prov p : provs) {
+            for (Mdl m : p.models) {
+                Item it = new Item();
+                it.provider = p.id;
+                it.id = m.id;
+                it.label = m.name + "   ·   " + p.id;
+                out.add(it);
+            }
+        }
+        return out;
     }
 
     // ------------------------------------------------- selection (prefs)
@@ -86,14 +154,15 @@ public final class Models {
                 .putString(KEY, provider + "/" + id).apply();
     }
 
-    /** Clear the override (server default model is used again). */
+    /** Clear the per-session override. */
     public static void clear(Context c) {
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY).apply();
     }
 
     /** The picked model as {providerID, modelID}, or null for server default. */
     public static String[] selected(Context c) {
-        String s = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY, null);
+        String s = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY, null);
         if (s == null) return null;
         int i = s.indexOf('/');
         if (i <= 0 || i == s.length() - 1) return null;
