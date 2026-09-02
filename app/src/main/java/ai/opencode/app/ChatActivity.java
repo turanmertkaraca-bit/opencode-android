@@ -125,6 +125,13 @@ public class ChatActivity extends Activity
     private String agent = "build";     // Tab parity: build <-> plan
     private volatile boolean busy;
     private volatile long lastPartTs;
+    // P11 self-heal state: the zen free-model lineup ROTATES server-side, so
+    // a saved pick can go stale ("Model not found" on EVERY send — the exact
+    // user report). These track the current run to clear + retry.
+    private volatile String lastUserText;
+    private volatile boolean runHadOutput;
+    private volatile boolean modelFixRetried;
+    private volatile boolean flakeRetried;
     private boolean pinnedBottom = true;
 
     private final Runnable watchdog = new Runnable() {
@@ -545,6 +552,8 @@ public class ChatActivity extends Activity
         if (q.isEmpty() || busy) return;
         input.setText("");
         Theme.pop(btnSend); // P8 micro-anim: the send button springs
+        lastUserText = q;
+        runHadOutput = false;
         ex.execute(() -> {
             try {
                 String sid = ensureSession();
@@ -552,13 +561,22 @@ public class ChatActivity extends Activity
                     sys("server not healthy yet — try again in a moment (⌘ → Restart server if it persists)");
                     return;
                 }
+                validateSelectedModel();          // P11: self-heal stale picks
                 lastPartTs = System.currentTimeMillis();
                 setBusy(true);
                 List<String> bodies = buildBodies(q);
                 Api.Resp r = null;
+                boolean modelDropped = false;
                 for (int i = 0; i < bodies.size(); i++) {
                     r = Api.post("/session/" + sid + "/message", bodies.get(i), 300_000);
-                    if (r.ok()) break;
+                    if (r.ok()) {
+                        // P11: variant indices 0–1 still carry the model
+                        // (ma, m); later ones silently lost the pick.
+                        if (i >= 2 && Models.selected(this) != null) modelDropped = true;
+                        break;
+                    }
+                    String failTxt = r.body == null ? "" : r.body;
+                    if (isModelNotFound(failTxt)) break;   // handled below
                     if (i < bodies.size() - 1
                             && (r.status == 400 || r.status == 422 || r.status == 500)) {
                         sys("server rejected the request shape (HTTP " + r.status
@@ -570,10 +588,26 @@ public class ChatActivity extends Activity
                 if (r == null || !r.ok()) {
                     int st = r == null ? 0 : r.status;
                     String detail = r == null ? "" : Json.findErrorText(Json.parse(r.body), 0);
-                    err("send failed · HTTP " + st, detail, r == null ? "" : r.body);
+                    String raw = r == null ? "" : r.body;
+                    if (isModelNotFound(raw + " " + detail) && !modelFixRetried) {
+                        // P11 self-heal: the saved pick is gone from the
+                        // server's catalog (the free-model lineup rotates).
+                        modelFixRetried = true;
+                        Models.clear(this);
+                        ui.post(this::refreshChips);
+                        sys("⚠ the saved model was rejected by the server "
+                                + "(the free-model lineup rotates) — cleared it; "
+                                + "retrying with the server default…");
+                        sendText(sid, q);
+                        return;
+                    }
+                    err("send failed · HTTP " + st, detail, raw);
                     setBusy(false);
                     return;
                 }
+                if (modelDropped)
+                    sys("note: the server ignored the picked model for this "
+                            + "message — it answered with its default model");
                 reconcile(Json.parse(r.body));
                 ui.removeCallbacks(watchdog);
                 ui.postDelayed(watchdog, 2000);
@@ -584,7 +618,82 @@ public class ChatActivity extends Activity
         });
     }
 
-    /** Candidates in decreasing explicitness: model+agent → agent → model → bare. */
+    /** Fire-and-track the same text again (self-heal / stream-flake retry). */
+    private void sendText(final String sid, final String q) {
+        ex.execute(() -> {
+            try {
+                lastPartTs = System.currentTimeMillis();
+                setBusy(true);
+                List<String> bodies = buildBodies(q);
+                Api.Resp r = null;
+                for (String body : bodies) {
+                    r = Api.post("/session/" + sid + "/message", body, 300_000);
+                    if (r.ok()) break;
+                }
+                if (r == null || !r.ok()) {
+                    err("retry failed · HTTP " + (r == null ? 0 : r.status),
+                            r == null ? "" : Json.findErrorText(Json.parse(r.body), 0),
+                            r == null ? "" : r.body);
+                    setBusy(false);
+                    return;
+                }
+                reconcile(Json.parse(r.body));
+                ui.removeCallbacks(watchdog);
+                ui.postDelayed(watchdog, 2000);
+            } catch (Exception e) {
+                sys("retry failed: " + e);
+                setBusy(false);
+            }
+        });
+    }
+
+    /** Server phrasing for a vanished model (verified P11 LIVE against
+     *  v1.18.25: ProviderModelNotFoundError → "Model not found:
+     *  provider/id. Did you mean: …"). Fires at RUN time (HTTP 200!), so
+     *  both the POST body and streamed errors must match it. */
+    private static boolean isModelNotFound(String s) {
+        if (s == null) return false;
+        String l = s.toLowerCase(Locale.US);
+        return l.contains("model not found") || l.contains("unknown model")
+                || l.contains("providedmodelnotfound");
+    }
+
+    /** True when the error is a transient provider/stream failure that a
+     *  single retry can survive (zen streams 504-idle on mobile networks —
+     *  reproduced live against v1.18.25). */
+    private static boolean isStreamFlake(String s) {
+        if (s == null) return false;
+        String l = s.toLowerCase(Locale.US);
+        return l.contains("upstream idle timeout")
+                || l.contains("streaming response failed")
+                || l.contains("cannot connect")
+                || l.contains("connection reset")
+                || l.contains("econnreset");
+    }
+
+    /** P11: if the saved model is not in the server's live catalog, drop it
+     *  BEFORE the request instead of failing the send. Empty fetch (server
+     *  hiccup) never clears anything. */
+    private void validateSelectedModel() {
+        String[] sel = Models.selected(this);
+        if (sel == null) return;
+        List<Models.Prov> provs = Models.lastFetch();
+        if (provs == null || provs.isEmpty()) provs = Models.fetch(this);
+        if (provs.isEmpty()) return;                     // unknown state → keep
+        if (!Models.available(provs, sel[0], sel[1])) {
+            Models.clear(this);
+            ui.post(this::refreshChips);
+            sys("⚠ saved model " + sel[0] + "/" + sel[1]
+                    + " is no longer offered by the server — cleared (⌘ → Model to pick another; the free list rotates)");
+        }
+    }
+
+    /**
+     * Candidates in decreasing explicitness, P11 ORDER FIX: model variants
+     * first (ma → m), THEN agent-less/bare. The old order (ma → a → m →
+     * bare) silently DROPPED the user's model on any 4xx — the chat kept
+     * working but the picked model was ignored without a word.
+     */
     private List<String> buildBodies(String q) {
         LinkedHashMap<String, String> variants = new LinkedHashMap<>();
         String text = "{\"type\":\"text\",\"text\":" + Json.quote(q) + "}";
@@ -595,8 +704,8 @@ public class ChatActivity extends Activity
         String ag = "\"agent\":" + Json.quote(agent);
         String parts = "\"parts\":[" + text + "]";
         if (model != null) variants.put("ma", "{" + model + "," + ag + "," + parts + "}");
-        variants.put("a", "{" + ag + "," + parts + "}");
         if (model != null) variants.put("m", "{" + model + "," + parts + "}");
+        variants.put("a", "{" + ag + "," + parts + "}");
         variants.put("bare", "{" + parts + "}");
         return new ArrayList<>(variants.values());
     }
@@ -650,7 +759,12 @@ public class ChatActivity extends Activity
             if (props == null) props = new HashMap<>();
             if ("message.part.updated".equals(type)) {
                 Map<String, Object> part = Json.map(props, "part");
-                if (part != null) applyPart(part, null);
+                if (part != null) {
+                    String pt = Json.str(part, "type");
+                    if (busy && ("text".equals(pt) || "reasoning".equals(pt)))
+                        runHadOutput = true;   // P11: the run produced real output
+                    applyPart(part, null);
+                }
             } else if ("message.updated".equals(type)) {
                 applyMessageInfo(Json.map(props, "info"));
             } else if ("session.updated".equals(type)) {
@@ -670,8 +784,30 @@ public class ChatActivity extends Activity
                 Map<String, Object> e = Json.map(props, "error");
                 String m = e != null ? Json.str(e, "message") : null;
                 if (m == null) m = Json.findErrorText(props, 0);
-                err("session error", m, String.valueOf(props));
-                setBusy(false);
+                String raw = String.valueOf(props);
+                if (isModelNotFound(raw + " " + m)) {
+                    // P11 self-heal: run-time Model not found (the POST itself
+                    // returned 200) — drop the stale pick so the NEXT send
+                    // uses the server default instead of failing forever.
+                    Models.clear(this);
+                    ui.post(this::refreshChips);
+                    err("model no longer available", "the picked model was "
+                            + "removed from the server's catalog — selection "
+                            + "cleared, send again (⌘ → Model to choose another)", raw);
+                } else if (busy && !runHadOutput && !flakeRetried
+                        && lastUserText != null && isStreamFlake(raw + " " + m)) {
+                    // P11: zen streams die with 504 idle-timeout on mobile
+                    // networks; retry ONCE when nothing was rendered yet.
+                    flakeRetried = true;
+                    sys("⚠ the model stream dropped (" + nz(m, "network")
+                            + ") — retrying once…");
+                    final String sid = sessionId;
+                    if (sid != null) sendText(sid, lastUserText);
+                    else setBusy(false);
+                } else {
+                    err("session error", m, raw);
+                    setBusy(false);
+                }
             } else if ("permission.asked".equals(type)
                     || "permission.updated".equals(type)
                     || "permission.v2.asked".equals(type)
@@ -714,6 +850,10 @@ public class ChatActivity extends Activity
 
     private void loadSession(String id) {
         sessionId = id;
+        modelFixRetried = false;      // P11: fresh chat → fresh self-heal budget
+        flakeRetried = false;
+        runHadOutput = false;
+        lastUserText = null;
         ui.post(() -> {
             synchronized (lock) {
                 rows.clear(); idxByKey.clear(); typeCount.clear(); msgs.clear();
@@ -1051,6 +1191,13 @@ public class ChatActivity extends Activity
                 ? nz(Json.str(e, "name"), "error") : null;
         final String fErrMsg = e != null
                 ? nz(Json.str(e, "message"), Json.findErrorText(e, 0)) : null;
+        // P11: message-level Model-not-found also self-heals (this is the
+        // path ProviderModelNotFoundError usually arrives through). Clearing
+        // is idempotent, so repeats are harmless.
+        if (fErrMsg != null && isModelNotFound(fErrMsg)) {
+            Models.clear(this);
+            ui.post(this::refreshChips);
+        }
 
         final String fMid = mid;
         final String fMeta = meta;
@@ -1966,8 +2113,11 @@ public class ChatActivity extends Activity
                     if ("h".equals(it[0])) {
                         Models.Prov pr = (Models.Prov) it[1];
                         TextView t = text(12, pr.configured ? R.color.ok : R.color.accent_light, true);
-                        String mark = pr.configured ? "  ✓ ready"
-                                : pr.usable ? "  (no key)" : "  (add API key)";
+                        String mark;
+                        if ("opencode".equals(pr.id))
+                            mark = "  free · no key needed";   // P11 verified live
+                        else if (pr.configured) mark = "  ✓ ready";
+                        else mark = pr.usable ? "  (no key)" : "  (add API key)";
                         t.setText(pr.name + mark);
                         box.addView(t);
                     } else if ("m".equals(it[0])) {
@@ -2006,9 +2156,12 @@ public class ChatActivity extends Activity
             Models.Prov pr = (Models.Prov) it[1];
             Models.Mdl m = (Models.Mdl) it[2];
             Models.save(this, pr.id, m.id);
-            try { AuthStore.setDefaultModel(this, pr.id, m.id); } catch (Exception ignored) {}
+            // P11: chat picks are PER-CHAT only — writing them into
+            // opencode.json made every future session (and every fallback
+            // body) hostage to a model the catalog can rotate away.
+            // Server-wide default stays in Settings → Default model.
             refreshChips();
-            Toast.makeText(this, (!pr.configured
+            Toast.makeText(this, (!pr.configured && !"opencode".equals(pr.id)
                     ? "no key yet for " + pr.name + " — ⌘ → API keys · " : "")
                     + "model → " + pr.id + "/" + m.id,
                     Toast.LENGTH_LONG).show();

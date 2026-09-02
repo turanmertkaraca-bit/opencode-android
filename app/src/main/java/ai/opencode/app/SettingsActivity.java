@@ -143,7 +143,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.10.0-p10 · native agent chat", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.11.0-p11 · model self-heal + doctor fix", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -394,23 +394,41 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
     // ---------------------------------------------------------- doctor
 
     private void runDoctor() {
-        TextView title = new TextView(this);
-        title.setText("checking…");
-        title.setTextSize(13);
-        title.setTextColor(Theme.TXT_DIM);
-        title.setPadding(Theme.dp(this, 20), Theme.dp(this, 12), Theme.dp(this, 20), Theme.dp(this, 12));
+        // P11 FIX: the old code called dlg.setView(tv) AFTER show() — on
+        // Android that is silently IGNORED, so the dialog sat on
+        // "checking…" forever (the exact user report). Now ONE TextView is
+        // installed at show-time and updated in place, per check, so
+        // progress is visible even on slow probes.
+        TextView tv = new TextView(this);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextSize(12);
+        tv.setTextColor(Theme.TXT);
+        tv.setPadding(Theme.dp(this, 20), Theme.dp(this, 12), Theme.dp(this, 20), Theme.dp(this, 12));
+        tv.setText("checking…");
         android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
                 .setTitle("Sandbox doctor")
-                .setView(title)
+                .setView(tv)
                 .setPositiveButton("Done", null)
                 .show();
         new Thread(() -> {
             StringBuilder sb = new StringBuilder();
+            java.util.function.Consumer<String> checking = msg -> ui.post(() -> {
+                if (!isFinishing() && !isDestroyed())
+                    tv.setText(sb.toString() + "checking " + msg + "…\n");
+            });
+
+            checking.accept("the opencode binary");
             String ver = Binaries.probeVersion(this, Binaries.binaryFile(this));
-            sb.append("opencode binary: ").append(ver == null ? "not ready" : ver).append('\n');
+            sb.append("opencode binary: ")
+              .append(ver == null ? "not ready" : ver).append('\n');
+
+            checking.accept("the sandbox toolkit");
             sb.append("sandbox toolkit: ").append(Sandbox.ready(this)
                     ? "installed (" + Sandbox.REPO_VER + ")" : "not installed").append('\n');
+
+            checking.accept("pkg");
             sb.append("pkg: ").append(which("pkg") ? "available" : "missing").append('\n');
+
             String[][] checks = {
                     {"python3 (alpine)", "python3"},
                     {"git (alpine or shim)", "git"},
@@ -421,23 +439,21 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                     {"tar/gzip", "tar"},
             };
             for (String[] c : checks) {
-                sb.append(c[0]).append(": ").append(which(c[1]) ? "available" : "not yet").append('\n');
+                checking.accept(c[0]);
+                boolean ok = which(c[1]);
+                sb.append(c[0]).append(": ")
+                  .append(ok ? "available" : "not yet").append('\n');
             }
+
             sb.append('\n').append("PATH = bin → wrappers → shims → /system/bin\n")
               .append("agent shells run in the app's exec-allowed home,\n")
               .append("cwd = the open project's folder (per-project sandbox).\n")
               .append("Install tools:  pkg install python3 py3-pip git nodejs gcc make\n")
-              .append("(downloads via the in-app proxy; apk signatures verified).");
-            String out = sb.toString();
+              .append("(downloads via the in-app proxy; apk signatures verified).\n")
+              .append("opencode zen FREE models need no API key at all.");
             ui.post(() -> {
                 if (isFinishing() || isDestroyed()) return;
-                TextView tv = new TextView(this);
-                tv.setTypeface(Typeface.MONOSPACE);
-                tv.setTextSize(12);
-                tv.setTextColor(Theme.TXT);
-                tv.setPadding(Theme.dp(this, 20), Theme.dp(this, 12), Theme.dp(this, 20), Theme.dp(this, 12));
-                tv.setText(out);
-                dlg.setView(tv);
+                tv.setText(sb.toString());
             });
         }, "oc-doctor").start();
     }

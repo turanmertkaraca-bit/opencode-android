@@ -227,6 +227,16 @@ public final class Models {
         }
     }
 
+    /** True when (provider, id) exists in the fetched provider list. */
+    public static boolean available(List<Prov> provs, String provider, String id) {
+        if (provs == null || provider == null || id == null) return false;
+        for (Prov p : provs) {
+            if (!provider.equals(p.id)) continue;
+            for (Mdl m : p.models) if (id.equals(m.id)) return true;
+        }
+        return false;
+    }
+
     /** Flatten to a plain item list (kept for send-path compatibility). */
     public static List<Item> flatten(List<Prov> provs) {
         List<Item> out = new ArrayList<>();

@@ -47,9 +47,10 @@ public class KeysActivity extends Activity {
         note.setText("Paste an API key for any provider you use. Keys are "
                 + "stored in the app's private auth.json and picked up on "
                 + "your next message — no restart needed.\n\n"
-                + "OpenCode Zen (first row) is opencode's own provider — one "
-                + "key unlocks all its models. No key yet? OpenRouter and "
-                + "Groq have free tiers.");
+                + "OpenCode Zen (first row) is opencode's own provider — its "
+                + "FREE models (nemotron, mimo, big-pickle…) run WITHOUT any "
+                + "key; add a zen key only for the paid ones. No other key "
+                + "yet? OpenRouter and Groq have free tiers.");
         int p2 = dp(10);
         note.setPadding(0, p2, 0, p2);
         root.addView(note);

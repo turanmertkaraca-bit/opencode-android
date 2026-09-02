@@ -39,7 +39,7 @@ public final class AuthStore {
 
     /** Known providers for the Connect screen: id, display name, key hint. */
     public static final String[][] KNOWN = {
-            {"opencode",   "OpenCode Zen", "zen key (get it at opencode.ai/zen)"},
+            {"opencode",   "OpenCode Zen", "optional — free models run keyless (paid: opencode.ai/zen)"},
             {"anthropic",  "Anthropic",  "sk-ant-…"},
             {"openai",     "OpenAI",     "sk-…"},
             {"google",     "Google",     "AIza…"},
