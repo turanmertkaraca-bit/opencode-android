@@ -85,7 +85,17 @@ public class ChatActivity extends Activity
     }
 
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private final ExecutorService ex = Executors.newSingleThreadExecutor();
+    /**
+     * P10 — was a single-thread executor, which was a deadlock in disguise:
+     * POST /session/{id}/message holds its thread until the agent run
+     * finishes, and a permission ask arrives exactly MID-RUN — so the
+     * Allow/Always/Deny reply (and the abort call) queued behind it and
+     * never ran. Buttons "didn't work". A pool lets replies/abort/history
+     * run while a message POST is in flight.
+     */
+    private final ExecutorService ex = Executors.newCachedThreadPool();
+    /** Dedicated pool for permission replies — must NEVER wait on anything. */
+    private final ExecutorService permEx = Executors.newCachedThreadPool();
     private final List<Row> rows = new ArrayList<>();
     private final Map<String, MsgInfo> msgs = new HashMap<>();
     private final Map<String, Integer> idxByKey = new HashMap<>();
@@ -159,6 +169,12 @@ public class ChatActivity extends Activity
         }
 
         findViewById(R.id.btnPalette).setOnClickListener(v -> palette());
+        // P10: visible back affordance — chat → project deck, easier navigation
+        findViewById(R.id.btnBack).setOnClickListener(v -> {
+            Theme.pop(v);
+            finish();
+            overridePendingTransition(R.anim.fade_in, R.anim.slide_out_right);
+        });
         btnSessions = findViewById(R.id.btnSessions);
         if (btnSessions != null) btnSessions.setOnClickListener(v -> sessionsSheet());
         emptyHero = findViewById(R.id.emptyHero);
@@ -657,7 +673,9 @@ public class ChatActivity extends Activity
                 err("session error", m, String.valueOf(props));
                 setBusy(false);
             } else if ("permission.asked".equals(type)
-                    || "permission.updated".equals(type)) {
+                    || "permission.updated".equals(type)
+                    || "permission.v2.asked".equals(type)
+                    || "permission.v2.updated".equals(type)) {
                 ui.post(this::checkPermissionQueue);
             }
         } catch (Exception e) {
@@ -1282,36 +1300,39 @@ public class ChatActivity extends Activity
                 return box;
             }
             case K_REASON: {
-                LinearLayout c = card();
+                // P10: "voice of mind" — violet-tinted panel, ✦ header,
+                // italic body when open. Distinct from tool cards at a glance.
+                LinearLayout c = new LinearLayout(this);
+                c.setOrientation(LinearLayout.VERTICAL);
+                c.setBackgroundResource(R.drawable.bg_thought_card);
+                int cp = dp(13);
+                c.setPadding(cp, dp(10), cp, dp(12));
+
                 LinearLayout head = new LinearLayout(this);
                 head.setOrientation(LinearLayout.HORIZONTAL);
                 head.setGravity(Gravity.CENTER_VERTICAL);
                 TextView spark = text(13, R.color.accent_light, false);
                 spark.setText("✦");
-                spark.setPadding(0, 0, dp(6), 0);
-                TextView h = text(12, R.color.accent_light, true);
-                h.setText("THINKING" + (r.text.length() == 0 ? "…" : ""));
-                h.setLetterSpacing(0.08f);
-                TextView chev = text(12, R.color.text_secondary, false);
-                chev.setText(r.open ? "▾" : "▸");
+                spark.setPadding(0, 0, dp(7), 0);
                 head.addView(spark);
+                TextView h = text(11, R.color.accent_light, true);
+                h.setText(r.text.length() == 0 ? "THINKING…" : "THINKING");
+                h.setLetterSpacing(0.14f);
                 head.addView(h, new LinearLayout.LayoutParams(0,
                         ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                TextView chev = text(11, R.color.text_secondary, false);
+                chev.setText(r.open ? "▾" : "▸");
                 head.addView(chev);
                 c.addView(head);
-                if (r.text.length() > 0) {
-                    LinearLayout.LayoutParams hp = (LinearLayout.LayoutParams) head.getLayoutParams();
-                    hp.topMargin = dp(2);
-                    head.setLayoutParams(hp);
-                }
                 if (r.open) {
-                    TextView body = text(12, R.color.text_secondary, false);
-                    body.setTypeface(Typeface.MONOSPACE);
+                    TextView body = text(13, R.color.text_secondary, false);
+                    body.setTypeface(Typeface.create("sans-serif", Typeface.ITALIC));
                     body.setTextIsSelectable(true);
+                    body.setLineSpacing(dp(2), 1f);
                     String t = r.text.toString();
                     if (t.length() > 20000) t = t.substring(0, 20000) + "…";
                     body.setText(t);
-                    body.setPadding(0, dp(6), 0, 0);
+                    body.setPadding(dp(2), dp(8), 0, 0);
                     c.addView(body);
                 }
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -1323,63 +1344,66 @@ public class ChatActivity extends Activity
                 return c;
             }
             case K_TOOL: {
-                // P9: colored status stripe + card
-                LinearLayout c = card();
-                int dotColor = "error".equals(r.status) ? R.color.err
-                        : "completed".equals(r.status) ? R.color.ok
-                        : ("running".equals(r.status) || "pending".equals(r.status))
-                        ? R.color.warn : R.color.text_secondary;
+                // P10: icon-disc tool card — colored glyph disc, name +
+                // status line, rounded code blocks for input/output.
+                boolean failed = "error".equals(r.status);
+                boolean running = "running".equals(r.status) || "pending".equals(r.status);
+                LinearLayout c = new LinearLayout(this);
+                c.setOrientation(LinearLayout.VERTICAL);
+                c.setBackgroundResource(failed
+                        ? R.drawable.bg_err_card : R.drawable.bg_tool_card);
+                int cp = dp(11);
+                c.setPadding(cp, cp, cp, cp);
+
                 LinearLayout head = new LinearLayout(this);
                 head.setOrientation(LinearLayout.HORIZONTAL);
                 head.setGravity(Gravity.CENTER_VERTICAL);
-                TextView dot = text(11, dotColor, false);
-                dot.setText("●");
-                dot.setPadding(0, 0, dp(7), 0);
+
+                TextView disc = text(12, R.color.on_accent, true);
+                disc.setTextColor(0xFFFFFFFF);   // literal — not a resource id
+                disc.setText(toolGlyph(r.tool));
+                disc.setGravity(Gravity.CENTER);
+                disc.setBackground(Theme.circle(toolTint(r.tool, failed)));
+                int ds = dp(28);
+                LinearLayout.LayoutParams dlp2 = new LinearLayout.LayoutParams(ds, ds);
+                dlp2.rightMargin = dp(10);
+                disc.setLayoutParams(dlp2);
+                head.addView(disc);
+
+                LinearLayout mid = new LinearLayout(this);
+                mid.setOrientation(LinearLayout.VERTICAL);
                 TextView name = text(13, R.color.text_primary, true);
                 name.setText(toolLabel(r.tool));
-                TextView st = text(12, R.color.text_secondary, false);
-                String word = "completed".equals(r.status) ? "done"
-                        : "error".equals(r.status) ? "error"
+                mid.addView(name);
+                TextView st = text(11, failed ? R.color.err
+                        : running ? R.color.warn : R.color.text_secondary, false);
+                String word = failed ? "error"
+                        : "completed".equals(r.status) ? "done"
                         : (r.status == null || r.status.isEmpty()) ? ""
                         : r.status + "…";
-                String line = (r.title == null || r.title.isEmpty() ? "" : " · " + r.title)
-                        + (word.isEmpty() ? "" : " · " + word);
-                st.setText(line);
-                TextView chev = text(12, R.color.text_secondary, false);
-                chev.setText(r.open ? "▾" : "▸");
-                head.addView(dot);
-                head.addView(name);
-                head.addView(st, new LinearLayout.LayoutParams(0,
-                        ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-                head.addView(chev);
-                st.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.55));
+                st.setText((r.title == null || r.title.isEmpty() ? "" : r.title)
+                        + (word.isEmpty() ? "" : (r.title == null || r.title.isEmpty() ? "" : "  ·  ") + word));
+                st.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.60));
                 st.setSingleLine(true);
                 st.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                mid.addView(st);
+                head.addView(mid, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+                TextView chev = text(12, R.color.text_secondary, false);
+                chev.setText(r.open ? "▾" : "▸");
+                chev.setPadding(dp(6), 0, 0, 0);
+                head.addView(chev);
                 c.addView(head);
+
                 if (r.open) {
                     if (r.input.length() > 0) {
                         c.addView(label("input"));
-                        TextView in = mono(text(12, R.color.text_primary, false), 12);
-                        in.setTextIsSelectable(true);
-                        String t = r.input.toString();
-                        if (t.length() > 12000) t = t.substring(0, 12000) + "…";
-                        in.setText(t);
-                        in.setBackgroundColor(getColor(R.color.surface2));
-                        int p = dp(8);
-                        in.setPadding(p, p, p, p);
-                        c.addView(in);
+                        c.addView(codeBlock(r.input.toString(), 12000));
                     }
                     if (r.output.length() > 0) {
                         c.addView(label("output"));
-                        TextView out = mono(text(12, R.color.text_primary, false), 12);
-                        out.setTextIsSelectable(true);
-                        String t = r.output.toString();
-                        if (t.length() > 12000) t = t.substring(0, 12000) + "…";
-                        out.setText(t);
-                        out.setBackgroundColor(getColor(R.color.surface2));
-                        int p = dp(8);
-                        out.setPadding(p, p, p, p);
-                        c.addView(out);
+                        c.addView(codeBlock(r.output.toString(), 12000));
                     }
                 }
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -1389,6 +1413,7 @@ public class ChatActivity extends Activity
                 c.setLayoutParams(lp);
                 Theme.press(c);
                 head.setOnClickListener(v -> { r.open = !r.open; touchView(r); });
+                c.setOnClickListener(v -> { r.open = !r.open; touchView(r); });
                 return c;
             }
             case K_ERR: {
@@ -1467,6 +1492,63 @@ public class ChatActivity extends Activity
         }
     }
 
+    /** P10: single glyph for a tool's icon disc (safe, common symbols). */
+    private static String toolGlyph(String tool) {
+        if (tool == null || tool.isEmpty()) return "⚙";
+        switch (tool) {
+            case "bash": return "$";
+            case "read":
+            case "list": return "≡";
+            case "write":
+            case "edit":
+            case "patch": return "✎";
+            case "glob":
+            case "grep": return "∗";
+            case "webfetch": return "→";
+            case "todowrite": return "✓";
+            case "task": return "◆";
+            default: return "⚙";
+        }
+    }
+
+    /** P10: icon-disc tint per tool — instant "what ran" recognition. */
+    private static int toolTint(String tool, boolean failed) {
+        if (failed) return 0xFFB34848;
+        if (tool == null) return 0xFF5A6478;
+        switch (tool) {
+            case "bash": return 0xFF5B6CFF;          // indigo
+            case "read": return 0xFF0EA5E9;          // sky
+            case "list": return 0xFF38BDF8;          // light sky
+            case "write":
+            case "edit": return 0xFF10B981;          // emerald
+            case "patch": return 0xFF8B5CF6;         // violet
+            case "glob":
+            case "grep": return 0xFFF59E0B;          // amber
+            case "webfetch": return 0xFF22D3EE;      // cyan
+            case "todowrite": return 0xFFEC4899;     // pink
+            case "task": return 0xFF6366F1;          // indigo 2
+            default: return 0xFF5A6478;
+        }
+    }
+
+    /** P10: rounded, hairline code block used for tool input/output. */
+    private TextView codeBlock(String content, int maxLen) {
+        TextView tv = mono(text(12, R.color.text_primary, false), 12);
+        tv.setTextIsSelectable(true);
+        String t = content;
+        if (t.length() > maxLen) t = t.substring(0, maxLen) + "…";
+        tv.setText(t);
+        tv.setBackgroundResource(R.drawable.bg_code);
+        int p = dp(10);
+        tv.setPadding(p, p, p, p);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(2);
+        tv.setLayoutParams(lp);
+        return tv;
+    }
+
     private void copyText(String s, String label) {
         ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         cm.setPrimaryClip(ClipData.newPlainText(label, s));
@@ -1508,61 +1590,131 @@ public class ChatActivity extends Activity
         if (pats != null && !pats.isEmpty()) detail.append("patterns: ").append(pats);
         if (detail.length() == 0) detail.append("(no details provided)");
 
-        LinearLayout c = card();
-        TextView t = text(14, R.color.warn, true);
-        t.setText("⚠ Allow " + action + "?");
-        c.addView(t);
+        // P10: agent-approval sheet — accent card, big buttons, impossible
+        // to miss and impossible to mis-tap.
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setBackgroundResource(R.drawable.bg_perm_card);
+        int cp = dp(14);
+        c.setPadding(cp, cp, cp, cp);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView badge = text(13, R.color.warn, false);
+        badge.setText("⚠");
+        badge.setPadding(0, 0, dp(8), 0);
+        head.addView(badge);
+        TextView t = text(14, R.color.text_primary, true);
+        t.setText("Allow " + action + "?");
+        head.addView(t, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        c.addView(head);
+
         TextView d = mono(text(12, R.color.text_secondary, false), 12);
         String dt = detail.toString();
         if (dt.length() > 1500) dt = dt.substring(0, 1500) + "…";
         d.setText(dt);
-        d.setPadding(0, dp(6), 0, dp(8));
-        c.addView(d);
+        d.setBackgroundResource(R.drawable.bg_code);
+        int dpc = dp(10);
+        d.setPadding(dpc, dpc, dpc, dpc);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        dlp.topMargin = dp(10);
+        c.addView(d, dlp);
+
         LinearLayout btns = new LinearLayout(this);
         btns.setOrientation(LinearLayout.HORIZONTAL);
-        btns.setGravity(Gravity.END);
-        Object[][] defs = {{"Always", "always", R.color.text_secondary},
-                {"Deny", "reject", R.color.err},
-                {"Allow", "once", R.color.accent_light}};
-        for (Object[] def : defs) {
-            TextView b = text(13, (Integer) def[2], true);
-            b.setText((String) def[0]);
-            b.setBackgroundResource(R.drawable.bg_chip);
-            int p = dp(12);
-            b.setPadding(p, dp(8), p, dp(8));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.leftMargin = dp(8);
-            b.setLayoutParams(lp);
-            final String resp = (String) def[1];
-            b.setOnClickListener(v -> { if (id != null) answerPermission(id, resp); });
-            btns.addView(b);
-        }
+        btns.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(12);
+
+        TextView deny = permButton("Deny", "reject", R.drawable.bg_btn_deny, id, R.color.err);
+        btns.addView(deny);
+        TextView always = permButton("Always allow", "always", R.drawable.bg_btn_outline, id, R.color.accent_light);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.leftMargin = dp(8);
+        btns.addView(always, alp);
+        TextView allow = permButton("Allow", "once", R.drawable.bg_btn_allow, id, R.color.on_accent);
+        LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        vlp.leftMargin = dp(8);
+        btns.addView(allow, vlp);
         c.addView(btns);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        c.setLayoutParams(lp);
         return c;
+    }
+
+    /** P10: one solid, tappable permission button (min touch target 44dp). */
+    private TextView permButton(String label, String response, int bgRes, String id, int colorRes) {
+        TextView b = text(13, colorRes, true);
+        b.setText(label);
+        b.setBackgroundResource(bgRes);
+        b.setGravity(Gravity.CENTER);
+        int p = dp(16);
+        b.setPadding(p, dp(11), p, dp(11));
+        b.setOnClickListener(v -> {
+            Theme.pop(b);
+            if (id != null) answerPermission(id, response);
+            else {
+                Toast.makeText(this, "missing request id — reopening…",
+                        Toast.LENGTH_SHORT).show();
+                checkPermissionQueue();
+            }
+        });
+        return b;
     }
 
     private void answerPermission(String id, String response) {
         final String sid = sessionId;
-        ex.execute(() -> {
+        // P10: dedicated pool — a message POST (or anything else) must never
+        // delay a permission reply. Verified against the shipped v1.18.25
+        // binary: POST /permission/{requestID}/reply  body {reply, message?}
+        // with reply ∈ {once, always, reject}; fallbacks cover older builds.
+        permEx.execute(() -> {
             String errS = null;
+            boolean ok = false;
             try {
                 // v1.18.x verified: the reply body key is "reply"
                 Api.Resp r = Api.post("/permission/" + id + "/reply",
                         "{\"reply\":" + Json.quote(response) + "}", 15_000);
-                if (!r.ok() && r.status == 404 && sid != null) {
+                ok = r.ok();
+                if (!ok && sid != null) {
+                    // v2 surface (shipped binary also serves this)
+                    r = Api.post("/api/session/" + sid + "/permission/" + id + "/reply",
+                            "{\"reply\":" + Json.quote(response) + "}", 15_000);
+                    ok = r.ok();
+                }
+                if (!ok && sid != null) {
+                    // legacy respond shape, oldest builds
                     r = Api.post("/session/" + sid + "/permissions/" + id,
                             "{\"response\":" + Json.quote(response) + "}", 15_000);
+                    ok = r.ok();
                 }
-                if (!r.ok()) errS = "HTTP " + r.status;
+                if (!ok) errS = "HTTP " + (r == null ? "?" : r.status);
             } catch (Exception e) {
                 errS = String.valueOf(e);
             }
             final String f = errS;
+            final boolean done = ok;
             ServerService.noteAnswered(id);
             ui.post(() -> {
-                if (f != null) sys("permission reply failed · " + f);
+                if (done) {
+                    Toast.makeText(this,
+                            "always".equals(response) ? "always allowed"
+                                    : "reject".equals(response) ? "denied" : "allowed",
+                            Toast.LENGTH_SHORT).show();
+                } else {
+                    sys("permission reply failed · " + f);
+                    Toast.makeText(this, "reply failed — try again", Toast.LENGTH_SHORT).show();
+                }
                 checkPermissionQueue();
             });
         });

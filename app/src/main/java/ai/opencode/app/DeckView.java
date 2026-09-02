@@ -10,16 +10,26 @@ import android.widget.Scroller;
 import android.view.animation.DecelerateInterpolator;
 
 /**
- * P8 DeckView — a vertical, one-card-per-swipe snap carousel (the
- * "credit-card wallet" the user asked for: screen goes up and down,
- * neighbors peek and shrink).
+ * P10 DeckView — the vertical "credit-card wallet".
  *
- * Framework-only (no androidx): a ViewGroup that lays its children in a
- * vertical strip, each page exactly one viewport tall, with a Scroller
- * snap, velocity-based page projection (capped at one page per gesture —
- * deliberate, snappy, never overshoots three cards), tap/long-press via
- * GestureDetector, and per-child scale/alpha/elevation transforms driven
- * by distance from center.
+ * Two fixes over the P8/P9 version, straight from user feedback:
+ *
+ *  1. CARDS STAY TOGETHER. Pages used to be one full viewport tall, so two
+ *     cards were a whole screen apart ("we don't need a whole page for 2
+ *     cards"). Now the per-card stride is just cardHeight + a small gap:
+ *     neighbors visibly peek above and below the active card — a wallet,
+ *     not a slideshow.
+ *
+ *  2. FAST FLINGS WORK. The old snap projected velocity*0.14s and rounded,
+ *     so a quick flick could round back to the starting card ("it needs to
+ *     be slide very slowly or it goes back"). Now the fling rule is the
+ *     same one ViewPager uses: a genuine fling advances exactly one card
+ *     FROM THE PAGE WHERE THE GESTURE STARTED, in the flick's direction —
+ *     velocity projection and rounding can't vote it back.
+ *
+ * Still framework-only, still one deliberate card per gesture (±1 clamp),
+ * tap/long-press via GestureDetector, per-child scale/alpha/elevation by
+ * distance from center.
  */
 public class DeckView extends ViewGroup {
 
@@ -29,8 +39,9 @@ public class DeckView extends ViewGroup {
         void onLongPress(int page);
     }
 
-    private static final int MIN_FLING_VEL = 350;   // px/s
-    private static final int MAX_SNAP_MS   = 320;
+    private static final int FLING_VEL  = 750;   // px/s — a real flick commits
+    private static final float FLING_MIN_TRAVEL = 0.06f; // of one card
+    private static final int MAX_SNAP_MS = 340;
 
     private final Scroller scroller;
     private final GestureDetector gestures;
@@ -39,12 +50,16 @@ public class DeckView extends ViewGroup {
     private float lastY;
     private boolean dragging;
     private int lastSettled = -1;
+    private int gestureStartPage;   // P10: anchor page at gesture start
+    private float flingVy;          // P10: onFling backup velocity
+    private boolean flingSeen;
     private Callback cb;
     private int sidePad;
+    private int cardH;              // measured in onMeasure
 
     public DeckView(Context c) {
         super(c);
-        scroller = new Scroller(c, new DecelerateInterpolator(1.4f));
+        scroller = new Scroller(c, new DecelerateInterpolator(1.5f));
         gestures = new GestureDetector(c, new Gest());
         sidePad = Theme.dp(c, 18);
         touchSlop = android.view.ViewConfiguration.get(c).getScaledTouchSlop();
@@ -57,26 +72,35 @@ public class DeckView extends ViewGroup {
 
     // ---- geometry ------------------------------------------------------
 
-    private int pageH() { return Math.max(1, getHeight() - getPaddingTop() - getPaddingBottom()); }
+    private int viewportH() {
+        return Math.max(1, getHeight() - getPaddingTop() - getPaddingBottom());
+    }
 
-    private int maxScroll() { return Math.max(0, (getChildCount() - 1) * pageH()); }
+    /** P10: stacked-wallet stride — card height + a small gap. */
+    private int stride() {
+        return cardH > 0 ? cardH + Theme.dp(getContext(), 16)
+                : Math.max(1, viewportH());
+    }
+
+    private int maxScroll() { return Math.max(0, (getChildCount() - 1) * stride()); }
 
     public int page() {
-        int ph = pageH();
-        return ph <= 0 ? 0 : Math.round(getScrollY() / (float) ph);
+        int st = stride();
+        return st <= 0 ? 0 : Math.round(getScrollY() / (float) st);
     }
 
     public void setCurrent(int page, boolean smooth) {
         page = Math.max(0, Math.min(page, getChildCount() - 1));
-        int y = page * pageH();
+        int y = page * stride();
         if (smooth) smoothTo(y); else { scrollTo(0, y); applyTransforms(); }
         lastSettled = page;
     }
 
     private void smoothTo(int y) {
         int dist = Math.abs(y - getScrollY());
-        int dur = Math.max(160, Math.min(MAX_SNAP_MS,
-                (int) (dist / (float) Math.max(1, pageH()) * MAX_SNAP_MS) + 120));
+        int st = stride();
+        int dur = Math.max(150, Math.min(MAX_SNAP_MS,
+                (int) (dist / (float) Math.max(1, st) * 240) + 110));
         scroller.abortAnimation();
         scroller.startScroll(0, getScrollY(), 0, y - getScrollY(), dur);
         postInvalidateOnAnimation();
@@ -91,10 +115,10 @@ public class DeckView extends ViewGroup {
         setMeasuredDimension(w, h);
 
         int childW = w - getPaddingLeft() - getPaddingRight() - sidePad * 2;
-        int pageH = Math.max(1, h - getPaddingTop() - getPaddingBottom());
-        // credit-card proportions: height ≈ 0.62 × card width, capped by page
-        int cardH = (int) Math.min(pageH * 0.74f, childW * 0.62f);
-        cardH = Math.max(cardH, Theme.dp(getContext(), 170));
+        int vh = viewportH();
+        // credit-card proportions, capped so the wallet leaves peek room
+        cardH = (int) Math.min(vh * 0.60f, childW * 0.64f);
+        cardH = Math.max(cardH, Theme.dp(getContext(), 168));
 
         int cws = MeasureSpec.makeMeasureSpec(childW, MeasureSpec.EXACTLY);
         int chs = MeasureSpec.makeMeasureSpec(cardH, MeasureSpec.EXACTLY);
@@ -105,18 +129,26 @@ public class DeckView extends ViewGroup {
 
     @Override
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
-        int pageH = pageH();
+        int st = stride();
+        int centerBase = stripTop();
         int left = getPaddingLeft() + sidePad;
         int w = r - l - getPaddingLeft() - getPaddingRight() - sidePad * 2;
         for (int i = 0; i < getChildCount(); i++) {
             View ch = getChildAt(i);
-            int chH = ch.getMeasuredHeight();
-            int top = getPaddingTop() + i * pageH + (pageH - chH) / 2;
-            ch.layout(left, top, left + w, top + chH);
+            int top = centerBase + i * st;
+            ch.layout(left, top, left + w, top + ch.getMeasuredHeight());
         }
         applyTransforms();
         clampScroll();
     }
+
+    /** P10: the active card sits slightly ABOVE center — dead space goes
+     *  below (where neighbors peek), not above (where there's nothing). */
+    private int stripTop() {
+        return getPaddingTop() + (int) ((viewportH() - cardH) * 0.40f);
+    }
+
+    private int stripCenter() { return stripTop() + cardH / 2; }
 
     private void clampScroll() {
         int y = getScrollY();
@@ -128,20 +160,20 @@ public class DeckView extends ViewGroup {
     // ---- transforms (the deck feel) --------------------------------------
 
     private void applyTransforms() {
-        int ph = pageH();
-        if (ph <= 0) return;
-        int center = getHeight() / 2;
+        int st = stride();
+        if (st <= 0) return;
+        int center = stripCenter();
         for (int i = 0; i < getChildCount(); i++) {
             View ch = getChildAt(i);
             int chCenter = ch.getTop() + ch.getHeight() / 2 - getScrollY();
-            float d = Math.min(1f, Math.abs(chCenter - center) / (float) ph);
-            float scale = 1f - 0.13f * d;
+            float d = Math.min(1f, Math.abs(chCenter - center) / (float) st);
+            float scale = 1f - 0.10f * d;
             ch.setPivotX(ch.getWidth() / 2f);
             ch.setPivotY(ch.getHeight() / 2f);
             ch.setScaleX(scale);
             ch.setScaleY(scale);
-            ch.setAlpha(1f - 0.55f * d);
-            ch.setElevation((1f - d) * Theme.dp(getContext(), 12));
+            ch.setAlpha(1f - 0.45f * d);
+            ch.setElevation((1f - d) * Theme.dp(getContext(), 10));
         }
     }
 
@@ -183,6 +215,8 @@ public class DeckView extends ViewGroup {
             case MotionEvent.ACTION_DOWN:
                 downY = ev.getY();
                 scroller.abortAnimation();
+                gestureStartPage = page();
+                flingSeen = false;
                 return false;
             case MotionEvent.ACTION_MOVE:
                 return Math.abs(ev.getY() - downY) > touchSlop;
@@ -202,9 +236,17 @@ public class DeckView extends ViewGroup {
                 scroller.abortAnimation();
                 lastY = ev.getY();
                 dragging = true;
+                gestureStartPage = page();
+                flingSeen = false;
                 break;
             case MotionEvent.ACTION_MOVE:
-                if (!dragging) { dragging = true; lastY = ev.getY(); } // post-intercept start
+                if (!dragging) {
+                    // post-intercept start: the early part of the gesture
+                    // went to a card — anchor the fling HERE, not at 0.
+                    dragging = true;
+                    lastY = ev.getY();
+                    gestureStartPage = page();
+                }
                 float dy = ev.getY() - lastY;
                 lastY = ev.getY();
                 int y = getScrollY() - (int) dy;
@@ -230,20 +272,34 @@ public class DeckView extends ViewGroup {
         return true;
     }
 
-    /** One card per gesture: project the fling, clamp to ±1 page. */
+    /**
+     * P10 snap rule:
+     *   • genuine fling (velocity above threshold AND the page actually
+     *     moved a little) → advance exactly one card from the gesture's
+     *     anchor page, in the fling's direction — never back;
+     *   • slow drag → commit past the halfway point, else settle back.
+     */
     private void snapAfterDrag(float vy) {
-        int ph = pageH();
-        if (ph <= 0 || getChildCount() == 0) return;
-        int cur = page();
-        int target = cur;
-        if (Math.abs(vy) > MIN_FLING_VEL) {
-            int proj = Math.round((getScrollY() + vy * 0.14f) / (float) ph);
-            target = Math.max(cur - 1, Math.min(cur + 1, proj));
+        int st = stride();
+        if (st <= 0 || getChildCount() == 0) return;
+        int start = Math.max(0, Math.min(gestureStartPage, getChildCount() - 1));
+        int last = getChildCount() - 1;
+        float v = (flingSeen && Math.abs(flingVy) > Math.abs(vy)) ? flingVy : vy;
+        float traveled = (getScrollY() - start * st) / (float) st; // in cards
+
+        int target;
+        if (Math.abs(v) > FLING_VEL && Math.abs(traveled) > FLING_MIN_TRAVEL) {
+            int dir = v < 0 ? 1 : -1;   // finger up → next card
+            target = start + dir;       // one card per gesture (±1 clamp)
+        } else if (traveled > 0.5f) {
+            target = start + 1;
+        } else if (traveled < -0.5f) {
+            target = start - 1;
         } else {
-            target = Math.round(getScrollY() / (float) ph);
+            target = start;
         }
-        target = Math.max(0, Math.min(target, getChildCount() - 1));
-        smoothTo(target * ph);
+        target = Math.max(0, Math.min(target, last));
+        smoothTo(target * st);
         if (target == lastSettled) settleCheck(); // tapped and stayed → still notify
     }
 
@@ -257,6 +313,11 @@ public class DeckView extends ViewGroup {
         }
         @Override public void onLongPress(MotionEvent e) {
             if (cb != null && getChildCount() > 0) cb.onLongPress(page());
+        }
+        @Override public boolean onFling(MotionEvent e1, MotionEvent e2,
+                                         float vx, float vy) {
+            flingVy = vy; flingSeen = true;   // backup signal for snapAfterDrag
+            return true;
         }
     }
 

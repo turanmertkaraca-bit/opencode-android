@@ -352,7 +352,9 @@ public class ServerService extends Service {
     private void ingest(Map<String, Object> ev) {
         String type = Json.str(ev, "type");
 
-        if ("permission.asked".equals(type) || "permission.updated".equals(type)) {
+        if ("permission.asked".equals(type) || "permission.updated".equals(type)
+                || "permission.v2.asked".equals(type)
+                || "permission.v2.updated".equals(type)) {
             Map<String, Object> perm = normalizePermission(Json.map(ev, "properties"));
             if (perm != null) {
                 String id = Json.str(perm, "id");
@@ -363,7 +365,8 @@ public class ServerService extends Service {
                     }
                 }
             }
-        } else if ("permission.replied".equals(type)) {
+        } else if ("permission.replied".equals(type)
+                || "permission.v2.replied".equals(type)) {
             // answered elsewhere (e.g. server auto-mode) → keep our queue in sync
             Map<String, Object> props = Json.map(ev, "properties");
             String rid = props == null ? null : Json.str(props, "requestID");
@@ -393,10 +396,18 @@ public class ServerService extends Service {
         return null;
     }
 
-    /** GET /permission — server's own list of pending permission requests. */
+    /** GET /permission (v1) — and v2 /api/permission/request as fallback —
+     *  server's own list of pending permission requests. */
     private void seedPermissions() {
         try {
             Api.Resp r = Api.get("/permission");
+            if (!r.ok()) {
+                // v2 surface (shipped binary): GET /api/permission/request
+                try {
+                    Api.Resp r2 = Api.get("/api/permission/request");
+                    if (r2.ok()) r = r2;
+                } catch (Exception ignored) {}
+            }
             if (!r.ok()) return;
             List<Object> arr = Json.arr(Json.parse(r.body));
             if (arr == null) return;

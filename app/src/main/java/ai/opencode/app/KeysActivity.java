@@ -47,7 +47,9 @@ public class KeysActivity extends Activity {
         note.setText("Paste an API key for any provider you use. Keys are "
                 + "stored in the app's private auth.json and picked up on "
                 + "your next message — no restart needed.\n\n"
-                + "No key yet? OpenRouter and Groq have free tiers.");
+                + "OpenCode Zen (first row) is opencode's own provider — one "
+                + "key unlocks all its models. No key yet? OpenRouter and "
+                + "Groq have free tiers.");
         int p2 = dp(10);
         note.setPadding(0, p2, 0, p2);
         root.addView(note);
@@ -116,6 +118,7 @@ public class KeysActivity extends Activity {
         LinearLayout t = row(name, id + "  ·  " + status);
         ((TextView) t.getChildAt(0)).setTextColor(getColor(masked == null
                 ? R.color.text_primary : R.color.ok));
+        Theme.press(t);
         t.setOnClickListener(v -> keyDialog(id, name));
         list.addView(t);
     }

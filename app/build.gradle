@@ -17,8 +17,8 @@ android {
         // would move us into the W^X-restricted SELinux domain and break
         // exec() of the opencode binary from app-private storage.
         targetSdk 28
-        versionCode 11
-        versionName '0.9.0-p9'
+        versionCode 12
+        versionName '0.10.0-p10'
     }
 
     signingConfigs {
@@ -47,8 +47,24 @@ android {
         abortOnError false
         checkReleaseBuilds false
     }
+
+    // P10: JVM-test-only (Robolectric) self-test harness — see below.
+    testOptions {
+        unitTests {
+            includeAndroidResources true
+            all { it.maxHeapSize = '1024m' }
+        }
+    }
 }
 
-// deliberately zero dependencies: 100% framework views/APIs (no androidx).
+// Zero RUNTIME dependencies: 100% framework views/APIs (no androidx).
 // Same constraint as the P0 probe — build speed, reproducibility, and no
 // external artifact chain.
+//
+// P10: testImplementation deps power the self-test harness: real view
+// rendering to PNG screenshots + a live HTTP round-trip test of the
+// permission-reply flow against a mock opencode server. Never shipped.
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.13'
+}
