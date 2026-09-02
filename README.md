@@ -7,18 +7,101 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.8.0 — projects as cards, one sandbox each)
+## Install (v0.11.0 — model self-heal, verified live against the real server)
 
-1. Grab `opencode-p8-v0.8.0-debug.apk` from the releases page and sideload
-   it (same signing key as v0.6.0/v0.7.0 → updates in place).
-2. Open the app. A short boot log runs once (unpack → server → health),
-   then the **project deck** opens: your projects as credit-card gradient
-   cards, swipe up/down between them.
-3. Tap a card → that project's own sandbox → chat. **＋ → pick a folder**
-   adds a project. **⚙ → API keys** → paste a key (OpenRouter/Groq have
-   free tiers) → send.
+1. Grab `opencode-p11-v0.11.0-debug.apk` from the
+   [v0.11.0 release](https://github.com/turanmertkaraca-bit/opencode-android/releases/tag/v0.11.0).
+2. Sideload it (allow "install unknown apps" for your browser/file manager).
+   Same signing key as every previous release → it installs as an UPDATE,
+   keeping your sessions, keys, projects and sandbox tools.
+3. Open OpenCode → pick a free zen model from ⌘ → Model (they run with NO
+   API key) → chat. Stale model picks now self-heal instead of failing
+   with "Model not found".
+
+## What's in v0.11.0 (P11 — bug reproduced live, fix verified live)
+
+- **"Couldn't find that model" — fixed, root-caused.** The server's
+  free-model catalog ROTATES (gpt-5-nano & friends are gone; today it is
+  nemotron / mimo / ling / muse / big-pickle) and the app kept sending
+  the stale saved pick forever. Now: the pick is validated against the
+  server's live catalog before each send and cleared when no longer
+  offered; run-time "Model not found" errors are detected and self-heal
+  with one automatic retry on the server default; chat picks are
+  per-chat again (no more server-wide config writes from chat).
+- **Request fallback keeps your model**: order is now model+agent →
+  model → agent → bare; silent model-dropping is gone, and if the server
+  ignores the pick you get a visible note.
+- **Zen free = keyless** (verified live): the model sheet marks
+  OpenCode Zen "free · no key needed"; a zen key is only for paid models.
+- **Stream-flake retry**: zen streams die with 504 idle timeouts on
+  mobile networks (reproduced live); one silent retry when nothing was
+  rendered yet.
+- **Sandbox doctor fixed**: no more "checking…" forever (setView after
+  show is ignored on Android) — it now updates in place, per check.
+- Verified by 15 JVM regression tests (`scripts/TestP11.java`) plus live
+  server probes: stale pick → error reproduced; valid pick via the new
+  primary body → HTTP 200, cost 0, real reply.
+
+1. Grab `opencode-p10-v0.10.0-debug.apk` from the releases page and sideload
+   it (same signing key as v0.6.0-v0.9.0 → updates in place).
+2. Open the app. The first boot unpacks the agent (~60 MB) and the sandbox
+   toolkit (~4 MB, watch the log), then the **project deck** opens.
+3. Tap a project card → that project's own sandbox → chat. **＋ → pick a
+   folder** adds a project. **⌘ → API keys** → OpenCode Zen (first row) or
+   any provider → paste a key → send.
+4. The agent can install its own tooling — `pkg install python3 git
+   nodejs gcc …` (Alpine packages via apk, no proot; wrappers auto-link
+   onto PATH; downloads flow through the in-app proxy).
+
+## What's in v0.10.0 (P10 — every fix verified by an automated self-test)
+
+- **Permission buttons FIXED** — Allow / Always allow / Deny were dead
+  because replies queued on the same single thread as the (blocking)
+  message POST — and permissions always arrive mid-run. Replies now run
+  on a dedicated pool; an automated test taps Allow and watches
+  `POST /permission/{id}/reply {"reply":"once"}` arrive on the wire.
+  Endpoint + reply values verified against the shipped v1.18.25 binary.
+  The approval card is now an indigo sheet with big buttons + toasts.
+- **Fast fling FIXED** — a quick flick on the deck always lands on the
+  next/previous card (ViewPager's direction rule anchored at the gesture's
+  start page). 5 regression tests encode the complaint.
+- **Cards stay together** — the deck is a stacked wallet: card-height +
+  small gap between cards, neighbors peek above/below, strip biased up.
+- **Chat blocks redesigned** — tool calls are icon-disc cards (per-tool
+  color, status line, tap-anywhere expand, rounded INPUT/OUTPUT code
+  blocks); THINKING cards are violet with italic voice.
+- **OpenCode Zen key** — listed first on the API keys screen.
+- **Easier navigation** — visible back button in the chat header.
+- **Self-test harness shipped** (`app/src/test/`): DeckSnapTest (5),
+  PermissionFlowTest (2, real HTTP round-trips), ScreenTest (3, renders
+  real views to PNGs) — 10/10 green at release time.
+
+## What's in v0.9.0 (P9)
+
+- **Sandbox package manager (`pkg`)** — the Alpine minirootfs (aarch64)
+  ships inside the APK; every binary runs through the musl dynamic loader
+  directly from app-private storage. `pkg update / install / remove /
+  search / list / rehash` maps onto apk with signatures verified. The
+  agent's shell gets python3, pip, git, node, gcc, ripgrep, jq, curl,
+  openssh and 30k+ more Alpine packages on demand.
+- **Realtime chat** — SSE deltas feed a 24 ms smoothing ticker: text
+  materializes token-by-token with a live caret, then finalizes with one
+  markdown render. In-place view updates keep it snappy on long chats.
+- **Chat redesign** — gradient user bubbles, THINKING cards, tool cards
+  with status dots + friendly names, error cards, hero empty state with
+  starter prompts, raised composer bar (⌘ · Build/Plan · model chips ·
+  gradient send FAB).
+- **Full model catalog** — /config/providers merged with the complete
+  models.dev catalog: every provider/model that exists, searchable, with
+  "(no key)" markers, disk-cached.
+- **Settings from zero** — gradient hero server card, section cards with
+  icon discs, custom animated switch, sandbox section (pkg status,
+  install/repair, rehash, doctor).
+- **Deck fix** — page indicator is now a vertical rail (the old horizontal
+  dots read as left/right while paging was up/down).
 
 ## What's in v0.8.0 (P8 — the deck: style, motion, per-project sandboxes)
+— the deck: style, motion, per-project sandboxes)
 
 - **Project deck (home)** — projects shown as credit-card-style gradient
   cards in a vertical snap carousel (`DeckView`, a custom framework-only
@@ -174,5 +257,8 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P5 model picker + stop + session mgmt | shipped |
 | P6 wizard + bundled binary + in-app keys | shipped |
 | P7 chat-first rewrite, no proot, crash-proofing | shipped |
-| P8 project deck, per-project sandboxes, motion design | **current** |
+| P8 project deck, per-project sandboxes, motion design | shipped |
+| P9 pkg package manager (Alpine, no proot) + realtime chat | shipped |
+| P10 permission fix, deck fling fix, chat blocks redesign | shipped |
+| P11 model self-heal, per-chat picks, doctor fix | **current** |
 | Next: on-device toolchain (clang) import path | planned |
