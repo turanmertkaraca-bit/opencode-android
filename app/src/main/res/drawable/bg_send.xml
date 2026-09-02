@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- P9: circular gradient send FAB. -->
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
-    <gradient android:angle="45" android:startColor="#5B6CFF" android:endColor="#8B5CF6"/>
+<!-- P12 monochrome: white ink send FAB (on_accent text turns black). -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/accent"/>
+    <corners android:radius="23dp"/>
 </shape>

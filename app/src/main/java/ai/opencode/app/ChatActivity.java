@@ -100,10 +100,15 @@ public class ChatActivity extends Activity
     private final Map<String, MsgInfo> msgs = new HashMap<>();
     private final Map<String, Integer> idxByKey = new HashMap<>();
     private final Map<String, Integer> typeCount = new HashMap<>();
+    /** P12 session wallet: messageID → {cost, total tokens}. Cleared on
+     *  session switch, rebuilt from history, live-updated from SSE — the
+     *  "show how much money it used" readout in the header. */
+    private final Map<String, double[]> spend = new HashMap<>();
 
     private LinearLayout list;
     private ScrollView scroll;
     private TextView tvTitle, tvSub, tvStatus, chipMode, chipModel, btnSend;
+    private TextView wallet;                    // P12: ∑ session cost + tokens
     private EditText input;
     private LinearLayout permSlot;
     // P9: hero empty state + in-place view cache for smooth streaming
@@ -160,6 +165,7 @@ public class ChatActivity extends Activity
         btnSend = findViewById(R.id.btnSend);
         input = findViewById(R.id.input);
         permSlot = findViewById(R.id.permSlot);
+        wallet = findViewById(R.id.wallet);
 
         // P8: project context from the deck (name shown in the subtitle;
         // path is a safety net — switch sandbox if Home somehow didn't,
@@ -854,12 +860,14 @@ public class ChatActivity extends Activity
         flakeRetried = false;
         runHadOutput = false;
         lastUserText = null;
+        synchronized (spend) { spend.clear(); }   // P12: wallet resets per session
         ui.post(() -> {
             synchronized (lock) {
                 rows.clear(); idxByKey.clear(); typeCount.clear(); msgs.clear();
                 viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
             }
             list.removeAllViews();
+            refreshWallet();
             pinnedBottom = true;
             syncEmpty();
         });
@@ -889,6 +897,16 @@ public class ChatActivity extends Activity
                 if (!r.ok()) { sys("history unavailable · HTTP " + r.status); return; }
                 List<Object> arr = Json.arr(Json.parse(r.body));
                 if (arr == null) return;
+                // P12: the wallet sums the WHOLE session (every message's
+                // tokens/cost), while only the last 80 messages render.
+                for (Object o : arr) {
+                    Map<String, Object> item = Json.obj(o);
+                    if (item == null) continue;
+                    Map<String, Object> info = Json.map(item, "info");
+                    if (info == null) info = item;
+                    if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
+                    applyMessageInfo(info);
+                }
                 int from = Math.max(0, arr.size() - 80);
                 for (int i = from; i < arr.size(); i++) {
                     Map<String, Object> item = Json.obj(arr.get(i));
@@ -897,7 +915,6 @@ public class ChatActivity extends Activity
                     if (info == null) info = item;
                     if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
                     String role = Json.str(info, "role");
-                    applyMessageInfo(info);
                     List<Object> parts = Json.list(item, "parts");
                     if (parts == null) parts = Json.list(info, "parts");
                     if (parts != null) for (Object p : parts) {
@@ -905,6 +922,7 @@ public class ChatActivity extends Activity
                         if (pm != null) applyPart(pm, role);
                     }
                 }
+                ui.post(this::refreshWallet);
             } catch (Exception e) {
                 sys("history failed: " + e);
             }
@@ -1177,6 +1195,11 @@ public class ChatActivity extends Activity
         }
         Object costO = info.get("cost");
         double cost = (costO instanceof Number) ? ((Number) costO).doubleValue() : 0;
+        // P12 wallet: record per-message spend, recompute the header readout.
+        if (total > 0 || cost > 0) {
+            synchronized (spend) { spend.put(mid, new double[]{cost, total}); }
+            ui.post(this::refreshWallet);
+        }
         String meta = null;
         if (total > 0 || cost > 0) {
             StringBuilder b = new StringBuilder("⇅ ");
@@ -1224,6 +1247,26 @@ public class ChatActivity extends Activity
                 setBusy(false);
             }
         });
+    }
+
+    /** P12: header wallet — total money + tokens this session has burned.
+     *  Free models show token volume only (cost 0 is honest there). */
+    private void refreshWallet() {
+        if (wallet == null) return;
+        double cost = 0, tok = 0;
+        synchronized (spend) {
+            for (double[] v : spend.values()) { cost += v[0]; tok += v[1]; }
+        }
+        if (cost <= 0 && tok <= 0) { wallet.setVisibility(View.GONE); return; }
+        String c = cost > 0
+                ? (cost >= 1 ? String.format(Locale.US, "$%.2f", cost)
+                             : String.format(Locale.US, "$%.4f", cost))
+                : null;
+        String t = tok >= 1000
+                ? String.format(Locale.US, "%.1fk tok", tok / 1000.0)
+                : String.format(Locale.US, "%.0f tok", tok);
+        wallet.setText((c == null ? t : c + " · " + t));
+        wallet.setVisibility(View.VISIBLE);
     }
 
     private void sys(String s) {
@@ -1385,12 +1428,13 @@ public class ChatActivity extends Activity
     private View buildRowView(Row r) {
         switch (r.kind) {
             case K_USER: {
+                // P12: smaller + grounded — flat graphite block, tighter pad.
                 LinearLayout wrap = new LinearLayout(this);
                 wrap.setOrientation(LinearLayout.HORIZONTAL);
-                TextView tv = text(15, R.color.user_text, false);
+                TextView tv = text(14, R.color.user_text, false);
                 tv.setBackgroundResource(R.drawable.bg_bubble_user);
-                int p = dp(13);
-                tv.setPadding(p, dp(9), p, dp(9));
+                int p = dp(11);
+                tv.setPadding(p, dp(7), p, dp(7));
                 tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.78));
                 tv.setText(r.text.toString());
                 tv.setTextIsSelectable(true);
@@ -1409,11 +1453,12 @@ public class ChatActivity extends Activity
                 return wrap;
             }
             case K_ASSISTANT: {
+                // P12: 14sp body, tighter vertical rhythm.
                 LinearLayout box = new LinearLayout(this);
                 box.setOrientation(LinearLayout.VERTICAL);
-                box.setPadding(dp(2), dp(8), 0, dp(2));
+                box.setPadding(dp(2), dp(5), 0, dp(2));
                 boolean streaming = r.shown < r.text.length();
-                TextView body = text(15, R.color.text_primary, false);
+                TextView body = text(14, R.color.text_primary, false);
                 body.setTextIsSelectable(true);
                 body.setLineSpacing(dp(1), 1f);
                 if (streaming) {
@@ -1433,9 +1478,9 @@ public class ChatActivity extends Activity
                 }
                 box.addView(body);
                 if (r.meta != null && !r.meta.isEmpty()) {
-                    TextView meta = text(11, R.color.text_secondary, false);
+                    TextView meta = text(10, R.color.text_secondary, false);
                     meta.setText(r.meta);
-                    meta.setPadding(0, dp(3), 0, dp(6));
+                    meta.setPadding(0, dp(2), 0, dp(4));
                     box.addView(meta);
                 }
                 String key = r.key == null ? "" : r.key;
@@ -1452,8 +1497,8 @@ public class ChatActivity extends Activity
                 LinearLayout c = new LinearLayout(this);
                 c.setOrientation(LinearLayout.VERTICAL);
                 c.setBackgroundResource(R.drawable.bg_thought_card);
-                int cp = dp(13);
-                c.setPadding(cp, dp(10), cp, dp(12));
+                int cp = dp(11);
+                c.setPadding(cp, dp(8), cp, dp(9));
 
                 LinearLayout head = new LinearLayout(this);
                 head.setOrientation(LinearLayout.HORIZONTAL);
@@ -1499,7 +1544,7 @@ public class ChatActivity extends Activity
                 c.setOrientation(LinearLayout.VERTICAL);
                 c.setBackgroundResource(failed
                         ? R.drawable.bg_err_card : R.drawable.bg_tool_card);
-                int cp = dp(11);
+                int cp = dp(9);
                 c.setPadding(cp, cp, cp, cp);
 
                 LinearLayout head = new LinearLayout(this);
@@ -1507,11 +1552,14 @@ public class ChatActivity extends Activity
                 head.setGravity(Gravity.CENTER_VERTICAL);
 
                 TextView disc = text(12, R.color.on_accent, true);
-                disc.setTextColor(0xFFFFFFFF);   // literal — not a resource id
+                // P12: bash gets the ink disc → black glyph; all other
+                // discs are dark graphite → white glyph.
+                disc.setTextColor("bash".equals(r.tool) && !failed
+                        ? 0xFF111111 : 0xFFFFFFFF);
                 disc.setText(toolGlyph(r.tool));
                 disc.setGravity(Gravity.CENTER);
                 disc.setBackground(Theme.circle(toolTint(r.tool, failed)));
-                int ds = dp(28);
+                int ds = dp(25);
                 LinearLayout.LayoutParams dlp2 = new LinearLayout.LayoutParams(ds, ds);
                 dlp2.rightMargin = dp(10);
                 disc.setLayoutParams(dlp2);
@@ -1594,8 +1642,8 @@ public class ChatActivity extends Activity
                 return c;
             }
             default: {
-                // K_SYS — centered dim pill
-                TextView tv = text(11, R.color.text_secondary, false);
+                // K_SYS — centered dim pill (P12: 10sp)
+                TextView tv = text(10, R.color.text_secondary, false);
                 tv.setText(r.text.toString());
                 tv.setGravity(Gravity.CENTER_HORIZONTAL);
                 tv.setBackgroundResource(R.drawable.bg_sys_pill);
@@ -1658,23 +1706,25 @@ public class ChatActivity extends Activity
         }
     }
 
-    /** P10: icon-disc tint per tool — instant "what ran" recognition. */
+    /** P10 icon-disc tint, P12 MONOCHROME: a graphite ladder — heavier
+     *  tools sit darker, the glyph + label carry the recognition now.
+     *  Failed keeps the app's one functional hue (desaturated red). */
     private static int toolTint(String tool, boolean failed) {
-        if (failed) return 0xFFB34848;
-        if (tool == null) return 0xFF5A6478;
+        if (failed) return 0xFF4A2626;
+        if (tool == null) return 0xFF3A3A3A;
         switch (tool) {
-            case "bash": return 0xFF5B6CFF;          // indigo
-            case "read": return 0xFF0EA5E9;          // sky
-            case "list": return 0xFF38BDF8;          // light sky
+            case "bash": return 0xFFE8E8E8;          // shell = ink disc
+            case "read": return 0xFF505050;
+            case "list": return 0xFF454545;
             case "write":
-            case "edit": return 0xFF10B981;          // emerald
-            case "patch": return 0xFF8B5CF6;         // violet
+            case "edit": return 0xFF3A3A3A;
+            case "patch": return 0xFF333333;
             case "glob":
-            case "grep": return 0xFFF59E0B;          // amber
-            case "webfetch": return 0xFF22D3EE;      // cyan
-            case "todowrite": return 0xFFEC4899;     // pink
-            case "task": return 0xFF6366F1;          // indigo 2
-            default: return 0xFF5A6478;
+            case "grep": return 0xFF2E2E2E;
+            case "webfetch": return 0xFF2A2A2A;
+            case "todowrite": return 0xFF505050;
+            case "task": return 0xFF3D3D3D;
+            default: return 0xFF3A3A3A;
         }
     }
 
@@ -1991,12 +2041,15 @@ public class ChatActivity extends Activity
                 int pad = dp(14);
                 box.setPadding(pad, dp(9), pad, dp(9));
                 Object[] it = items.get(i);
-                TextView t1 = text(14, i == 0 ? R.color.accent_light : R.color.text_primary, i == 0);
-                t1.setText(String.valueOf(it[0]));
+                boolean cur = it[2] instanceof SessRow
+                        && ((SessRow) it[2]).id.equals(sessionId);   // P12
+                TextView t1 = text(14, i == 0 ? R.color.accent_light
+                        : cur ? R.color.ok : R.color.text_primary, i == 0 || cur);
+                t1.setText((cur ? "●  " : "") + String.valueOf(it[0]));
                 t1.setSingleLine(true);
                 t1.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-                TextView t2 = text(11, R.color.text_secondary, false);
-                t2.setText(String.valueOf(it[1]));
+                TextView t2 = text(11, cur ? R.color.text_primary : R.color.text_secondary, false);
+                t2.setText((cur ? "this chat  ·  " : "") + String.valueOf(it[1]));
                 box.addView(t1);
                 box.addView(t2);
                 return box;
@@ -2083,6 +2136,11 @@ public class ChatActivity extends Activity
             String q = search.getText().toString().toLowerCase(Locale.US).trim();
             items.clear();
             String[] cur = Models.selected(this);
+            // P12: within a provider, live (server-offered) models first.
+            java.util.Comparator<Models.Mdl> liveFirst = (a, b2) -> {
+                if (a.live != b2.live) return a.live ? -1 : 1;
+                return a.name.compareToIgnoreCase(b2.name);
+            };
             for (Models.Prov pr : provs) {
                 boolean provHit = q.isEmpty()
                         || pr.id.toLowerCase(Locale.US).contains(q)
@@ -2094,6 +2152,7 @@ public class ChatActivity extends Activity
                             || m.name.toLowerCase(Locale.US).contains(q)) shown.add(m);
                 }
                 if (shown.isEmpty() && !provHit) continue;
+                shown.sort(liveFirst);
                 items.add(new Object[]{"h", pr, null});
                 int cap = Math.min(shown.size(), 400);
                 for (int i = 0; i < cap; i++) items.add(new Object[]{"m", pr, shown.get(i)});
@@ -2112,12 +2171,12 @@ public class ChatActivity extends Activity
                     box.setPadding(pad, dp(8), pad, dp(8));
                     if ("h".equals(it[0])) {
                         Models.Prov pr = (Models.Prov) it[1];
-                        TextView t = text(12, pr.configured ? R.color.ok : R.color.accent_light, true);
+                        TextView t = text(12, pr.usable ? R.color.ok : R.color.accent_light, true);
                         String mark;
-                        if ("opencode".equals(pr.id))
-                            mark = "  free · no key needed";   // P11 verified live
-                        else if (pr.configured) mark = "  ✓ ready";
-                        else mark = pr.usable ? "  (no key)" : "  (add API key)";
+                        if (pr.usable && "opencode".equals(pr.id))
+                            mark = "  ·  free · no key needed";   // P11 verified live
+                        else if (pr.usable) mark = "  ·  ready";
+                        else mark = "  ·  discovery — add API key first";
                         t.setText(pr.name + mark);
                         box.addView(t);
                     } else if ("m".equals(it[0])) {
@@ -2125,8 +2184,15 @@ public class ChatActivity extends Activity
                         Models.Prov pr = (Models.Prov) it[1];
                         boolean isCur = cur != null && cur[0].equals(pr.id)
                                 && cur[1].equals(m.id);
-                        TextView t1 = text(14, isCur ? R.color.ok : R.color.text_primary, isCur);
-                        t1.setText((isCur ? "✓ " : "") + m.name);
+                        // P12: live = the running server serves it right now.
+                        // Discovery (models.dev) entries render dim + tagged
+                        // and refuse selection — they were the source of the
+                        // endless "Model not found" loop.
+                        int col = isCur ? R.color.ok
+                                : m.live ? R.color.text_primary : R.color.text_secondary;
+                        TextView t1 = text(14, col, isCur || m.live);
+                        t1.setText((isCur ? "✓ " : "") + m.name
+                                + (m.live ? "" : "   ·  catalog"));
                         t1.setSingleLine(true);
                         t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
                         TextView t2 = text(11, R.color.text_secondary, false);
@@ -2155,6 +2221,17 @@ public class ChatActivity extends Activity
             if (!"m".equals(it[0])) return;
             Models.Prov pr = (Models.Prov) it[1];
             Models.Mdl m = (Models.Mdl) it[2];
+            // P12: discovery-catalog entries are NOT selectable — the server
+            // would answer "Model not found". Say why instead of failing.
+            if (!m.live) {
+                Toast.makeText(this, pr.usable
+                        ? m.name + " is in the discovery catalog but not offered by "
+                          + "your server right now (free list rotates) — pick a "
+                          + "non-tagged model"
+                        : "no key for " + pr.name + " yet — ⌘ → API keys first",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
             Models.save(this, pr.id, m.id);
             // P11: chat picks are PER-CHAT only — writing them into
             // opencode.json made every future session (and every fallback

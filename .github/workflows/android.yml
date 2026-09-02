@@ -1,0 +1,64 @@
+name: android
+
+# Builds the APK on every push (so the on-device agent can ship versions
+# from a phone) and publishes a release when a vX.Y.Z tag is pushed.
+# NOTE: CI-signed APKs use GitHub's ephemeral debug keystore — for
+# update-in-place installs use the maintainer-signed release APKs; CI
+# artifacts are for verification and testing.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Android SDK pieces
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null
+
+      # The APK embeds the opencode binary as assets/oc_pkg.bin (gitignored,
+      # added at package time). CI fetches the pinned public release asset.
+      - name: Fetch embedded opencode binary
+        run: |
+          mkdir -p app/src/main/assets
+          curl -fL --retry 3 -o app/src/main/assets/oc_pkg.bin \
+            https://github.com/turanmertkaraca-bit/opencode-android/releases/download/v0.11.0/opencode-linux-arm64-android.tar.gz
+          ls -la app/src/main/assets/oc_pkg.bin
+
+      - name: JVM tests
+        run: gradle -p . testDebugUnitTest --continue
+
+      - name: Assemble debug APK
+        run: gradle -p . assembleDebug
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencode-android-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: app/build/outputs/apk/debug/app-debug.apk

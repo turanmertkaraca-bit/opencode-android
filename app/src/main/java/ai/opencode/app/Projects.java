@@ -5,6 +5,7 @@ import android.content.Context;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -144,6 +145,71 @@ public final class Projects {
         P p = add(c, base);
         p.opened = 0; // not opened yet — just the welcome card
         save(c, list(c));
+    }
+
+    // ---- P12: self-hosted development repo ------------------------------
+
+    /**
+     * Seed the "opencode-android" project: the app's own source tree
+     * (asset repo-src.tar.gz, built at package time — no .git, no
+     * secrets) so the on-device agent can ANALYZE and later PATCH its
+     * own app, then push through GitHub (Settings → GitHub token).
+     *
+     * Idempotent: a card whose path already exists short-circuits; the
+     * extraction itself leaves .oc-repo-seed so a deleted card won't
+     * re-copy over a folder the user (or agent) has been working in.
+     * Runs on the Home screen first paint — extraction of ~1 MB is
+     * fast, but it still happens on a background thread.
+     */
+    public static void seedRepo(Context c) {
+        List<P> ps = list(c);
+        File baseDir = repoBase(c);
+        File dst = new File(baseDir, "opencode-android");
+        for (P p : ps) {
+            if (p.path != null && p.path.equals(dst.getAbsolutePath())) return;
+        }
+        File marker = new File(dst, ".oc-repo-seed");
+        if (!marker.isFile()) {
+            File gitDir = new File(dst, ".git");
+            boolean fresh = !dst.exists() || (dst.list() != null && dst.list().length == 0);
+            if (!fresh && gitDir.isDirectory()) return;   // agent already gitified it
+            try {
+                if (!dst.exists()) dst.mkdirs();
+                InputStream in = c.getAssets().open("repo-src.tar.gz");
+                try {
+                    TarGz.extractAll(in, dst, true,
+                            msg -> { if (msg != null) android.util.Log.i("oc-seed", msg); });
+                } finally {
+                    try { in.close(); } catch (Exception ignored) {}
+                }
+                writeMarker(marker);
+            } catch (Exception e) {
+                android.util.Log.w("oc-seed", "repo seed failed: " + e);
+                return;
+            }
+        }
+        P p = add(c, dst.getAbsolutePath());
+        p.opened = 0;   // card visible, not auto-opened
+        save(c, list(c));
+    }
+
+    /** Same base folder seed() uses: shared storage when writable. */
+    public static File repoBase(Context c) {
+        try {
+            File ext = android.os.Environment.getExternalStorageDirectory();
+            if (ext != null && ext.canWrite()) {
+                File d = new File(ext, "opencode-projects");
+                if (!d.exists()) d.mkdirs();
+                if (d.isDirectory()) return d;
+            }
+        } catch (Exception ignored) {}
+        return c.getFilesDir();
+    }
+
+    private static void writeMarker(File f) {
+        try (FileOutputStream o = new FileOutputStream(f)) {
+            o.write("opencode-android seed\n".getBytes(StandardCharsets.UTF_8));
+        } catch (Exception ignored) {}
     }
 
     // ---- tiny io -------------------------------------------------------

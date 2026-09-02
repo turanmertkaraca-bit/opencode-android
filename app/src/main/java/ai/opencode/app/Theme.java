@@ -16,10 +16,10 @@ import android.view.animation.OvershootInterpolator;
 import android.widget.TextView;
 
 /**
- * P8 design system — "midnight deck".
+ * P8 design system — P12 "graphite" edition (MONOCHROME).
  *
- * One place for the visual language: palette constants, gradient card
- * backgrounds (the credit-card look), press feedback, entrance/pulse/pop
+ * One place for the visual language: a grayscale ladder instead of the old
+ * rainbow accents, hairline rims, press feedback, entrance/pulse/pop
  * animations, and a global motion switch (Settings → Interface; also
  * auto-off when the system "remove animations" accessibility setting is
  * active). Everything is framework-only — no libraries, same as the rest
@@ -30,26 +30,29 @@ public final class Theme {
     private Theme() {}
 
     // ---- palette (mirrors colors.xml; kept here for programmatic draws) --
-    public static final int BG        = 0xFF0A0C12;
-    public static final int SURFACE   = 0xFF12151E;
-    public static final int SURFACE2  = 0xFF1A1F2C;
-    public static final int STROKE    = 0xFF262B38;
-    public static final int ACCENT    = 0xFF5B6CFF;
-    public static final int ACCENT_LT = 0xFFA5B4FF;
-    public static final int TXT       = 0xFFECEFF7;
-    public static final int TXT_DIM   = 0xFF8B93A8;
-    public static final int OK        = 0xFF7EE0A3;
-    public static final int ERR       = 0xFFFF8A8A;
-    public static final int WARN      = 0xFFFFD166;
+    // P12 monochrome: luminance carries meaning, hue is gone (except ERR).
+    public static final int BG        = 0xFF0A0A0A;
+    public static final int SURFACE   = 0xFF151515;
+    public static final int SURFACE2  = 0xFF1D1D1D;
+    public static final int STROKE    = 0xFF2A2A2A;
+    public static final int ACCENT    = 0xFFE8E8E8;
+    public static final int ACCENT_LT = 0xFFFFFFFF;
+    public static final int TXT       = 0xFFF2F2F2;
+    public static final int TXT_DIM   = 0xFF8F8F8F;
+    public static final int OK        = 0xFFD9D9D9;
+    public static final int ERR       = 0xFFE07A7A;
+    public static final int WARN      = 0xFFA6A6A6;
 
-    /** Project-card gradient pairs — one per accent slot (rotates). */
+    /** Project-card gradient pairs — P12: graphite ladder, one shade slot
+     *  per card (rotates). Depth without color; the white shine + rim keep
+     *  the credit-card read. */
     public static final int[][] CARD_GRADS = {
-            {0xFF5B6CFF, 0xFF8B5CF6},   // indigo → violet
-            {0xFF0EA5E9, 0xFF22D3EE},   // sky → cyan
-            {0xFFF43F5E, 0xFFFB923C},   // rose → orange
-            {0xFF10B981, 0xFF14B8A6},   // emerald → teal
-            {0xFF6366F1, 0xFFEC4899},   // indigo → pink
-            {0xFFF59E0B, 0xFFEF4444},   // amber → red
+            {0xFF3A3A3A, 0xFF161616},   // graphite
+            {0xFF2E2E2E, 0xFF121212},   // slate
+            {0xFF454545, 0xFF1A1A1A},   // ash
+            {0xFF262626, 0xFF0F0F0F},   // charcoal
+            {0xFF505050, 0xFF202020},   // smoke
+            {0xFF333333, 0xFF141414},   // iron
     };
 
     // ---- motion ------------------------------------------------------
@@ -159,9 +162,9 @@ public final class Theme {
     /** Ghost "new project" card: dashed-feel rim on translucent fill. */
     public static GradientDrawable ghostCard(Context c) {
         GradientDrawable d = new GradientDrawable();
-        d.setColor(0x14A5B4FF);
+        d.setColor(0x14FFFFFF);
         d.setCornerRadius(dp(c, 26));
-        d.setStroke(dp(c, 2), 0x55A5B4FF);
+        d.setStroke(dp(c, 2), 0x55FFFFFF);
         return d;
     }
 

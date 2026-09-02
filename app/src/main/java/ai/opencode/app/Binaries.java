@@ -181,6 +181,15 @@ public final class Binaries {
         java.util.Map<String, String> e = pb.environment();
         e.put("HOME", home);
         e.put("TMPDIR", c.getCacheDir().getAbsolutePath());
+        // P12: GitHub access for the on-device agent — GITHUB_TOKEN for
+        // api/gh-style calls, plus .git-credentials + .gitconfig under
+        // $HOME so `git push` works with zero interactive setup.
+        Github.ensureFiles(c);
+        String gh = Github.token(c);
+        if (gh != null && gh.length() >= 20) {
+            e.put("GITHUB_TOKEN", gh);
+            e.put("GH_TOKEN", gh);
+        }
         // P7 native shims (no proot): bin/ (user + busybox) → P9 wrappers/ (alpine)
         // → shims/ (bash/git/pkg fallbacks) → system.
         Shims.ensure(c);

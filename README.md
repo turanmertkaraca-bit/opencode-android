@@ -7,18 +7,30 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.11.0 — model self-heal, verified live against the real server)
+## Install (v0.12.0 — monochrome + wallet + the agent gets the key to GitHub)
 
-1. Grab `opencode-p11-v0.11.0-debug.apk` from the
-   [v0.11.0 release](https://github.com/turanmertkaraca-bit/opencode-android/releases/tag/v0.11.0).
-2. Sideload it (allow "install unknown apps" for your browser/file manager).
-   Same signing key as every previous release → it installs as an UPDATE,
-   keeping your sessions, keys, projects and sandbox tools.
-3. Open OpenCode → pick a free zen model from ⌘ → Model (they run with NO
-   API key) → chat. Stale model picks now self-heal instead of failing
-   with "Model not found".
+1. Grab `opencode-p12-v0.12.0-debug.apk` from the
+   [v0.12.0 release](https://github.com/turanmertkaraca-bit/opencode-android/releases/tag/v0.12.0).
+2. Sideload it (allow "install unknown apps"). Same signing key as every
+   previous release → installs as an UPDATE, keeping sessions, keys,
+   projects and sandbox tools.
+3. New in P12:
+   - **Model picker fixed for real** — every model now carries a live
+     flag; server-offered models sort first and are selectable, while
+     models.dev discovery entries are dimmed (`· catalog`) and refuse
+     selection with an explanation instead of dying "Model not found".
+   - **Session wallet** — the header shows what the session spent
+     (∑ dollars + tokens over the whole history, live while streaming).
+   - **Agent GitHub** — Settings → GitHub: paste a PAT once; the agent
+     gets `GITHUB_TOKEN` + working `git push` in its sandbox, and a new
+     **opencode-android** project card is auto-seeded with this repo's
+     own source + `AGENTS.md` + `ai/bootstrap.sh`. Ask it to analyze the
+     repo — or patch and push new versions from the phone.
+   - **Graphite monochrome theme** app-wide + a smaller, grounded chat.
+   - **CI**: every push builds + tests via GitHub Actions; tags produce
+     draft releases (so the on-device agent can ship).
 
-## What's in v0.11.0 (P11 — bug reproduced live, fix verified live)
+## What was in v0.11.0 (P11 — bug reproduced live, fix verified live)
 
 - **"Couldn't find that model" — fixed, root-caused.** The server's
   free-model catalog ROTATES (gpt-5-nano & friends are gone; today it is

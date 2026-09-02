@@ -2,6 +2,7 @@ package ai.opencode.app;
 
 import android.animation.ObjectAnimator;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
@@ -133,6 +134,20 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 "▦", v -> startActivity(new Intent(this, HomeActivity.class))));
         root.addView(pr);
 
+        // ---- github (P12: the agent's hands — clone, patch, push, release)
+        root.addView(Theme.sectionLabel(this, "github"));
+        LinearLayout gh = section();
+        gh.addView(rowLink("GitHub token",
+                Github.hasToken(this)
+                        ? "set · agent can clone + push (GITHUB_TOKEN)"
+                        : "not set — the agent can't push yet",
+                "⑂", v -> githubTokenDialog()));
+        gh.addView(divider());
+        gh.addView(rowLink("App source project",
+                "opencode-android seeded · ask the agent to analyze it",
+                "▤", v -> startActivity(new Intent(this, HomeActivity.class))));
+        root.addView(gh);
+
         // ---- interface
         root.addView(Theme.sectionLabel(this, "interface"));
         LinearLayout it = section();
@@ -143,7 +158,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.11.0-p11 · model self-heal + doctor fix", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.12.0-p12 · monochrome · wallet · live-only models · agent github", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -221,6 +236,72 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         });
         heroCard.addView(restart);
         return heroCard;
+    }
+
+    // ------------------------------------------------------------ github
+
+    /** P12: paste a GitHub PAT; it goes to the sandbox as GITHUB_TOKEN and
+     *  $HOME/.git-credentials so the agent can clone + push. Never shown
+     *  again after saving (status only); Clear wipes the stored token and
+     *  the credential file. */
+    private void githubTokenDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int p = Theme.dp(this, 22);
+        box.setPadding(p, Theme.dp(this, 10), p, 0);
+
+        TextView hint = new TextView(this);
+        hint.setText("Paste a GitHub personal access token (classic, repo scope).\n"
+                + "The agent gets it as GITHUB_TOKEN and can clone, patch and "
+                + "push your repos from the sandbox. Stored on-device only.");
+        hint.setTextSize(12);
+        hint.setTextColor(Theme.TXT_DIM);
+        hint.setLineSpacing(Theme.dp(this, 2), 1f);
+        box.addView(hint);
+
+        EditText input = new EditText(this);
+        input.setHint("ghp_… / github_pat_…");
+        input.setTextSize(13);
+        input.setTypeface(Typeface.MONOSPACE);
+        input.setTextColor(Theme.TXT);
+        input.setSingleLine(false);
+        input.setMaxLines(3);
+        box.addView(input);
+
+        if (Github.hasToken(this)) {
+            TextView cur = new TextView(this);
+            String t = Github.token(this);
+            String tail = t.length() > 6 ? t.substring(t.length() - 4) : "····";
+            cur.setText("a token is already set (…" + tail + ") — saving replaces it");
+            cur.setTextSize(11);
+            cur.setTextColor(Theme.WARN);
+            cur.setPadding(0, Theme.dp(this, 6), 0, 0);
+            box.addView(cur);
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("GitHub token")
+                .setView(box)
+                .setPositiveButton("Save", (d, w) -> {
+                    String v = input.getText().toString().trim();
+                    if (v.isEmpty()) return;
+                    if (v.length() < 20) {
+                        Toast.makeText(this, "that doesn't look like a token",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    Github.setToken(this, v);
+                    Toast.makeText(this, "saved — the agent can push now",
+                            Toast.LENGTH_LONG).show();
+                    recreate();   // refresh the status row
+                })
+                .setNeutralButton("Clear", (d, w) -> {
+                    Github.clearToken(this);
+                    Toast.makeText(this, "token cleared", Toast.LENGTH_SHORT).show();
+                    recreate();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     // ------------------------------------------------------------ sandbox
@@ -315,6 +396,11 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             String q = search.getText().toString().toLowerCase(Locale.US).trim();
             items.clear();
             String[] cur = Models.selected(this);
+            // P12: live (server-offered) models first, discovery dimmed.
+            java.util.Comparator<Models.Mdl> liveFirst = (a, b2) -> {
+                if (a.live != b2.live) return a.live ? -1 : 1;
+                return a.name.compareToIgnoreCase(b2.name);
+            };
             for (Models.Prov pr : provs) {
                 boolean provHit = q.isEmpty()
                         || pr.id.toLowerCase(Locale.US).contains(q)
@@ -326,6 +412,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                             || m.name.toLowerCase(Locale.US).contains(q)) shown.add(m);
                 }
                 if (shown.isEmpty() && !provHit) continue;
+                shown.sort(liveFirst);
                 items.add(new Object[]{"h", pr, null});
                 int cap = Math.min(shown.size(), 300);
                 for (int i = 0; i < cap; i++) items.add(new Object[]{"m", pr, shown.get(i)});
@@ -344,17 +431,24 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                     row.setPadding(pd, dp(8), pd, dp(8));
                     if ("h".equals(it[0])) {
                         Models.Prov pr = (Models.Prov) it[1];
-                        TextView t = text(12, pr.configured ? Theme.OK : Theme.ACCENT_LT, true);
-                        t.setText(pr.name + (pr.configured ? "  ✓ ready"
-                                : pr.usable ? "  (no key)" : "  (add API key)"));
+                        TextView t = text(12, pr.usable ? Theme.OK : Theme.ACCENT_LT, true);
+                        String mark;
+                        if (pr.usable && "opencode".equals(pr.id))
+                            mark = "  ·  free · no key needed";
+                        else if (pr.usable) mark = "  ·  ready";
+                        else mark = "  ·  discovery — add API key first";
+                        t.setText(pr.name + mark);
                         row.addView(t);
                     } else if ("m".equals(it[0])) {
                         Models.Mdl m = (Models.Mdl) it[2];
                         Models.Prov pr = (Models.Prov) it[1];
                         boolean isCur = cur != null && cur[0].equals(pr.id)
                                 && cur[1].equals(m.id);
-                        TextView t1 = text(14, isCur ? Theme.OK : Theme.TXT, isCur);
-                        t1.setText((isCur ? "✓ " : "") + m.name);
+                        int col = isCur ? Theme.OK
+                                : m.live ? Theme.TXT : Theme.TXT_DIM;
+                        TextView t1 = text(14, col, isCur || m.live);
+                        t1.setText((isCur ? "✓ " : "") + m.name
+                                + (m.live ? "" : "   ·  catalog"));
                         t1.setSingleLine(true);
                         t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
                         TextView t2 = text(11, Theme.TXT_DIM, false);
@@ -383,6 +477,15 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             if (!"m".equals(it[0])) return;
             Models.Prov pr = (Models.Prov) it[1];
             Models.Mdl m = (Models.Mdl) it[2];
+            // P12: never write a non-live model as the SERVER-WIDE default —
+            // that poisoned every future session in the P10/P11 bug reports.
+            if (!m.live) {
+                Toast.makeText(this, pr.usable
+                        ? m.name + " is discovery-catalog only — your server does not offer it right now"
+                        : "no key for " + pr.name + " — API keys first",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
             Models.save(this, pr.id, m.id);
             try { AuthStore.setDefaultModel(this, pr.id, m.id); } catch (Exception ignored) {}
             dlg.dismiss();

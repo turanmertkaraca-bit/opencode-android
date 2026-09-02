@@ -48,6 +48,12 @@ public final class Models {
 
     public static final class Mdl {
         public String id, name, desc;
+        /** P12: true when the RUNNING SERVER listed this model in
+         *  /config/providers — i.e. picking it actually works. models.dev
+         *  entries are discovery-only (the old picker let you select them,
+         *  the server answered "Model not found", and the picker looked
+         *  broken — the exact recurring complaint). */
+        public boolean live;
     }
 
     /** Last successful fetch — the picker reuses it for instant re-opens. */
@@ -122,10 +128,11 @@ public final class Models {
         return lastFetch;
     }
 
-    /** Configured providers first, then alphabetical by name. */
+    /** Configured/usable providers first, then alphabetical by name. */
     private static List<Prov> order(Map<String, Prov> byId) {
         List<Prov> out = new ArrayList<>(byId.values());
         out.sort((a, b) -> {
+            if (a.usable != b.usable) return a.usable ? -1 : 1;   // P12: live first
             if (a.configured != b.configured) return a.configured ? -1 : 1;
             return a.name.toLowerCase(Locale.US)
                     .compareTo(b.name.toLowerCase(Locale.US));
@@ -161,16 +168,16 @@ public final class Models {
                 if (Json.str(mm, "id") == null) mm.put("id", e.getKey());
                 String mid = Json.str(mm, "id");
                 if (mid == null || have.contains(mid)) continue;
-                addModel(prov, mm);
+                addModel(prov, mm, fromServer);
                 have.add(mid);
             }
         } else {
             List<Object> ml = Json.arr(models);
-            if (ml != null) for (Object mo : ml) addModel(prov, Json.obj(mo));
+            if (ml != null) for (Object mo : ml) addModel(prov, Json.obj(mo), fromServer);
         }
     }
 
-    private static void addModel(Prov prov, Map<String, Object> mm) {
+    private static void addModel(Prov prov, Map<String, Object> mm, boolean live) {
         if (mm == null) return;
         String mid = Json.str(mm, "id");
         if (mid == null || mid.isEmpty()) return;
@@ -180,6 +187,7 @@ public final class Models {
         mdl.name = (mn == null || mn.isEmpty()) ? mid : mn;
         String d = Json.str(mm, "description");
         mdl.desc = (d == null || d.isEmpty()) ? null : d;
+        mdl.live = live;
         prov.models.add(mdl);
     }
 
@@ -227,12 +235,15 @@ public final class Models {
         }
     }
 
-    /** True when (provider, id) exists in the fetched provider list. */
+    /** True when (provider, id) exists AND was listed by the running
+     *  server (live). P12: models.dev discovery entries no longer pass —
+     *  picking one used to guarantee "Model not found" at run time. */
     public static boolean available(List<Prov> provs, String provider, String id) {
         if (provs == null || provider == null || id == null) return false;
         for (Prov p : provs) {
             if (!provider.equals(p.id)) continue;
-            for (Mdl m : p.models) if (id.equals(m.id)) return true;
+            for (Mdl m : p.models)
+                if (id.equals(m.id)) return m.live;
         }
         return false;
     }

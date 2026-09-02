@@ -76,6 +76,16 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         try { Projects.seed(this); } catch (Exception ignored) {}
         buildDeck();
         refreshStatus(ServerService.getState(), null);
+        // P12: seed the app's own source as a project card ("opencode-android")
+        // on a background thread — the on-device agent's workspace for
+        // analyzing / patching / pushing this very app. Deck refreshes on
+        // the UI thread once the extraction lands.
+        java.util.concurrent.ForkJoinPool.commonPool().submit(() -> {
+            try {
+                Projects.seedRepo(HomeActivity.this);
+                runOnUiThread(() -> { if (inited && !isFinishing()) buildDeck(); });
+            } catch (Exception ignored) {}
+        });
     }
 
     @Override

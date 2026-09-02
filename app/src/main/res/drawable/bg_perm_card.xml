@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- P10: agent-approval card — indigo tint + accent rim so it reads as
-     "the agent is waiting on YOU". -->
+<!-- P12 monochrome agent-approval card: near-black panel, bright white rim
+     so the ask reads as the most important thing on screen. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#241C2A52"/>
+    <solid android:color="#111111"/>
     <corners android:radius="16dp"/>
-    <stroke android:width="1dp" android:color="#705B6CFF"/>
+    <stroke android:width="2dp" android:color="#5A5A5A"/>
 </shape>
