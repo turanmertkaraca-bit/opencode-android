@@ -9,797 +9,624 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
+import android.text.TextWatcher;
 import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
-import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * P6 chat: full part-aware rendering, matching the opencode TUI behaviour.
+ * P7 — the whole app in one screen. Chat-first like the opencode TUI:
  *
- * Every message is a LIST OF PARTS and each part gets the right row:
- *   text      → markdown bubble (assistant) or right-aligned bubble (user)
- *   reasoning → "✦ Thinking" card, collapsed by default, tap to expand
- *   tool      → compact card "▸ bash · $ npm install ●" — collapsed by
- *               default, tap to expand input/output; diff lines in edit
- *               output are colored +green/−red
- *   patch     → tool-style card listing the touched files
- *   system/error rows stay monospace
+ *   ⌘ palette        = the TUI's Ctrl+P (sessions, model, agent, keys, …)
+ *   Build/Plan chip  = the TUI's Tab
+ *   ✦ Thinking cards = reasoning parts, COLLAPSED by default, tap to open
+ *   tool cards       = tool parts, COLLAPSED by default, live status dots,
+ *                      expand to input/output (+patch file lists)
+ *   permission card  = pinned above the composer, Allow once/Always/Deny
+ *   model chip       = EVERY provider/model from /config/providers, search
  *
- * Assistant bubbles carry a token/cost footer (info.tokens formula verified
- * in the binary: input+output+reasoning+cache.read+cache.write; info.cost).
- *
- * Carried from P2/P4/P5: SSE via ServerService, permission approval flow,
- * stop/abort, model picker (now grouped + searchable), copy on long-press,
- * per-session transcript cache, working-dots, empty state.
+ * No wizard, no setup cards, no gated screens. If the server is down the
+ * transcript keeps working and the status line says what is wrong; ⌘ →
+ * Restart server fixes it. Every render path is try/caught — a bad part
+ * must degrade to a plain line, never crash (the P6 device crash lesson).
  */
-public class ChatActivity extends Activity implements ServerService.Evt, ServerService.EventListener {
+public class ChatActivity extends Activity
+        implements ServerService.Evt, ServerService.EventListener {
 
-    // row kinds == view types
-    private static final int K_USER = 0, K_ASSISTANT = 1, K_REASON = 2,
-            K_TOOL = 3, K_SYSTEM = 4, K_SETUP = 5;
+    // row kinds
+    static final int K_USER = 0, K_ASSISTANT = 1, K_REASON = 2, K_TOOL = 3, K_SYS = 4, K_ERR = 5;
 
-    private static final class Row {
-        final String partId;
-        final int kind;
-        final StringBuilder text = new StringBuilder();   // user/assistant/reason/system
-        final StringBuilder input = new StringBuilder();  // tool
-        final StringBuilder output = new StringBuilder(); // tool
-        String tool = "", status = "", title = "";        // tool
-        String msgId = "";                                // assistant meta lookup
-        Row(String partId, int kind) { this.partId = partId; this.kind = kind; }
+    static final class Row {
+        int kind;
+        String key;                 // stable identity for SSE upserts
+        StringBuffer text = new StringBuffer();
+        String tool, status, title, meta;
+        StringBuffer input = new StringBuffer();
+        StringBuffer output = new StringBuffer();
+        boolean open;               // collapsed by default for tool/reason
+        long ts;
     }
 
-    /** Per-session transcript cache (process-lifetime, LRU capped). */
-    private static final class Transcript {
-        final List<Row> rows = new ArrayList<>();
-        final Map<String, Row> byPartId = new HashMap<>();
-        final Map<String, String> metaByMsg = new HashMap<>();
-        int sysCounter = 0;
-        boolean historyLoaded = false;
-        boolean setupRowShown = false;
+    static final class MsgInfo {
+        String role;
+        String meta;                // "⇅ 12.3k tok · $0.0041"
+        boolean errorShown;
     }
 
-    private static final int CACHE_MAX = 6;
-    private static final Map<String, Transcript> CACHE =
-            new java.util.LinkedHashMap<String, Transcript>(16, 0.75f, true) {
-                @Override protected boolean removeEldestEntry(Map.Entry<String, Transcript> e) {
-                    return size() > CACHE_MAX;
-                }
-            };
-
-    private Transcript tr;
-    private final Adapter adapter = new Adapter();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService ex = Executors.newSingleThreadExecutor();
-    private final HashSet<String> expanded = new HashSet<>();
+    private final List<Row> rows = new ArrayList<>();
+    private final Map<String, MsgInfo> msgs = new HashMap<>();
+    private final Map<String, Integer> idxByKey = new HashMap<>();
+    private final Map<String, Integer> typeCount = new HashMap<>();
 
-    private ListView list;
+    private LinearLayout list;
+    private ScrollView scroll;
+    private TextView tvTitle, tvSub, tvStatus, chipMode, chipModel, btnSend;
     private EditText input;
-    private TextView tvStatus;
-    private TextView tvModel;
-    private View viewEmpty;
+    private LinearLayout permSlot;
 
-    private volatile String sessionId;
-    private volatile boolean forceNew;
+    private String sessionId, sessionTitle;
+    private String agent = "build";     // Tab parity: build <-> plan
     private volatile boolean busy;
-    private int spinFrame;
-    private AlertDialog permDialog;
+    private volatile long lastPartTs;
+    private boolean pinnedBottom = true;
 
-    private final Runnable spin = new Runnable() {
+    private final Runnable watchdog = new Runnable() {
         @Override public void run() {
-            if (!busy || tvStatus == null) return;
-            String[] f = {"·", "··", "···"};
-            tvStatus.setText("agent ● working " + f[spinFrame++ % 3]);
-            ui.postDelayed(this, 450);
+            if (busy && System.currentTimeMillis() - lastPartTs > 3500) {
+                setBusy(false);
+            } else if (busy) {
+                ui.postDelayed(this, 1200);
+            }
         }
     };
+
+    // ---------------------------------------------------------- lifecycle
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         setContentView(R.layout.activity_chat);
-
         list = findViewById(R.id.list);
-        input = findViewById(R.id.input);
+        scroll = findViewById(R.id.scroll);
+        tvTitle = findViewById(R.id.tvTitle);
+        tvSub = findViewById(R.id.tvSub);
         tvStatus = findViewById(R.id.tvStatus);
-        tvModel = findViewById(R.id.tvModel);
-        viewEmpty = findViewById(R.id.tvEmptyChat);
+        chipMode = findViewById(R.id.chipMode);
+        chipModel = findViewById(R.id.chipModel);
+        btnSend = findViewById(R.id.btnSend);
+        input = findViewById(R.id.input);
+        permSlot = findViewById(R.id.permSlot);
 
-        // CRITICAL ORDERING (v0.2.1 lesson): bind the transcript BEFORE
-        // setAdapter — ListView calls getCount() synchronously.
-        String preset = getIntent().getStringExtra("session_id");
-        boolean hasPreset = preset != null && !preset.isEmpty();
-        synchronized (CACHE) {
-            tr = hasPreset ? CACHE.get(preset) : null;
-            if (tr == null) tr = new Transcript();
-        }
-        sessionId = hasPreset ? preset : null;
-
-        list.setAdapter(adapter);
-        list.setStackFromBottom(true);
-        list.setTranscriptMode(ListView.TRANSCRIPT_MODE_NORMAL);
-
-        findViewById(R.id.btnBack).setOnClickListener(v -> finish());
-        findViewById(R.id.btnNew).setOnClickListener(v -> {
-            sessionId = null;
-            forceNew = true;
-            tr = new Transcript();
-            adapter.notifyDataSetChanged();
-        });
-        View btnSend = findViewById(R.id.btnSend);
+        findViewById(R.id.btnPalette).setOnClickListener(v -> palette());
+        chipMode.setOnClickListener(v -> toggleMode());
+        chipModel.setOnClickListener(v -> modelSheet());
         btnSend.setOnClickListener(v -> { if (busy) abortRun(); else send(); });
+        scroll.getViewTreeObserver().addOnScrollChangedListener(() ->
+                pinnedBottom = atBottom());
 
-        View headerModel = findViewById(R.id.btnModel);
-        if (headerModel != null) headerModel.setOnClickListener(v -> showModelPicker());
+        refreshChips();
+        refreshServerUi();
+        renderAll();
+    }
 
-        list.setOnItemLongClickListener((p, v, pos, id) -> {
-            if (pos < 0 || pos >= tr.rows.size()) return false;
-            Row r = tr.rows.get(pos);
-            String txt;
-            if (r.kind == K_TOOL) {
-                txt = r.output.length() > 0 ? r.output.toString() : toolHeaderText(r);
-            } else {
-                txt = r.text.toString();
-            }
-            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            if (cm != null) {
-                cm.setPrimaryClip(ClipData.newPlainText("opencode", txt));
-                Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show();
-            }
-            return true;
-        });
-
+    @Override
+    protected void onResume() {
+        super.onResume();
         ServerService.subscribe(this);
         ServerService.subscribeEvents(this);
-        refreshStatus();
+        int st = ServerService.getState();
+        if (st == ServerService.ST_IDLE || st == ServerService.ST_STOPPED
+                || st == ServerService.ST_EXITED) {
+            if (Binaries.binaryReady(this)) {
+                try {
+                    startForegroundService(new Intent(this, ServerService.class));
+                } catch (Exception ignored) {}
+            }
+        }
+        if (sessionId != null && rows.isEmpty()) loadSession(sessionId);
         checkPermissionQueue();
-        if (!AuthStore.hasAnyKey(this)) addSetupRow(null);
-        if (hasPreset) loadHistoryIfEmpty();
-        else resolveInitialSession();
-    }
-
-    /** "Open chat" with no preset: continue the latest session (or create one). */
-    private void resolveInitialSession() {
-        ex.execute(() -> {
-            String sid = ensureSession();
-            if (sid == null) return;
-            ui.post(() -> {
-                if (sessionId != null && !sessionId.equals(sid)) return;
-                sessionId = sid;
-                synchronized (CACHE) {
-                    Transcript cached = CACHE.get(sid);
-                    if (cached != null && cached != tr) tr = cached;
-                    else CACHE.put(sid, tr);
-                }
-                adapter.notifyDataSetChanged();
-                if (!tr.historyLoaded && tr.rows.isEmpty()) loadHistoryIfEmpty();
-            });
-        });
+        refreshServerUi();
     }
 
     @Override
-    protected void onDestroy() {
+    protected void onPause() {
         ServerService.unsubscribe(this);
         ServerService.unsubscribeEvents(this);
-        ui.removeCallbacks(spin);
-        if (permDialog != null && permDialog.isShowing()) permDialog.dismiss();
-        super.onDestroy();
+        super.onPause();
     }
 
-    // ------------------------------------------------- ServerService.Evt
-    @Override
-    public void on(int newState, String detail) {
-        runOnUiThread(() -> { refreshStatus(); checkPermissionQueue(); });
+    private boolean atBottom() {
+        int off = scroll.getScrollY() + scroll.getHeight() - list.getHeight();
+        return off > -80;
     }
 
-    // --------------------------------------- ServerService.EventListener
-    @Override
-    public void onEvent(Map<String, Object> ev) {
-        handleEvent(ev);
-        checkPermissionQueue();
+    private void autoscroll() {
+        if (pinnedBottom) scroll.post(() -> scroll.fullScroll(ScrollView.FOCUS_DOWN));
     }
 
-    private void refreshStatus() {
-        int st = ServerService.getState();
-        String s;
-        switch (st) {
-            case ServerService.ST_HEALTHY:
-                s = "server ● healthy" + (ServerService.pendingPermissions() > 0
-                        ? " · ⚠ " + ServerService.pendingPermissions() + " permission(s) pending" : "");
-                break;
-            case ServerService.ST_STARTING: s = "server ◌ starting…"; break;
-            case ServerService.ST_EXITED:   s = "server ✕ exited"; break;
-            default:                        s = "server ○ idle"; break;
-        }
-        tvStatus.setText(s);
-        if (tvModel != null) tvModel.setText(currentModelLabel());
+    // ----------------------------------------------------------- composer
+
+    private void toggleMode() {
+        agent = "build".equals(agent) ? "plan" : "build";
+        refreshChips();
+        Toast.makeText(this, "agent: " + agent, Toast.LENGTH_SHORT).show();
     }
 
-    // ---------------------------------------------------------------- send
+    private void refreshChips() {
+        boolean plan = "plan".equals(agent);
+        chipMode.setText(plan ? "Plan" : "Build");
+        chipMode.setTextColor(getColor(plan ? R.color.accent_light : R.color.ok));
+        String[] sel = Models.selected(this);
+        chipModel.setText(sel == null ? "model ▾" : sel[1]);
+    }
+
+    private void setBusy(boolean b) {
+        busy = b;
+        ui.post(() -> {
+            if (b) {
+                btnSend.setText("■");
+                btnSend.setTextSize(16);
+                btnSend.setBackgroundResource(R.drawable.bg_stop);
+                btnSend.setTextColor(getColor(R.color.err));
+                tvStatus.setVisibility(View.VISIBLE);
+                tvStatus.setText("working — tap ■ to stop");
+            } else {
+                btnSend.setText("↑");
+                btnSend.setTextSize(22);
+                btnSend.setBackgroundResource(R.drawable.bg_send);
+                btnSend.setTextColor(getColor(R.color.on_accent));
+                tvStatus.setVisibility(View.GONE);
+            }
+        });
+    }
 
     private void send() {
         final String q = input.getText().toString().trim();
-        if (q.isEmpty()) return;
+        if (q.isEmpty() || busy) return;
         input.setText("");
-        addRow("local-" + System.nanoTime(), K_USER, q);
         ex.execute(() -> {
             try {
                 String sid = ensureSession();
                 if (sid == null) {
-                    sys("cannot create session (is the server healthy?)");
+                    sys("server not healthy yet — try again in a moment (⌘ → Restart server if it persists)");
                     return;
                 }
+                lastPartTs = System.currentTimeMillis();
                 setBusy(true);
-                // picked model override; on 400/422 retry once without it
-                boolean withModel = Models.selected(this) != null;
-                Api.Resp r = Api.post("/session/" + sid + "/message",
-                        messageBody(q, withModel), 300_000);
-                if (!r.ok() && withModel && (r.status == 400 || r.status == 422)) {
-                    r = Api.post("/session/" + sid + "/message",
-                            messageBody(q, false), 300_000);
-                }
-                if (!r.ok()) {
-                    String err = Json.findErrorText(Json.parse(r.body), 0);
-                    sys("send failed · HTTP " + r.status + (err == null ? "" : " · " + err));
-                    // the classic cause: no provider key / no default model
-                    if (r.status == 500 || r.status == 400) {
-                        if (!AuthStore.hasAnyKey(this) || Models.selected(this) == null) {
-                            addSetupRow(err);
-                        }
+                List<String> bodies = buildBodies(q);
+                Api.Resp r = null;
+                for (int i = 0; i < bodies.size(); i++) {
+                    r = Api.post("/session/" + sid + "/message", bodies.get(i), 300_000);
+                    if (r.ok()) break;
+                    if (i < bodies.size() - 1
+                            && (r.status == 400 || r.status == 422 || r.status == 500)) {
+                        sys("server rejected the request shape (HTTP " + r.status
+                                + ") — retrying in a plainer form…");
+                        continue;
                     }
+                    break;
+                }
+                if (r == null || !r.ok()) {
+                    int st = r == null ? 0 : r.status;
+                    String detail = r == null ? "" : Json.findErrorText(Json.parse(r.body), 0);
+                    err("send failed · HTTP " + st, detail, r == null ? "" : r.body);
                     setBusy(false);
                     return;
                 }
-                reconcileFromResponse(Json.parse(r.body));
+                reconcile(Json.parse(r.body));
+                ui.removeCallbacks(watchdog);
+                ui.postDelayed(watchdog, 2000);
             } catch (Exception e) {
-                sys("send failed: " + e.getMessage());
+                sys("send failed: " + e);
                 setBusy(false);
             }
         });
     }
 
-    /** Message POST body; optionally carries the picked model override. */
-    private String messageBody(String q, boolean withModel) {
-        StringBuilder b = new StringBuilder("{\"parts\":[{\"type\":\"text\",\"text\":")
-                .append(Json.quote(q)).append("]}");
-        if (withModel) {
-            String[] sel = Models.selected(this);
-            if (sel != null) {
-                b.append(",\"model\":{\"providerID\":").append(Json.quote(sel[0]))
-                        .append(",\"modelID\":").append(Json.quote(sel[1])).append("}");
-            }
-        }
-        return b.toString();
+    /** Candidates in decreasing explicitness: model+agent → agent → model → bare. */
+    private List<String> buildBodies(String q) {
+        LinkedHashMap<String, String> variants = new LinkedHashMap<>();
+        String text = "{\"type\":\"text\",\"text\":" + Json.quote(q) + "}";
+        String[] sel = Models.selected(this);
+        String model = sel == null ? null
+                : "\"model\":{\"providerID\":" + Json.quote(sel[0])
+                + ",\"modelID\":" + Json.quote(sel[1]) + "}";
+        String ag = "\"agent\":" + Json.quote(agent);
+        String parts = "\"parts\":[" + text + "]";
+        if (model != null) variants.put("ma", "{" + model + "," + ag + "," + parts + "}");
+        variants.put("a", "{" + ag + "," + parts + "}");
+        if (model != null) variants.put("m", "{" + model + "," + parts + "}");
+        variants.put("bare", "{" + parts + "}");
+        return new ArrayList<>(variants.values());
     }
 
-    /** Busy-state UI: send ↑ becomes stop ■, status line animates dots. */
-    private void setBusy(boolean b) {
-        busy = b;
-        ui.post(() -> {
-            TextView send = findViewById(R.id.btnSend);
-            if (send != null) {
-                if (b) {
-                    send.setText("■");
-                    send.setTextSize(16);
-                    send.setBackgroundResource(R.drawable.bg_stop);
-                    send.setTextColor(getResources().getColor(R.color.err));
-                    ui.removeCallbacks(spin);
-                    ui.postDelayed(spin, 100);
-                } else {
-                    send.setText("↑");
-                    send.setTextSize(22);
-                    send.setBackgroundResource(R.drawable.bg_send);
-                    send.setTextColor(getResources().getColor(R.color.on_accent));
-                    ui.removeCallbacks(spin);
-                    refreshStatus();
-                }
-            }
-        });
-    }
-
-    /** ■ tapped: abort the running agent (POST /session/{id}/abort). */
     private void abortRun() {
         final String sid = sessionId;
-        if (sid == null) { setBusy(false); return; }
         sys("■ stop requested");
         ex.execute(() -> {
             try {
-                Api.Resp r = Api.call("POST", "/session/" + sid + "/abort", null, 10_000);
-                if (!r.ok()) sys("abort failed · HTTP " + r.status);
+                if (sid != null) {
+                    Api.Resp r = Api.call("POST", "/session/" + sid + "/abort", null, 10_000);
+                    if (!r.ok()) sys("abort returned HTTP " + r.status);
+                }
             } catch (Exception e) {
-                sys("abort failed: " + e.getMessage());
+                sys("abort failed: " + e);
             }
             setBusy(false);
         });
     }
 
-    // ------------------------------------------------------------ model
-
-    private String currentModelLabel() {
-        String[] s = Models.selected(this);
-        return s == null ? "default model ▾" : s[1] + " ▾";
-    }
-
-    private void showModelPicker() {
-        if (ServerService.getState() != ServerService.ST_HEALTHY) {
-            Toast.makeText(this, "server not healthy — start it on the main screen",
-                    Toast.LENGTH_SHORT).show();
-            return;
-        }
-        tvModel.setText("loading models…");
-        ex.execute(() -> {
-            List<Models.Prov> provs = Models.fetch(this);
-            ui.post(() -> renderModelDialog(provs));
-        });
-    }
-
-    private void renderModelDialog(List<Models.Prov> provs) {
-        tvModel.setText(currentModelLabel());
-        int total = 0;
-        for (Models.Prov p : provs) total += p.models.size();
-        if (provs.isEmpty()) {
-            addSetupRow("model list empty — no provider is configured yet");
-            return;
-        }
-
-        View dlgView = LayoutInflater.from(this).inflate(R.layout.dialog_models, null);
-        EditText search = dlgView.findViewById(R.id.etSearch);
-        ListView lv = dlgView.findViewById(R.id.lvModels);
-        ModelPickAdapter pa = new ModelPickAdapter(provs, "");
-        lv.setAdapter(pa);
-        search.addTextChangedListener(new android.text.TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int a, int b2, int c) {}
-            @Override public void onTextChanged(CharSequence s, int a, int b2, int c) {}
-            @Override public void afterTextChanged(android.text.Editable s) {
-                pa.refilter(s.toString());
-            }
-        });
-
-        new AlertDialog.Builder(this)
-                .setTitle("Model — " + total + " from " + provs.size() + " providers")
-                .setView(dlgView)
-                .setNeutralButton("Server default", (d, w) -> {
-                    Models.clear(this);
-                    tvModel.setText(currentModelLabel());
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    /** Grouped + searchable model list. */
-    private final class ModelPickAdapter extends BaseAdapter {
-        private static final int T_HEADER = 0, T_MODEL = 1;
-        private final List<Models.Prov> all;
-        private final List<Object[]> rows = new ArrayList<>(); // [type, label, Prov, Mdl]
-        private String query = "";
-
-        ModelPickAdapter(List<Models.Prov> provs, String q) {
-            all = provs;
-            refilter(q);
-        }
-
-        void refilter(String q) {
-            query = q == null ? "" : q.toLowerCase().trim();
-            rows.clear();
-            for (Models.Prov p : all) {
-                boolean provMatch = query.isEmpty()
-                        || p.id.toLowerCase().contains(query)
-                        || p.name.toLowerCase().contains(query);
-                List<Models.Mdl> matches = new ArrayList<>();
-                for (Models.Mdl m : p.models) {
-                    if (provMatch
-                            || m.id.toLowerCase().contains(query)
-                            || m.name.toLowerCase().contains(query)) {
-                        matches.add(m);
-                    }
-                }
-                if (matches.isEmpty()) continue;
-                rows.add(new Object[]{T_HEADER,
-                        p.name + (p.configured ? "  ✓" : "") + "  (" + matches.size() + ")", p, null});
-                for (Models.Mdl m : matches) rows.add(new Object[]{T_MODEL, null, p, m});
-            }
-            ui.post(this::notifyDataSetChanged);
-        }
-
-        @Override public int getCount() { return rows.size(); }
-        @Override public Object getItem(int i) { return rows.get(i); }
-        @Override public long getItemId(int i) { return i; }
-        @Override public int getViewTypeCount() { return 2; }
-        @Override public int getItemViewType(int i) { return (int) rows.get(i)[0]; }
-        @Override public boolean isEnabled(int i) { return (int) rows.get(i)[0] == T_MODEL; }
-
-        @Override
-        public View getView(int i, View conv, ViewGroup parent) {
-            Object[] e = rows.get(i);
-            TextView t = (TextView) conv;
-            if (t == null) {
-                t = new TextView(ChatActivity.this);
-                t.setPadding(dp(18), dp(8), dp(12), dp(8));
-            }
-            if ((int) e[0] == T_HEADER) {
-                t.setText((String) e[1]);
-                t.setTextSize(12);
-                t.setTypeface(Typeface.DEFAULT_BOLD);
-                t.setTextColor(getResources().getColor(R.color.text_secondary));
-                t.setBackgroundResource(R.color.bg);
-            } else {
-                Models.Prov p = (Models.Prov) e[2];
-                Models.Mdl m = (Models.Mdl) e[3];
-                String[] cur = Models.selected(ChatActivity.this);
-                boolean isCur = cur != null && cur[0].equals(p.id) && cur[1].equals(m.id);
-                String label = m.name + (isCur ? "  ✓" : "")
-                        + "\n" + p.id + "/" + m.id;
-                t.setText(label);
-                t.setTextSize(14);
-                t.setTypeface(Typeface.DEFAULT);
-                t.setTextColor(getResources().getColor(R.color.text_primary));
-                t.setBackgroundResource(android.R.color.transparent);
-                t.setOnClickListener(v -> {
-                    Models.save(ChatActivity.this, p.id, m.id);
-                    try {
-                        // server-wide default too → no more 500 on fresh sessions
-                        AuthStore.setDefaultModel(ChatActivity.this, p.id, m.id);
-                        sys("model → " + m.id + " (" + p.id + ") · set as default");
-                    } catch (Exception ex) {
-                        sys("model → " + m.id + " (" + p.id + ")");
-                    }
-                    tvModel.setText(currentModelLabel());
-                });
-            }
-            return t;
-        }
-    }
-
-    private int dp(int v) {
-        return (int) (v * getResources().getDisplayMetrics().density);
-    }
-
     private String ensureSession() {
-        String sid = sessionId;
-        if (sid != null) return sid;
-        if (!forceNew) {
-            // continue the most recent session when just opening the app
-            try {
-                Api.Resp g = Api.get("/session");
-                List<Object> arr = Json.arr(Json.parse(g.body));
-                if (arr != null && !arr.isEmpty()) {
-                    Map<String, Object> first = Json.obj(arr.get(0));
-                    String id = first == null ? null : Json.str(first, "id");
-                    if (id != null) { sessionId = id; return id; }
-                }
-            } catch (Exception ignored) {}
-        }
+        if (sessionId != null) return sessionId;
+        if (!ServerService.healthy()) return null;
         try {
-            Api.Resp p = Api.post("/session", "{}", 10_000);
-            Map<String, Object> m = Json.obj(Json.parse(p.body));
-            String id = Json.str(m, "id");
-            if (id != null) {
-                sessionId = id;
-                forceNew = false;
-                synchronized (CACHE) { if (!CACHE.containsKey(id)) CACHE.put(id, tr); }
-                return id;
-            }
-        } catch (Exception ignored) {}
-        return null;
-    }
-
-    private void reconcileFromResponse(Object parsed) {
-        Map<String, Object> m = Json.obj(parsed);
-        if (m == null) return;
-        List<Object> parts = Json.list(m, "parts");
-        if (parts == null) {
-            List<Object> arr = Json.arr(parsed);
-            if (arr != null) {
-                for (Object o : arr) {
-                    Map<String, Object> mm = Json.obj(o);
-                    if (mm == null) continue;
-                    List<Object> ps = Json.list(mm, "parts");
-                    if (ps != null) parts = ps;
-                }
-            }
+            Api.Resp r = Api.post("/session", "{}", 15_000);
+            if (!r.ok()) return null;
+            Map<String, Object> o = Json.obj(Json.parse(r.body));
+            if (o == null) return null;
+            Map<String, Object> info = Json.map(o, "info");
+            String id = info != null ? Json.str(info, "id") : null;
+            if (id == null) id = Json.str(o, "id");
+            if (id == null) return null;
+            sessionId = id;
+            String t = info != null ? Json.str(info, "title") : null;
+            sessionTitle = (t == null || t.isEmpty()) ? "New chat" : t;
+            ui.post(() -> tvTitle.setText(sessionTitle));
+            return id;
+        } catch (Exception e) {
+            return null;
         }
-        if (parts == null) return;
-        for (Object o : parts) applyPart(Json.obj(o));
     }
 
-    // ------------------------------------------------------------- history
+    // ------------------------------------------------- service event feed
 
-    private void loadHistoryIfEmpty() {
-        final String sid = sessionId;
-        if (sid == null || tr.historyLoaded || !tr.rows.isEmpty()) return;
+    /** ServerService rebroadcasts every parsed /event frame here. */
+    @Override
+    public void onEvent(Map<String, Object> ev) {
+        try {
+            String type = Json.str(ev, "type");
+            Map<String, Object> props = Json.map(ev, "properties");
+            if (props == null) props = new HashMap<>();
+            if ("message.part.updated".equals(type)) {
+                Map<String, Object> part = Json.map(props, "part");
+                if (part != null) applyPart(part, null);
+            } else if ("message.updated".equals(type)) {
+                applyMessageInfo(Json.map(props, "info"));
+            } else if ("session.updated".equals(type)) {
+                Map<String, Object> info = Json.map(props, "info");
+                if (info != null && sessionId != null
+                        && sessionId.equals(Json.str(info, "id"))) {
+                    String t = Json.str(info, "title");
+                    if (t != null && !t.isEmpty()) {
+                        sessionTitle = t;
+                        ui.post(() -> tvTitle.setText(t));
+                    }
+                }
+            } else if ("session.idle".equals(type)) {
+                String sid = Json.str(props, "sessionID");
+                if (sid == null || sid.equals(sessionId)) setBusy(false);
+            } else if ("session.error".equals(type)) {
+                Map<String, Object> e = Json.map(props, "error");
+                String m = e != null ? Json.str(e, "message") : null;
+                if (m == null) m = Json.findErrorText(props, 0);
+                err("session error", m, String.valueOf(props));
+                setBusy(false);
+            } else if ("permission.asked".equals(type)
+                    || "permission.updated".equals(type)) {
+                ui.post(this::checkPermissionQueue);
+            }
+        } catch (Exception e) {
+            // never let a malformed frame kill the screen
+        }
+    }
+
+    /** ServerService state changes → header subtitle. */
+    @Override
+    public void on(int newState, String detail) {
+        ui.post(() -> refreshServerUi());
+        if (newState == ServerService.ST_HEALTHY) {
+            ui.post(this::checkPermissionQueue);
+        }
+    }
+
+    private void refreshServerUi() {
+        int st = ServerService.getState();
+        String s;
+        switch (st) {
+            case ServerService.ST_HEALTHY: s = "server ready"; break;
+            case ServerService.ST_STARTING: s = "server starting…"; break;
+            case ServerService.ST_EXITED: s = "server exited — ⌘ → Restart server"; break;
+            case ServerService.ST_STOPPED: s = "server stopped — ⌘ → Restart server"; break;
+            default: s = "server idle";
+        }
+        if (!AuthStore.hasAnyKey(this) && st == ServerService.ST_HEALTHY) {
+            s += " · no API key yet — ⌘ → API keys";
+        }
+        tvSub.setText(s);
+    }
+
+    // ------------------------------------------------------------ history
+
+    private void loadSession(String id) {
+        sessionId = id;
+        ui.post(() -> {
+            synchronized (lock) {
+                rows.clear(); idxByKey.clear(); typeCount.clear(); msgs.clear();
+            }
+            list.removeAllViews();
+            pinnedBottom = true;
+        });
+        if (id == null) {
+            sessionTitle = "New chat";
+            ui.post(() -> { tvTitle.setText(sessionTitle); refreshChips(); });
+            return;
+        }
         ex.execute(() -> {
             try {
-                Api.Resp r = Api.get("/session/" + sid + "/message");
-                if (!r.ok()) { markHistoryLoaded(); return; }
+                Api.Resp sl = Api.get("/session");
+                if (sl.ok()) {
+                    List<Object> sarr = Json.arr(Json.parse(sl.body));
+                    if (sarr != null) for (Object o : sarr) {
+                        Map<String, Object> m = Json.obj(o);
+                        if (m != null && id.equals(Json.str(m, "id"))) {
+                            String t = Json.str(m, "title");
+                            if (t != null && !t.isEmpty()) {
+                                sessionTitle = t;
+                                ui.post(() -> tvTitle.setText(t));
+                            }
+                            break;
+                        }
+                    }
+                }
+                Api.Resp r = Api.get("/session/" + id + "/message");
+                if (!r.ok()) { sys("history unavailable · HTTP " + r.status); return; }
                 List<Object> arr = Json.arr(Json.parse(r.body));
-                if (arr == null) { markHistoryLoaded(); return; }
-                int max = arr.size();
-                int from = Math.max(0, max - 50); // render last 50 messages
-                for (int i = from; i < max; i++) {
+                if (arr == null) return;
+                int from = Math.max(0, arr.size() - 80);
+                for (int i = from; i < arr.size(); i++) {
                     Map<String, Object> item = Json.obj(arr.get(i));
                     if (item == null) continue;
                     Map<String, Object> info = Json.map(item, "info");
                     if (info == null) info = item;
                     if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
                     String role = Json.str(info, "role");
-                    String mid = Json.str(info, "id");
-                    if (mid == null) mid = "hist-" + i;
-                    boolean isUser = "user".equals(role);
-                    if (!isUser && !"assistant".equals(role)) continue;
-                    // token/cost meta for assistant bubbles
-                    String meta = metaFromInfo(info);
-                    if (meta != null) tr.metaByMsg.put(mid, meta);
+                    applyMessageInfo(info);
                     List<Object> parts = Json.list(item, "parts");
                     if (parts == null) parts = Json.list(info, "parts");
-                    if (parts == null) continue;
-                    int pi = 0;
-                    for (Object po : parts) {
-                        Map<String, Object> part = Json.obj(po);
-                        if (part == null) continue;
-                        String pid = partKey(part, mid + "#p" + (pi++));
-                        String ptype = Json.str(part, "type");
-                        if ("text".equals(ptype)) {
-                            String txt = Json.str(part, "text");
-                            if (txt == null || txt.isEmpty()) continue;
-                            if (isUser) {
-                                Row rr = new Row(pid, K_USER);
-                                rr.text.append(txt);
-                                putRow(rr);
-                            } else {
-                                Row rr = new Row(pid, K_ASSISTANT);
-                                rr.text.append(txt);
-                                rr.msgId = mid;
-                                putRow(rr);
-                            }
-                        } else if ("reasoning".equals(ptype) && !isUser) {
-                            String txt = Json.str(part, "text");
-                            if (txt == null || txt.isEmpty()) continue;
-                            Row rr = new Row(pid, K_REASON);
-                            rr.text.append(txt);
-                            putRow(rr);
-                        } else if ("tool".equals(ptype) && !isUser) {
-                            putRow(toolRow(pid, part));
-                        } else if ("patch".equals(ptype) && !isUser) {
-                            putRow(patchRow(pid, part));
-                        }
+                    if (parts != null) for (Object p : parts) {
+                        Map<String, Object> pm = Json.obj(p);
+                        if (pm != null) applyPart(pm, role);
                     }
                 }
-                markHistoryLoaded();
             } catch (Exception e) {
-                markHistoryLoaded();
+                sys("history failed: " + e);
             }
         });
     }
 
-    private void markHistoryLoaded() {
-        ui.post(() -> { tr.historyLoaded = true; adapter.notifyDataSetChanged(); });
+    /** POST /session/{id}/message response → same pipeline as SSE. */
+    private void reconcile(Object parsed) {
+        try {
+            Map<String, Object> o = Json.obj(parsed);
+            if (o != null) {
+                Map<String, Object> info = Json.map(o, "info");
+                if (info == null && Json.str(o, "role") != null) info = o;
+                if (info != null) {
+                    applyMessageInfo(info);
+                    List<Object> parts = Json.list(o, "parts");
+                    String role = Json.str(info, "role");
+                    if (parts != null) for (Object p : parts) {
+                        Map<String, Object> pm = Json.obj(p);
+                        if (pm != null) applyPart(pm, role);
+                    }
+                    return;
+                }
+            }
+            List<Object> arr = Json.arr(parsed);
+            if (arr == null) return;
+            for (Object it : arr) {
+                Map<String, Object> m = Json.obj(it);
+                if (m == null) continue;
+                Map<String, Object> inf = Json.map(m, "info");
+                if (inf == null) inf = m;
+                applyMessageInfo(inf);
+                List<Object> ps = Json.list(m, "parts");
+                String role = Json.str(inf, "role");
+                if (ps != null) for (Object p : ps) {
+                    Map<String, Object> pm = Json.obj(p);
+                    if (pm != null) applyPart(pm, role);
+                }
+            }
+        } catch (Exception e) {
+            // response shape drift must never break the send path
+        }
     }
 
-    // ------------------------------------------------------------ events
+    // ------------------------------------------------------- part routing
 
-    private void handleEvent(Map<String, Object> ev) {
-        String type = Json.str(ev, "type");
-        Map<String, Object> props = Json.map(ev, "properties");
-        if (type == null || props == null) return;
+    private String roleOf(String mid) {
+        MsgInfo mi = msgs.get(mid);
+        return mi != null && mi.role != null ? mi.role : "assistant";
+    }
 
-        if ("message.part.updated".equals(type)) {
-            Map<String, Object> part = Json.map(props, "part");
-            if (part == null) part = props;
+    private void applyPart(Map<String, Object> part, String roleHint) {
+        try {
+            String type = Json.str(part, "type");
+            if (type == null) return;
             String mid = Json.str(part, "messageID");
-            String sid = Json.str(part, "sessionID");
-            if (sid != null && sessionId != null && !sid.equals(sessionId)) return;
-            applyPart(part);
-            return;
-        }
+            if (mid == null) mid = "m" + Integer.toHexString(System.identityHashCode(part));
+            String pid = Json.str(part, "id");
+            int n;
+            synchronized (lock) { n = mergeCount(mid + "|" + type); }
+            final String key = (pid != null && !pid.isEmpty())
+                    ? mid + "|" + pid : mid + "|" + type + "#" + n;
+            final String role = roleHint != null ? roleHint : roleOf(mid);
+            lastPartTs = System.currentTimeMillis();
 
-        if ("message.updated".equals(type)) {
-            Map<String, Object> info = Json.map(props, "info");
-            if (info == null) return;
-            Map<String, Object> err = Json.map(info, "error");
-            if (err != null) {
-                String name = nz(Json.str(err, "name"), "error");
-                String msg = nz(Json.str(err, "message"), "");
-                sys(name + (msg.isEmpty() ? "" : " · " + msg));
-            }
-            // token/cost footer for this message's assistant bubbles
-            String mid = Json.str(info, "id");
-            String meta = metaFromInfo(info);
-            if (mid != null && meta != null && !meta.equals(tr.metaByMsg.get(mid))) {
-                tr.metaByMsg.put(mid, meta);
-                ui.post(adapter::notifyDataSetChanged);
-            }
-            return;
-        }
-
-        if ("session.status".equals(type)) {
-            String sid = Json.str(props, "sessionID");
-            if (sid == null || sessionId == null || sid.equals(sessionId)) {
-                Map<String, Object> st = Json.map(props, "status");
-                String stype = st == null ? null : Json.str(st, "type");
-                if ("busy".equals(stype) || "retry".equals(stype)) {
-                    setBusy(true);
-                } else if ("idle".equals(stype)) {
-                    setBusy(false);
+            switch (type) {
+                case "text": {
+                    final String t = nz(Json.str(part, "text"), "");
+                    if ("user".equals(role)) upsertUser(key, t);
+                    else upsertText(key, mid, t);
+                    break;
                 }
-            }
-            return;
-        }
-        if ("session.error".equals(type)) {
-            String sid = Json.str(props, "sessionID");
-            if (sid != null && sessionId != null && !sid.equals(sessionId)) return;
-            String msg = Json.findErrorText(props, 0);
-            sys(nz(msg, "session error"));
-            return;
-        }
-        // permission.asked / .updated / .replied → handled via the service queue
-    }
-
-    /** Route any message part to its row. */
-    private void applyPart(Map<String, Object> part) {
-        if (part == null) return;
-        String ptype = Json.str(part, "type");
-        String mid = Json.str(part, "messageID");
-        if (mid == null || mid.isEmpty()) mid = "live";
-        String pid = partKey(part, mid + "#live");
-        if ("text".equals(ptype)) {
-            applyTextLike(pid, mid, K_ASSISTANT, Json.str(part, "text"));
-        } else if ("reasoning".equals(ptype)) {
-            applyTextLike(pid, mid, K_REASON, Json.str(part, "text"));
-        } else if ("tool".equals(ptype)) {
-            upsert(toolRow(pid, part));
-        } else if ("patch".equals(ptype)) {
-            upsert(patchRow(pid, part));
-        }
-        // step-start / step-finish / agent / file → nothing visible (yet)
-    }
-
-    /** Stable key for a part row. */
-    private String partKey(Map<String, Object> part, String fallback) {
-        String id = Json.str(part, "id");
-        return (id == null || id.isEmpty()) ? fallback : id;
-    }
-
-    private String nz(String s, String def) { return s == null || s.isEmpty() ? def : s; }
-
-    // --------------------------------------------------------- permissions
-
-    /** Show the pending permission dialog if one exists and none is showing. */
-    private void checkPermissionQueue() {
-        if (permDialog != null && permDialog.isShowing()) return;
-        final Map<String, Object> p = ServerService.peekPermission();
-        if (p == null) { refreshStatus(); return; }
-
-        String id = nz(Json.str(p, "id"), "?");
-        // v1.18.x: {id, sessionID, permission:"bash", patterns:[...], metadata:{...}}
-        String action = Json.str(p, "permission");
-        if (action == null || action.isEmpty()) {
-            action = nz(Json.str(p, "type"), "permission");
-        }
-        String title = Json.str(p, "title");
-        Map<String, Object> meta = Json.map(p, "metadata");
-
-        StringBuilder detail = new StringBuilder();
-        if (title != null && !title.isEmpty()) detail.append(title).append("\n\n");
-        List<Object> pats = Json.list(p, "patterns");
-        if (pats != null && !pats.isEmpty()) {
-            detail.append("patterns: ");
-            for (Object o : pats) detail.append(String.valueOf(o)).append(' ');
-            detail.append("\n");
-        }
-        if (meta != null && !meta.isEmpty()) {
-            if (detail.length() > 0) detail.append("\n");
-            for (Map.Entry<String, Object> e : meta.entrySet()) {
-                String v = String.valueOf(e.getValue());
-                if (v.length() > 500) v = v.substring(0, 500) + "…";
-                detail.append(e.getKey()).append(": ").append(v).append("\n");
-            }
-        }
-        if (detail.length() == 0) detail.append("(no details provided)");
-
-        refreshStatus();
-        permDialog = new AlertDialog.Builder(this)
-                .setTitle("⚠ Allow " + action + "?")
-                .setMessage(detail.toString())
-                .setPositiveButton("Allow once", (d, w) -> answerPermission(id, "once"))
-                .setNeutralButton("Always", (d, w) -> answerPermission(id, "always"))
-                .setNegativeButton("Deny", (d, w) -> answerPermission(id, "reject"))
-                .setOnDismissListener(d -> { if (permDialog == d) permDialog = null; })
-                .create();
-        permDialog.show();
-    }
-
-    private void answerPermission(String id, String response) {
-        final String sid = sessionId;
-        ex.execute(() -> {
-            String err = null;
-            try {
-                // v1.18.x (verified against the shipped binary): the reply
-                // body key is "reply", NOT "response" — the old body was a
-                // silent 400 and the agent stalled forever.
-                Api.Resp r = Api.post("/permission/" + id + "/reply",
-                        "{\"reply\":" + Json.quote(response) + "}", 15_000);
-                if (!r.ok() && r.status == 404 && sid != null) {
-                    // legacy fallback for older servers
-                    r = Api.post("/session/" + sid + "/permissions/" + id,
-                            "{\"response\":" + Json.quote(response) + "}", 15_000);
+                case "reasoning": {
+                    if ("user".equals(role)) break;
+                    upsertReason(key, mid, nz(Json.str(part, "text"), ""));
+                    break;
                 }
-                if (!r.ok()) err = "HTTP " + r.status;
-            } catch (Exception e) {
-                err = e.getMessage();
+                case "tool": upsertTool(toolRow(key, part)); break;
+                case "patch": upsertTool(patchRow(key, part)); break;
+                default: break; // step-start/-finish, agent, … hidden like the TUI
             }
-            final String failure = err;
-            ServerService.noteAnswered(id);
-            ui.post(() -> {
-                if (failure != null) sys("permission reply failed · " + failure);
-                checkPermissionQueue();
-            });
+        } catch (Exception e) {
+            // a malformed part must never take the chat down
+        }
+    }
+
+    private int mergeCount(String k) {
+        Integer c = typeCount.get(k);
+        n2 = c == null ? 1 : c + 1;
+        typeCount.put(k, n2);
+        return n2;
+    }
+    private int n2; // scratch for mergeCount (main-thread only)
+
+    // ---------------------------------------------------------- row model
+
+    private final Object lock = new Object();
+
+    private Row rowByKey(String key) {
+        Integer i = idxByKey.get(key);
+        return i == null ? null : rows.get(i);
+    }
+
+    private void upsertUser(String key, String text) {
+        ui.post(() -> {
+            synchronized (lock) {
+                Row r = rowByKey(key);
+                boolean changed;
+                if (r == null) {
+                    r = new Row();
+                    r.kind = K_USER; r.key = key; r.ts = System.currentTimeMillis();
+                    r.text.append(text);
+                    rows.add(r); idxByKey.put(key, rows.size() - 1);
+                    changed = true;
+                } else {
+                    changed = !text.contentEquals(r.text);
+                    if (changed) { r.text.setLength(0); r.text.append(text); }
+                }
+                if (changed) touchView(r);
+            }
+            autoscroll();
         });
     }
 
-    // ------------------------------------------------------- row builders
-
-    /** text/reasoning create-or-update with the P5 reconcile rules. */
-    private void applyTextLike(String pid, String mid, int kind, String text) {
-        if (text == null) return;
+    private void upsertText(String key, String mid, String text) {
         ui.post(() -> {
-            Row r = tr.byPartId.get(pid);
-            if (r == null && kind == K_ASSISTANT && mid != null) {
-                // The POST response and the SSE stream may key the same part
-                // differently (part.id vs messageID) — never render twice.
-                for (Row x : tr.rows) {
-                    if (x.kind == K_ASSISTANT && mid.equals(x.msgId)) { r = x; break; }
+            synchronized (lock) {
+                Row r = rowByKey(key);
+                if (r == null) {
+                    r = new Row();
+                    r.kind = K_ASSISTANT; r.key = key; r.ts = System.currentTimeMillis();
+                    r.text.append(mergeText("", text));
+                    MsgInfo mi = msgs.get(mid);
+                    r.meta = mi == null ? null : mi.meta;
+                    rows.add(r); idxByKey.put(key, rows.size() - 1);
+                    touchView(r);
+                } else {
+                    String merged = mergeText(r.text.toString(), text);
+                    boolean changed = !merged.contentEquals(r.text);
+                    if (changed) { r.text.setLength(0); r.text.append(merged); }
+                    MsgInfo mi = msgs.get(mid);
+                    String meta = mi == null ? null : mi.meta;
+                    boolean metaChanged = meta != null && !meta.equals(r.meta);
+                    if (metaChanged) r.meta = meta;
+                    if (changed || metaChanged) touchView(r);
                 }
             }
-            if (r == null) {
-                // user-echo dedupe: an assistant part repeating what we sent
-                if (kind == K_ASSISTANT) {
-                    for (Row x : tr.rows) {
-                        if (x.kind == K_USER && text.equals(x.text.toString())) return;
+            autoscroll();
+        });
+    }
+
+    private void upsertReason(String key, String mid, String text) {
+        ui.post(() -> {
+            synchronized (lock) {
+                Row r = rowByKey(key);
+                if (r == null) {
+                    r = new Row();
+                    r.kind = K_REASON; r.key = key; r.ts = System.currentTimeMillis();
+                    r.text.append(mergeText("", text));
+                    rows.add(r); idxByKey.put(key, rows.size() - 1);
+                    touchView(r);
+                } else {
+                    String merged = mergeText(r.text.toString(), text);
+                    if (!merged.contentEquals(r.text)) {
+                        r.text.setLength(0); r.text.append(merged);
+                        touchView(r);
                     }
                 }
-                r = new Row(pid, kind);
-                r.msgId = mid;
-                putRow(r);
             }
-            reconcileText(r.text, text);
-            adapter.notifyDataSetChanged();
+            autoscroll();
         });
     }
 
-    /** Cumulative replace / delta append — the P5 streaming reconcile. */
-    private static void reconcileText(StringBuilder cur, String text) {
-        String c = cur.toString();
-        if (text.startsWith(c) && c.length() <= text.length()) {
-            cur.setLength(0);
-            cur.append(text);
-        } else if (!c.startsWith(text) && !c.equals(text) && !text.contains(c)) {
-            cur.append(text);
-        } else if (text.length() > c.length()) {
-            cur.setLength(0);
-            cur.append(text);
-        }
+    private void upsertTool(Row incoming) {
+        ui.post(() -> {
+            synchronized (lock) {
+                Row r = rowByKey(incoming.key);
+                boolean changed;
+                if (r == null) {
+                    r = incoming;
+                    rows.add(r); idxByKey.put(r.key, rows.size() - 1);
+                    changed = true;
+                } else {
+                    changed = !r.status.equals(incoming.status)
+                            || r.input.length() != incoming.input.length()
+                            || r.output.length() != incoming.output.length()
+                            || !r.title.equals(incoming.title);
+                    r.tool = incoming.tool; r.status = incoming.status;
+                    r.title = incoming.title;
+                    r.input.setLength(0); r.input.append(incoming.input);
+                    r.output.setLength(0); r.output.append(incoming.output);
+                }
+                if ("error".equals(r.status)) r.open = true; // never hide failures
+                if (changed) touchView(r);
+            }
+            autoscroll();
+        });
     }
 
-    private Row toolRow(String pid, Map<String, Object> part) {
-        Row r = new Row(pid, K_TOOL);
+    private Row toolRow(String key, Map<String, Object> part) {
+        Row r = new Row();
+        r.kind = K_TOOL; r.key = key; r.ts = System.currentTimeMillis();
         r.tool = nz(Json.str(part, "tool"), "call");
         Map<String, Object> state = Json.map(part, "state");
         if (state == null) state = part;
@@ -821,374 +648,930 @@ public class ChatActivity extends Activity implements ServerService.Evt, ServerS
         if (err != null) {
             String em = Json.str(err, "message");
             if (em == null) em = Json.findErrorText(err, 0);
-            if (em != null && !em.isEmpty())
-                r.output.append(r.output.length() > 0 ? "\n" : "")
-                        .append("✕ ").append(em);
+            if (em != null && !em.isEmpty()) {
+                if (r.output.length() > 0) r.output.append('\n');
+                r.output.append("✕ ").append(em);
+            }
         }
         return r;
     }
 
-    /** patch part (binary-verified: hash + files[]). */
-    private Row patchRow(String pid, Map<String, Object> part) {
-        Row r = new Row(pid, K_TOOL);
-        r.tool = "patch";
-        r.status = "completed";
+    private Row patchRow(String key, Map<String, Object> part) {
+        Row r = new Row();
+        r.kind = K_TOOL; r.key = key; r.ts = System.currentTimeMillis();
+        r.tool = "patch"; r.status = "completed";
         List<Object> files = Json.list(part, "files");
         int n = files == null ? 0 : files.size();
         r.title = n + " file" + (n == 1 ? "" : "s") + " changed";
-        if (files != null) {
-            for (Object f : files) r.output.append(String.valueOf(f)).append('\n');
-        }
+        if (files != null) for (Object f : files) r.output.append(f).append('\n');
         return r;
     }
 
-    /** Compact one-line label for a collapsed tool card. */
-    private String toolHeader(Map<String, Object> state) {
-        String arg = null;
-        if (state != null) {
-            Map<String, Object> in = Json.map(state, "input");
-            if (in != null) arg = keyArgOf(in);
+    /** SSE sends full part state; adopt the growth, ignore truncations. */
+    private static String mergeText(String cur, String next) {
+        if (cur == null || cur.isEmpty()) return next;
+        if (next == null) return cur;
+        if (next.equals(cur)) return cur;
+        if (next.startsWith(cur)) return next;   // grew
+        if (cur.startsWith(next)) return cur;    // truncated echo
+        return next;                              // changed → replace
+    }
+
+    private void applyMessageInfo(Map<String, Object> info) {
+        if (info == null) return;
+        String mid = Json.str(info, "id");
+        if (mid == null) return;
+        String role = Json.str(info, "role");
+        synchronized (lock) {
+            MsgInfo mi = msgs.get(mid);
+            if (mi == null) { mi = new MsgInfo(); msgs.put(mid, mi); }
+            if (role != null) mi.role = role;
         }
-        if (arg == null && state != null) {
-            Map<String, Object> md = Json.map(state, "metadata");
-            if (md != null) arg = keyArgOf(md);
-        }
-        return arg == null ? null : shorten(arg, 90);
-    }
-
-    private String keyArgOf(Map<String, Object> in) {
-        List<Object> cmdArr = Json.list(in, "command");
-        if (cmdArr != null && !cmdArr.isEmpty()) {
-            StringBuilder b = new StringBuilder("$ ");
-            for (Object o : cmdArr) b.append(o).append(' ');
-            return b.toString().trim();
-        }
-        for (String k : new String[]{"command", "filePath", "file_path", "path",
-                "notebookPath", "pattern", "query", "url", "description"}) {
-            String v = Json.str(in, k);
-            if (v != null && !v.isEmpty()) {
-                return ("command".equals(k) ? "$ " : "") + v;
-            }
-        }
-        return null;
-    }
-
-    private static String shorten(String s, int n) {
-        if (s == null) return null;
-        s = s.replace('\n', ' ').trim();
-        return s.length() > n ? s.substring(0, n) + "…" : s;
-    }
-
-    /** Create-or-replace a row (tool cards update in place as the call
-     *  moves pending → running → completed/error). */
-    private void upsert(Row r) {
-        ui.post(() -> {
-            putRow(r);
-            adapter.notifyDataSetChanged();
-        });
-    }
-
-    /** Put a row into the transcript (backing thread OR ui — both safe). */
-    private void putRow(Row r) {
-        Row old = tr.byPartId.get(r.partId);
-        if (old != null) {
-            int idx = tr.rows.indexOf(old);
-            if (idx >= 0) tr.rows.set(idx, r);
-            tr.byPartId.put(r.partId, r);
-        } else {
-            tr.byPartId.put(r.partId, r);
-            tr.rows.add(r);
-        }
-    }
-
-    private void applyText(String mid, String text) {
-        // legacy shim — not used anymore, kept for safety
-        applyTextLike(mid, mid, K_ASSISTANT, text);
-    }
-
-    private void sys(String text) {
-        ui.post(() -> {
-            String key = "sys-" + (tr.sysCounter++);
-            Row r = new Row(key, K_SYSTEM);
-            r.text.append(text);
-            putRow(r);
-            adapter.notifyDataSetChanged();
-        });
-    }
-
-    private void addRow(String key, int kind, String text) {
-        ui.post(() -> {
-            Row r = new Row(key, kind);
-            r.text.append(text);
-            putRow(r);
-            adapter.notifyDataSetChanged();
-        });
-    }
-
-    /** Accent "connect APIs" shortcut row — shown when sends fail because
-     *  nothing is configured, or the chat opens with no keys. */
-    private void addSetupRow(String cause) {
-        ui.post(() -> {
-            if (tr.setupRowShown) {
-                adapter.notifyDataSetChanged();
-                return;
-            }
-            tr.setupRowShown = true;
-            Row r = new Row("setup-" + System.nanoTime(), K_SETUP);
-            r.text.append(cause == null || cause.isEmpty()
-                    ? "The agent needs an API key and a model before it can answer."
-                    : cause);
-            putRow(r);
-            adapter.notifyDataSetChanged();
-        });
-    }
-
-    /** Sessions delete hook: drop a removed session's cached transcript. */
-    static void forgetSession(String id) {
-        synchronized (CACHE) { CACHE.remove(id); }
-    }
-
-    // ------------------------------------------------------------- meta
-
-    /** "⇅ 12.3k tok · $0.0041" — tokens formula verified in the binary:
-     *  input+output+reasoning+cache.read+cache.write; cost = info.cost. */
-    private String metaFromInfo(Map<String, Object> info) {
-        if (info == null) return null;
         Map<String, Object> tk = Json.map(info, "tokens");
         long total = 0;
         if (tk != null) {
             total += num(tk.get("input")) + num(tk.get("output"))
                     + num(tk.get("reasoning"));
             Map<String, Object> cache = Json.map(tk, "cache");
-            if (cache != null) {
-                total += num(cache.get("read")) + num(cache.get("write"));
-            }
+            if (cache != null) total += num(cache.get("read")) + num(cache.get("write"));
         }
         Object costO = info.get("cost");
-        double cost = (costO instanceof Double) ? (Double) costO : 0;
-        if (total <= 0 && cost <= 0) return null;
-        StringBuilder b = new StringBuilder("⇅ ");
-        b.append(total >= 1000
-                ? String.format("%.1fk", total / 1000.0) : String.valueOf(total));
-        b.append(" tok");
-        if (cost > 0) b.append(String.format(" · $%.4f", cost));
-        return b.toString();
-    }
+        double cost = (costO instanceof Number) ? ((Number) costO).doubleValue() : 0;
+        String meta = null;
+        if (total > 0 || cost > 0) {
+            StringBuilder b = new StringBuilder("⇅ ");
+            b.append(total >= 1000
+                    ? String.format(Locale.US, "%.1fk", total / 1000.0)
+                    : String.valueOf(total)).append(" tok");
+            if (cost > 0) b.append(String.format(Locale.US, " · $%.4f", cost));
+            meta = b.toString();
+        }
+        Map<String, Object> e = Json.map(info, "error");
+        final String fErrName = e != null
+                ? nz(Json.str(e, "name"), "error") : null;
+        final String fErrMsg = e != null
+                ? nz(Json.str(e, "message"), Json.findErrorText(e, 0)) : null;
 
-    private static long num(Object o) {
-        return (o instanceof Number) ? ((Number) o).longValue() : 0;
-    }
-
-    /** Collapsed tool card label: "bash · $ npm install" / "read · src/App.tsx". */
-    private String toolHeaderText(Row r) {
-        String arg = r.title;
-        if (arg == null || arg.isEmpty()) {
-            Map<String, Object> fake = new HashMap<>();
-            if (r.input.length() > 0) fake.put("input", r.input);
-            // reuse the raw-input key scan
-            for (String line : r.input.toString().split("\n")) {
-                int c = line.indexOf(": ");
-                if (c > 0) {
-                    String k = line.substring(0, c), v = line.substring(c + 2);
-                    if (k.equals("command")) { arg = "$ " + v; break; }
-                    if (k.equals("filePath") || k.equals("file_path") || k.equals("path")
-                            || k.equals("pattern") || k.equals("query") || k.equals("url")) {
-                        arg = v; break;
+        final String fMid = mid;
+        final String fMeta = meta;
+        if (meta != null || e != null) ui.post(() -> {
+            boolean showError;
+            synchronized (lock) {
+                MsgInfo mi = msgs.get(fMid);
+                if (mi != null && fMeta != null) mi.meta = fMeta;
+                showError = mi != null && !mi.errorShown && fErrName != null;
+                if (showError) mi.errorShown = true;
+                if (fMeta != null) {
+                    for (int i = rows.size() - 1; i >= 0; i--) {
+                        Row r = rows.get(i);
+                        if (r.kind == K_ASSISTANT && r.key != null
+                                && r.key.startsWith(fMid + "|")) {
+                            if (!fMeta.equals(r.meta)) { r.meta = fMeta; touchView(r); }
+                            break;
+                        }
                     }
                 }
             }
-        }
-        if (arg == null || arg.isEmpty()) arg = "";
-        else arg = " · " + shorten(arg, 90);
-        return r.tool + arg;
+            if (showError) {
+                err("✕ " + fErrName, fErrMsg == null ? "" : fErrMsg, String.valueOf(info));
+                setBusy(false);
+            }
+        });
     }
 
-    // -------------------------------------------------------------- colors
-
-    private static final int GREEN = 0xFF3FB950;
-    private static final int RED = 0xFFF85149;
-    private static final int BLUE = 0xFF58A6FF;
-
-    /** Colorize unified-diff output: +green −red @@blue. */
-    private CharSequence diffify(String out) {
-        if (out.indexOf('\n') < 0 && !out.startsWith("+") && !out.startsWith("-")) {
-            return out;
-        }
-        SpannableStringBuilder b = new SpannableStringBuilder();
-        String[] lines = out.split("(?=\n)");
-        int start = 0;
-        for (String line : lines) {
-            int color = 0;
-            String t = line.trim();
-            if (t.startsWith("+++") || t.startsWith("---") || t.startsWith("diff")
-                    || t.startsWith("index ")) color = BLUE;
-            else if (t.startsWith("+")) color = GREEN;
-            else if (t.startsWith("-")) color = RED;
-            else if (t.startsWith("@@")) color = BLUE;
-            b.append(line);
-            if (color != 0) {
-                b.setSpan(new ForegroundColorSpan(color), start, b.length(),
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+    private void sys(String s) {
+        Row r = new Row();
+        r.kind = K_SYS; r.key = "sys-" + System.nanoTime(); r.ts = System.currentTimeMillis();
+        r.text.append(s);
+        ui.post(() -> {
+            synchronized (lock) {
+                rows.add(r); idxByKey.put(r.key, rows.size() - 1);
+                touchView(r);
             }
-            start = b.length();
-        }
-        return b;
+            autoscroll();
+        });
     }
 
-    // ------------------------------------------------------------- adapter
+    private void err(String title, String detail, String raw) {
+        Row r = new Row();
+        r.kind = K_ERR; r.key = "err-" + System.nanoTime(); r.ts = System.currentTimeMillis();
+        r.text.append(title);
+        if (detail != null && !detail.isEmpty()) r.output.append(detail);
+        if (raw != null && !raw.isEmpty()) {
+            if (r.output.length() > 0) r.output.append("\n----\n");
+            String rawT = raw.length() > 3000 ? raw.substring(0, 3000) + "…" : raw;
+            r.output.append(rawT);
+        }
+        r.open = true;
+        ui.post(() -> {
+            synchronized (lock) {
+                rows.add(r); idxByKey.put(r.key, rows.size() - 1);
+                touchView(r);
+            }
+            autoscroll();
+        });
+    }
 
-    private final class Adapter extends BaseAdapter {
-        @Override public int getCount() { return tr == null ? 0 : tr.rows.size(); }
-        @Override public Object getItem(int i) { return tr.rows.get(i); }
-        @Override public long getItemId(int i) { return i; }
-        @Override public int getViewTypeCount() { return 6; }
-        @Override public int getItemViewType(int i) { return tr.rows.get(i).kind; }
+    // ------------------------------------------------------------ views
 
-        @Override
-        public void notifyDataSetChanged() {
-            super.notifyDataSetChanged();
-            if (viewEmpty != null) {
-                viewEmpty.setVisibility(getCount() == 0 ? View.VISIBLE : View.GONE);
+    private boolean needFullRender;
+
+    /** Rebuild the view for one row (or append it) — main thread only. */
+    private void touchView(Row r) {
+        if (needFullRender) { renderAll(); return; }
+        Integer i = r.key == null ? null : idxByKey.get(r.key);
+        if (i == null || i >= rows.size() || rows.get(i) != r) { renderAll(); return; }
+        int idx = i;
+        View nv = buildRowView(r);
+        if (idx < list.getChildCount()) {
+            list.removeViewAt(idx);
+            list.addView(nv, idx);
+        } else if (idx == list.getChildCount()) {
+            list.addView(nv);
+            trimViews();
+        } else {
+            renderAll();
+        }
+    }
+
+    private void trimViews() {
+        if (rows.size() <= 450) return;
+        synchronized (lock) {
+            int cut = rows.size() - 350;
+            idxByKey.clear();
+            for (int i = 0; i < cut; i++) { /* dropped */ }
+            rows.subList(0, cut).clear();
+            for (int i = 0; i < rows.size(); i++) {
+                Row r = rows.get(i);
+                if (r.key != null) idxByKey.put(r.key, i);
+            }
+            needFullRender = true;
+        }
+        renderAll();
+    }
+
+    private void renderAll() {
+        List<Row> snapshot;
+        synchronized (lock) {
+            snapshot = new ArrayList<>(rows);
+            needFullRender = false;
+        }
+        list.removeAllViews();
+        for (Row r : snapshot) {
+            try {
+                list.addView(buildRowView(r));
+            } catch (Exception e) {
+                TextView tv = mono(new TextView(this), 12);
+                tv.setText("· (unrenderable message part) ·");
+                list.addView(tv);
             }
         }
+        autoscroll();
+    }
 
-        @Override
-        public View getView(int i, View conv, ViewGroup parent) {
-            Row m = tr.rows.get(i);
-            switch (m.kind) {
-                case K_USER:       return bindUser(conv, parent, m);
-                case K_ASSISTANT:  return bindAssistant(conv, parent, m);
-                case K_REASON:     return bindReason(conv, parent, m);
-                case K_TOOL:       return bindTool(conv, parent, m);
-                case K_SETUP:      return bindSetup(conv, parent, m);
-                default:           return bindSystem(conv, parent, m);
+    private void setAllOpen(boolean open) {
+        synchronized (lock) {
+            for (Row r : rows) {
+                if (r.kind == K_TOOL || r.kind == K_REASON) r.open = open;
             }
         }
+        renderAll();
+    }
 
-        private View inflate(int res, View conv, ViewGroup parent) {
-            return conv != null && conv.getTag() != null
-                    && ((Integer) conv.getTag()) == res
-                    ? conv
-                    : LayoutInflater.from(ChatActivity.this).inflate(res, parent, false);
-        }
+    private TextView text(int sizeSp, int colorRes, boolean bold) {
+        TextView tv = new TextView(this);
+        tv.setTextSize(sizeSp);
+        tv.setTextColor(getColor(colorRes));
+        if (bold) tv.setTypeface(Typeface.DEFAULT_BOLD);
+        return tv;
+    }
 
-        private View bindUser(View conv, ViewGroup parent, Row m) {
-            View v = inflate(R.layout.item_msg, conv, parent);
-            v.setTag(R.layout.item_msg);
-            TextView tv = v.findViewById(R.id.msg);
-            LinearLayout row = (LinearLayout) tv.getParent();
-            tv.setText(m.text);
-            tv.setBackgroundResource(R.drawable.bg_bubble_user);
-            row.setGravity(Gravity.END);
-            tv.setTypeface(Typeface.DEFAULT);
-            tv.setTextAppearance(android.R.style.TextAppearance_Material_Small);
-            return v;
-        }
+    private TextView mono(TextView tv, int sizeSp) {
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextSize(sizeSp);
+        return tv;
+    }
 
-        private View bindSystem(View conv, ViewGroup parent, Row m) {
-            View v = inflate(R.layout.item_msg, conv, parent);
-            v.setTag(R.layout.item_msg);
-            TextView tv = v.findViewById(R.id.msg);
-            LinearLayout row = (LinearLayout) tv.getParent();
-            tv.setText(m.text);
-            tv.setBackgroundResource(R.drawable.bg_bubble_system);
-            row.setGravity(Gravity.START);
-            tv.setTypeface(Typeface.MONOSPACE);
-            tv.setTextAppearance(android.R.style.TextAppearance_Material_Small);
-            return v;
-        }
+    private LinearLayout card() {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setBackgroundResource(R.drawable.bg_card);
+        int p = dp(10);
+        c.setPadding(p, p, p, p);
+        return c;
+    }
 
-        private View bindAssistant(View conv, ViewGroup parent, Row m) {
-            View v = inflate(R.layout.row_assistant, conv, parent);
-            v.setTag(R.layout.row_assistant);
-            TextView tv = v.findViewById(R.id.msg);
-            TextView meta = v.findViewById(R.id.tvMeta);
-            LinearLayout root = (LinearLayout) v;
-            tv.setText(Markdown.render(m.text.toString()));
-            tv.setBackgroundResource(R.drawable.bg_bubble_assistant);
-            root.setGravity(Gravity.START);
-            tv.setTypeface(Typeface.DEFAULT);
-            tv.setTextAppearance(android.R.style.TextAppearance_Material_Medium);
-            String metaS = m.msgId == null ? null : tr.metaByMsg.get(m.msgId);
-            if (metaS == null) {
-                meta.setVisibility(View.GONE);
-            } else {
-                meta.setVisibility(View.VISIBLE);
-                meta.setText(metaS);
+    private int dp(int v) {
+        return (int) (v * getResources().getDisplayMetrics().density);
+    }
+
+    private View buildRowView(Row r) {
+        switch (r.kind) {
+            case K_USER: {
+                LinearLayout wrap = new LinearLayout(this);
+                wrap.setOrientation(LinearLayout.HORIZONTAL);
+                TextView tv = text(15, R.color.user_text, false);
+                tv.setBackgroundResource(R.drawable.bg_bubble_user);
+                int p = dp(11);
+                tv.setPadding(p, dp(8), p, dp(8));
+                tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.78));
+                tv.setText(r.text.toString());
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.gravity = Gravity.END;
+                lp.topMargin = dp(6);
+                tv.setLayoutParams(lp);
+                wrap.addView(tv);
+                return wrap;
             }
-            return v;
-        }
-
-        private View bindReason(View conv, ViewGroup parent, Row m) {
-            View v = inflate(R.layout.row_reason, conv, parent);
-            v.setTag(R.layout.row_reason);
-            TextView chev = v.findViewById(R.id.tvChev);
-            TextView body = v.findViewById(R.id.tvReason);
-            boolean open = expanded.contains(m.partId);
-            chev.setText(open ? "▾" : "▸");
-            body.setVisibility(open ? View.VISIBLE : View.GONE);
-            if (open) body.setText(m.text);
-            v.setOnClickListener(l -> toggle(m.partId));
-            return v;
-        }
-
-        private View bindTool(View conv, ViewGroup parent, Row m) {
-            View v = inflate(R.layout.row_tool, conv, parent);
-            v.setTag(R.layout.row_tool);
-            TextView chev = v.findViewById(R.id.tvChev);
-            TextView head = v.findViewById(R.id.tvTool);
-            TextView dot = v.findViewById(R.id.tvDot);
-            LinearLayout content = v.findViewById(R.id.toolContent);
-            TextView tin = v.findViewById(R.id.tvToolInput);
-            TextView tout = v.findViewById(R.id.tvToolOutput);
-
-            boolean open = expanded.contains(m.partId);
-            chev.setText(open ? "▾" : "▸");
-            content.setVisibility(open ? View.VISIBLE : View.GONE);
-            head.setText(toolHeaderText(m));
-
-            int dotColor = R.color.text_secondary;
-            String dotCh = "●";
-            if (m.status.contains("error")) { dotColor = R.color.err; dotCh = "✕"; }
-            else if (m.status.contains("complet")) { dotColor = R.color.ok; dotCh = "✓"; }
-            else if (m.status.contains("run") || m.status.contains("pend")) { dotColor = R.color.warn; }
-            dot.setText(dotCh);
-            dot.setTextColor(getResources().getColor(dotColor));
-
-            if (open) {
-                if (m.input.length() > 0) {
-                    tin.setVisibility(View.VISIBLE);
-                    tin.setText(m.input);
-                } else tin.setVisibility(View.GONE);
-                if (m.output.length() > 0) {
-                    tout.setVisibility(View.VISIBLE);
-                    String out = m.output.toString();
-                    if (m.tool.equals("edit") || m.tool.equals("write")
-                            || m.tool.equals("patch")) {
-                        tout.setText(diffify(out));
-                    } else {
-                        tout.setText(out);
+            case K_ASSISTANT: {
+                LinearLayout box = new LinearLayout(this);
+                box.setOrientation(LinearLayout.VERTICAL);
+                box.setPadding(0, dp(6), 0, dp(2));
+                TextView body = text(15, R.color.text_primary, false);
+                body.setTextIsSelectable(true);
+                CharSequence md;
+                try { md = Markdown.render(r.text.toString()); }
+                catch (Exception e) { md = r.text.toString(); }
+                body.setText(md.length() == 0 ? "…" : md);
+                box.addView(body);
+                if (r.meta != null && !r.meta.isEmpty()) {
+                    TextView meta = text(11, R.color.text_secondary, false);
+                    meta.setText(r.meta);
+                    meta.setPadding(0, dp(2), 0, dp(4));
+                    box.addView(meta);
+                }
+                return box;
+            }
+            case K_REASON: {
+                LinearLayout c = card();
+                LinearLayout head = new LinearLayout(this);
+                head.setOrientation(LinearLayout.HORIZONTAL);
+                TextView h = text(13, R.color.accent_light, false);
+                h.setText("✦ Thinking" + (r.text.length() == 0 ? "…" : ""));
+                TextView chev = text(12, R.color.text_secondary, false);
+                chev.setText(r.open ? "▾" : "▸");
+                head.addView(h, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                head.addView(chev);
+                c.addView(head);
+                if (r.text.length() > 0) {
+                    LinearLayout.LayoutParams hp = (LinearLayout.LayoutParams) head.getLayoutParams();
+                    hp.topMargin = dp(2);
+                    head.setLayoutParams(hp);
+                }
+                if (r.open) {
+                    TextView body = text(13, R.color.text_secondary, false);
+                    body.setTypeface(Typeface.MONOSPACE);
+                    body.setTextIsSelectable(true);
+                    String t = r.text.toString();
+                    if (t.length() > 20000) t = t.substring(0, 20000) + "…";
+                    body.setText(t);
+                    body.setPadding(0, dp(6), 0, 0);
+                    c.addView(body);
+                }
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.topMargin = dp(6);
+                c.setLayoutParams(lp);
+                head.setOnClickListener(v -> { r.open = !r.open; touchView(r); });
+                return c;
+            }
+            case K_TOOL: {
+                LinearLayout c = card();
+                LinearLayout head = new LinearLayout(this);
+                head.setOrientation(LinearLayout.HORIZONTAL);
+                head.setGravity(Gravity.CENTER_VERTICAL);
+                int dotColor = "error".equals(r.status) ? R.color.err
+                        : "completed".equals(r.status) ? R.color.ok
+                        : ("running".equals(r.status) || "pending".equals(r.status))
+                        ? R.color.warn : R.color.text_secondary;
+                TextView dot = text(11, dotColor, false);
+                dot.setText("●");
+                TextView name = text(13, R.color.text_primary, true);
+                name.setText(r.tool == null ? "tool" : r.tool);
+                TextView st = text(12, R.color.text_secondary, false);
+                String word = "completed".equals(r.status) ? "done"
+                        : "error".equals(r.status) ? "error"
+                        : (r.status == null || r.status.isEmpty()) ? ""
+                        : r.status + "…";
+                String line = (r.title == null || r.title.isEmpty() ? "" : " · " + r.title)
+                        + (word.isEmpty() ? "" : " · " + word);
+                st.setText(line);
+                TextView chev = text(12, R.color.text_secondary, false);
+                chev.setText(r.open ? "▾" : "▸");
+                head.addView(dot);
+                head.addView(name);
+                head.addView(st, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                head.addView(chev);
+                st.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.55));
+                st.setSingleLine(true);
+                st.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                c.addView(head);
+                if (r.open) {
+                    if (r.input.length() > 0) {
+                        c.addView(label("input"));
+                        TextView in = mono(text(12, R.color.text_primary, false), 12);
+                        in.setTextIsSelectable(true);
+                        String t = r.input.toString();
+                        if (t.length() > 12000) t = t.substring(0, 12000) + "…";
+                        in.setText(t);
+                        in.setBackgroundColor(getColor(R.color.surface2));
+                        int p = dp(8);
+                        in.setPadding(p, p, p, p);
+                        c.addView(in);
                     }
-                } else tout.setVisibility(View.GONE);
+                    if (r.output.length() > 0) {
+                        c.addView(label("output"));
+                        TextView out = mono(text(12, R.color.text_primary, false), 12);
+                        out.setTextIsSelectable(true);
+                        String t = r.output.toString();
+                        if (t.length() > 12000) t = t.substring(0, 12000) + "…";
+                        out.setText(t);
+                        out.setBackgroundColor(getColor(R.color.surface2));
+                        int p = dp(8);
+                        out.setPadding(p, p, p, p);
+                        c.addView(out);
+                    }
+                }
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.topMargin = dp(6);
+                c.setLayoutParams(lp);
+                head.setOnClickListener(v -> { r.open = !r.open; touchView(r); });
+                return c;
             }
-            v.setOnClickListener(l -> toggle(m.partId));
-            return v;
+            case K_ERR: {
+                TextView tv = text(13, R.color.err, false);
+                String t = r.text + (r.output.length() > 0
+                        ? " — tap for details" : "");
+                tv.setText(t);
+                tv.setOnClickListener(v -> new AlertDialog.Builder(this)
+                        .setTitle(r.text.toString())
+                        .setMessage(r.output.toString())
+                        .setPositiveButton("Copy", (d, w) -> {
+                            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                            cm.setPrimaryClip(ClipData.newPlainText("error", r.output.toString()));
+                            Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show();
+                        })
+                        .setNegativeButton("Close", null)
+                        .show());
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.topMargin = dp(6);
+                tv.setLayoutParams(lp);
+                return tv;
+            }
+            default: {
+                TextView tv = text(12, R.color.text_secondary, false);
+                tv.setText(r.text.toString());
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                lp.topMargin = dp(6);
+                tv.setLayoutParams(lp);
+                return tv;
+            }
         }
+    }
 
-        private View bindSetup(View conv, ViewGroup parent, Row m) {
-            View v = inflate(R.layout.row_setup, conv, parent);
-            v.setTag(R.layout.row_setup);
-            TextView tv = v.findViewById(R.id.tvSetup);
-            tv.setText("⚙  " + m.text + "\nTap to connect API keys & pick a model →");
-            v.setOnClickListener(l -> startActivity(
-                    new Intent(ChatActivity.this, ProviderSetupActivity.class)));
-            return v;
-        }
+    private TextView label(String s) {
+        TextView tv = text(10, R.color.text_secondary, false);
+        tv.setText(s.toUpperCase(Locale.US));
+        tv.setPadding(0, dp(8), 0, dp(2));
+        return tv;
+    }
 
-        private void toggle(String partId) {
-            if (expanded.contains(partId)) expanded.remove(partId);
-            else expanded.add(partId);
-            notifyDataSetChanged();
+    // ------------------------------------------------------- permissions
+
+    private void checkPermissionQueue() {
+        Map<String, Object> perm = ServerService.peekPermission();
+        if (perm == null) {
+            permSlot.setVisibility(View.GONE);
+            permSlot.removeAllViews();
+            return;
         }
+        permSlot.setVisibility(View.VISIBLE);
+        permSlot.removeAllViews();
+        permSlot.addView(buildPermCard(perm));
+    }
+
+    private View buildPermCard(Map<String, Object> perm) {
+        final String id = Json.str(perm, "id");
+        String action = nz(Json.str(perm, "permission"),
+                nz(Json.str(perm, "type"), "tool"));
+        StringBuilder detail = new StringBuilder();
+        Map<String, Object> md = Json.map(perm, "metadata");
+        if (md != null) {
+            for (String k : new String[]{"title", "description", "path", "command"}) {
+                String v = Json.str(md, k);
+                if (v != null && !v.isEmpty()) detail.append(v).append('\n');
+            }
+            Object inp = md.get("input");
+            if (inp != null && !"null".equals(String.valueOf(inp))
+                    && String.valueOf(inp).trim().length() > 0) {
+                detail.append(inp);
+            }
+        }
+        List<Object> pats = Json.list(perm, "patterns");
+        if (pats != null && !pats.isEmpty()) detail.append("patterns: ").append(pats);
+        if (detail.length() == 0) detail.append("(no details provided)");
+
+        LinearLayout c = card();
+        TextView t = text(14, R.color.warn, true);
+        t.setText("⚠ Allow " + action + "?");
+        c.addView(t);
+        TextView d = mono(text(12, R.color.text_secondary, false), 12);
+        String dt = detail.toString();
+        if (dt.length() > 1500) dt = dt.substring(0, 1500) + "…";
+        d.setText(dt);
+        d.setPadding(0, dp(6), 0, dp(8));
+        c.addView(d);
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        btns.setGravity(Gravity.END);
+        Object[][] defs = {{"Always", "always", R.color.text_secondary},
+                {"Deny", "reject", R.color.err},
+                {"Allow", "once", R.color.accent_light}};
+        for (Object[] def : defs) {
+            TextView b = text(13, (Integer) def[2], true);
+            b.setText((String) def[0]);
+            b.setBackgroundResource(R.drawable.bg_chip);
+            int p = dp(12);
+            b.setPadding(p, dp(8), p, dp(8));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.leftMargin = dp(8);
+            b.setLayoutParams(lp);
+            final String resp = (String) def[1];
+            b.setOnClickListener(v -> { if (id != null) answerPermission(id, resp); });
+            btns.addView(b);
+        }
+        c.addView(btns);
+        return c;
+    }
+
+    private void answerPermission(String id, String response) {
+        final String sid = sessionId;
+        ex.execute(() -> {
+            String errS = null;
+            try {
+                // v1.18.x verified: the reply body key is "reply"
+                Api.Resp r = Api.post("/permission/" + id + "/reply",
+                        "{\"reply\":" + Json.quote(response) + "}", 15_000);
+                if (!r.ok() && r.status == 404 && sid != null) {
+                    r = Api.post("/session/" + sid + "/permissions/" + id,
+                            "{\"response\":" + Json.quote(response) + "}", 15_000);
+                }
+                if (!r.ok()) errS = "HTTP " + r.status;
+            } catch (Exception e) {
+                errS = String.valueOf(e);
+            }
+            final String f = errS;
+            ServerService.noteAnswered(id);
+            ui.post(() -> {
+                if (f != null) sys("permission reply failed · " + f);
+                checkPermissionQueue();
+            });
+        });
+    }
+
+    // ----------------------------------------------------------- palette
+
+    private void palette() {
+        final String[] cmds = {
+                "New chat", "Sessions…", "Model…", "Toggle Build / Plan",
+                "API keys…", "Server logs & shell…", "Restart server",
+                "Expand all cards", "Collapse all cards",
+                "Copy last response", "Export chat to Downloads"};
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        b.setTitle("⌘ commands");
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        int p = dp(16);
+        wrap.setPadding(p, dp(8), p, dp(8));
+        final EditText filter = new EditText(this);
+        filter.setHint("filter…");
+        filter.setTextSize(14);
+        filter.setSingleLine(true);
+        wrap.addView(filter);
+        final ListView lv = new ListView(this);
+        final List<String> visible = new ArrayList<>();
+        final android.widget.ArrayAdapter<String> ad = new android.widget.ArrayAdapter<>(
+                this, android.R.layout.simple_list_item_1, visible);
+        lv.setAdapter(ad);
+        wrap.addView(lv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(380)));
+        b.setView(wrap);
+        final AlertDialog dlg = b.create();
+        Runnable refill = () -> {
+            String q = filter.getText().toString().toLowerCase(Locale.US);
+            visible.clear();
+            for (String c : cmds) if (c.toLowerCase(Locale.US).contains(q)) visible.add(c);
+            ad.notifyDataSetChanged();
+        };
+        filter.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int c2, int d) {}
+            public void onTextChanged(CharSequence s, int a, int c2, int d) {}
+            public void afterTextChanged(Editable s) { refill.run(); }
+        });
+        refill.run();
+        lv.setOnItemClickListener((parent, v, pos, id2) -> {
+            dlg.dismiss();
+            runCommand(visible.get(pos));
+        });
+        dlg.show();
+    }
+
+    private void runCommand(String cmd) {
+        switch (cmd) {
+            case "New chat": loadSession(null); break;
+            case "Sessions…": sessionsSheet(); break;
+            case "Model…": modelSheet(); break;
+            case "Toggle Build / Plan": toggleMode(); break;
+            case "API keys…":
+                startActivity(new Intent(this, KeysActivity.class)); break;
+            case "Server logs & shell…":
+                startActivity(new Intent(this, DiagnosticsActivity.class)); break;
+            case "Restart server":
+                ServerService.restart(this);
+                Toast.makeText(this, "restarting server…", Toast.LENGTH_SHORT).show();
+                break;
+            case "Expand all cards": setAllOpen(true); break;
+            case "Collapse all cards": setAllOpen(false); break;
+            case "Copy last response": copyLast(); break;
+            case "Export chat to Downloads": exportChat(); break;
+            default: break;
+        }
+    }
+
+    // ---------------------------------------------------------- sessions
+
+    private static final class SessRow {
+        String id, title; double updated;
+    }
+
+    private void sessionsSheet() {
+        ex.execute(() -> {
+            final List<SessRow> listS = new ArrayList<>();
+            try {
+                Api.Resp r = Api.get("/session");
+                if (r.ok()) {
+                    List<Object> arr = Json.arr(Json.parse(r.body));
+                    if (arr != null) for (Object o : arr) {
+                        Map<String, Object> m = Json.obj(o);
+                        if (m == null) continue;
+                        SessRow s = new SessRow();
+                        s.id = Json.str(m, "id");
+                        s.title = nz(Json.str(m, "title"), "untitled");
+                        Map<String, Object> time = Json.map(m, "time");
+                        s.updated = time != null ? num(time.get("updated")) : 0;
+                        if (s.id != null) listS.add(s);
+                    }
+                }
+            } catch (Exception ignored) {}
+            listS.sort((a, b) -> Double.compare(b.updated, a.updated));
+            ui.post(() -> showSessions(listS));
+        });
+    }
+
+    private void showSessions(List<SessRow> listS) {
+        if (isFinishing() || isDestroyed()) return;
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        b.setTitle("Sessions");
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        ListView lv = new ListView(this);
+        List<Object[]> items = new ArrayList<>(); // [titleLine, timeLine, SessRow|null]
+        items.add(new Object[]{"＋  New chat", "start over", null});
+        for (SessRow s : listS) items.add(new Object[]{s.title, relTime(s.updated), s});
+        lv.setAdapter(new BaseAdapter() {
+            public int getCount() { return items.size(); }
+            public Object getItem(int i) { return items.get(i); }
+            public long getItemId(int i) { return i; }
+            public View getView(int i, View cv, ViewGroup parent) {
+                LinearLayout box = new LinearLayout(ChatActivity.this);
+                box.setOrientation(LinearLayout.VERTICAL);
+                int pad = dp(14);
+                box.setPadding(pad, dp(9), pad, dp(9));
+                Object[] it = items.get(i);
+                TextView t1 = text(14, i == 0 ? R.color.accent_light : R.color.text_primary, i == 0);
+                t1.setText(String.valueOf(it[0]));
+                t1.setSingleLine(true);
+                t1.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                TextView t2 = text(11, R.color.text_secondary, false);
+                t2.setText(String.valueOf(it[1]));
+                box.addView(t1);
+                box.addView(t2);
+                return box;
+            }
+        });
+        root.addView(lv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
+        b.setView(root);
+        final AlertDialog dlg = b.create();
+        lv.setOnItemClickListener((parent, v, pos, id3) -> {
+            dlg.dismiss();
+            Object[] it = items.get(pos);
+            if (it[2] == null) loadSession(null);
+            else loadSession(((SessRow) it[2]).id);
+        });
+        lv.setOnItemLongClickListener((parent, v, pos, id4) -> {
+            Object[] it = items.get(pos);
+            if (!(it[2] instanceof SessRow)) return true;
+            SessRow s = (SessRow) it[2];
+            new AlertDialog.Builder(this)
+                    .setTitle(s.title)
+                    .setItems(new String[]{"Open", "Delete"}, (d, w) -> {
+                        if (w == 0) { dlg.dismiss(); loadSession(s.id); }
+                        else confirmDelete(s);
+                    })
+                    .setNegativeButton("Cancel", null)
+                    .show();
+            return true;
+        });
+        dlg.show();
+    }
+
+    private void confirmDelete(SessRow s) {
+        new AlertDialog.Builder(this)
+                .setTitle("Delete session?")
+                .setMessage(s.title)
+                .setPositiveButton("Delete", (d, w) -> ex.execute(() -> {
+                    try {
+                        Api.Resp r = Api.call("DELETE", "/session/" + s.id, null, 10_000);
+                        if (!r.ok()) sys("delete failed · HTTP " + r.status);
+                        else if (s.id.equals(sessionId)) loadSession(null);
+                    } catch (Exception e) {
+                        sys("delete failed: " + e);
+                    }
+                }))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    // ------------------------------------------------------------ models
+
+    private void modelSheet() {
+        if (!ServerService.healthy()) {
+            Toast.makeText(this, "server not ready", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        ex.execute(() -> {
+            List<Models.Prov> provs = Models.fetch(this);
+            ui.post(() -> showModels(provs));
+        });
+    }
+
+    private void showModels(List<Models.Prov> provs) {
+        if (isFinishing() || isDestroyed()) return;
+        AlertDialog.Builder b = new AlertDialog.Builder(this);
+        b.setTitle("Model · all providers");
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int p = dp(16);
+        root.setPadding(p, dp(8), p, 0);
+        final EditText search = new EditText(this);
+        search.setHint("search " + countModels(provs) + " models…");
+        search.setTextSize(14);
+        search.setSingleLine(true);
+        root.addView(search);
+        final ListView lv = new ListView(this);
+        root.addView(lv, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(430)));
+        b.setView(root);
+        final AlertDialog dlg = b.create();
+
+        final List<Object[]> items = new ArrayList<>(); // [kind, Prov, Mdl]
+        Runnable refill = () -> {
+            String q = search.getText().toString().toLowerCase(Locale.US).trim();
+            items.clear();
+            String[] cur = Models.selected(this);
+            for (Models.Prov pr : provs) {
+                boolean provHit = q.isEmpty()
+                        || pr.id.toLowerCase(Locale.US).contains(q)
+                        || pr.name.toLowerCase(Locale.US).contains(q);
+                List<Models.Mdl> shown = new ArrayList<>();
+                for (Models.Mdl m : pr.models) {
+                    if (q.isEmpty() || provHit
+                            || m.id.toLowerCase(Locale.US).contains(q)
+                            || m.name.toLowerCase(Locale.US).contains(q)) shown.add(m);
+                }
+                if (shown.isEmpty() && !provHit) continue;
+                items.add(new Object[]{"h", pr, null});
+                int cap = Math.min(shown.size(), 120);
+                for (int i = 0; i < cap; i++) items.add(new Object[]{"m", pr, shown.get(i)});
+                if (shown.size() > cap) items.add(new Object[]{"t", pr,
+                        "… " + (shown.size() - cap) + " more (refine search)"});
+            }
+            lv.setAdapter(new BaseAdapter() {
+                public int getCount() { return items.size(); }
+                public Object getItem(int i) { return items.get(i); }
+                public long getItemId(int i) { return i; }
+                public View getView(int i, View cv, ViewGroup parent) {
+                    Object[] it = items.get(i);
+                    LinearLayout box = new LinearLayout(ChatActivity.this);
+                    box.setOrientation(LinearLayout.VERTICAL);
+                    int pad = dp(14);
+                    box.setPadding(pad, dp(8), pad, dp(8));
+                    if ("h".equals(it[0])) {
+                        Models.Prov pr = (Models.Prov) it[1];
+                        TextView t = text(12, R.color.accent_light, true);
+                        t.setText(pr.name + (pr.configured ? "  ✓" : "  (no key)"));
+                        box.addView(t);
+                    } else if ("m".equals(it[0])) {
+                        Models.Mdl m = (Models.Mdl) it[2];
+                        Models.Prov pr = (Models.Prov) it[1];
+                        boolean isCur = cur != null && cur[0].equals(pr.id)
+                                && cur[1].equals(m.id);
+                        TextView t1 = text(14, isCur ? R.color.ok : R.color.text_primary, isCur);
+                        t1.setText((isCur ? "✓ " : "") + m.name);
+                        t1.setSingleLine(true);
+                        t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                        TextView t2 = text(11, R.color.text_secondary, false);
+                        t2.setText(pr.id + "/" + m.id);
+                        t2.setSingleLine(true);
+                        t2.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                        box.addView(t1);
+                        box.addView(t2);
+                    } else {
+                        TextView t = text(12, R.color.text_secondary, false);
+                        t.setText(String.valueOf(it[2]));
+                        box.addView(t);
+                    }
+                    return box;
+                }
+            });
+        };
+        search.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int c2, int d) {}
+            public void onTextChanged(CharSequence s, int a, int c2, int d) {}
+            public void afterTextChanged(Editable s) { refill.run(); }
+        });
+        refill.run();
+        lv.setOnItemClickListener((parent, v, pos, id4) -> {
+            Object[] it = items.get(pos);
+            if (!"m".equals(it[0])) return;
+            Models.Prov pr = (Models.Prov) it[1];
+            Models.Mdl m = (Models.Mdl) it[2];
+            Models.save(this, pr.id, m.id);
+            try { AuthStore.setDefaultModel(this, pr.id, m.id); } catch (Exception ignored) {}
+            refreshChips();
+            Toast.makeText(this, "model → " + pr.id + "/" + m.id,
+                    Toast.LENGTH_SHORT).show();
+            dlg.dismiss();
+        });
+        dlg.show();
+    }
+
+    private int countModels(List<Models.Prov> provs) {
+        int n = 0;
+        for (Models.Prov p : provs) n += p.models.size();
+        return n;
+    }
+
+    // ------------------------------------------------------------- misc
+
+    private void copyLast() {
+        String last = null;
+        synchronized (lock) {
+            for (int i = rows.size() - 1; i >= 0; i--) {
+                Row r = rows.get(i);
+                if (r.kind == K_ASSISTANT && r.text.length() > 0) {
+                    last = r.text.toString();
+                    break;
+                }
+            }
+        }
+        if (last == null) {
+            Toast.makeText(this, "nothing to copy yet", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(ClipData.newPlainText("response", last));
+        Toast.makeText(this, "copied " + last.length() + " chars", Toast.LENGTH_SHORT).show();
+    }
+
+    private static final int REQ_EXPORT = 41;
+    private boolean exportPending;
+
+    private void exportChat() {
+        if (checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            exportPending = true;
+            requestPermissions(new String[]{
+                    android.Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                    android.Manifest.permission.READ_EXTERNAL_STORAGE}, REQ_EXPORT);
+            return;
+        }
+        doExport();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        if (code == REQ_EXPORT) {
+            if (exportPending) { exportPending = false; doExport(); }
+        }
+    }
+
+    private void doExport() {
+        ex.execute(() -> {
+            StringBuilder sb = new StringBuilder();
+            synchronized (lock) {
+                for (Row r : rows) {
+                    switch (r.kind) {
+                        case K_USER:
+                            sb.append("## you\n").append(r.text).append("\n\n");
+                            break;
+                        case K_ASSISTANT:
+                            sb.append("## agent").append(
+                                    r.meta == null ? "" : "  (" + r.meta + ")")
+                                    .append('\n').append(r.text).append("\n\n");
+                            break;
+                        case K_REASON:
+                            sb.append("> thinking: ").append(r.text).append("\n\n");
+                            break;
+                        case K_TOOL:
+                            sb.append("> tool ").append(r.tool).append(" [")
+                                    .append(r.status).append("] ")
+                                    .append(r.title).append('\n');
+                            if (r.output.length() > 0)
+                                sb.append("```\n").append(r.output).append("\n```\n");
+                            sb.append('\n');
+                            break;
+                        case K_ERR:
+                            sb.append("!! ").append(r.text).append(' ')
+                                    .append(r.output).append("\n\n");
+                            break;
+                        default:
+                            sb.append("-- ").append(r.text).append("\n\n");
+                    }
+                }
+            }
+            String out;
+            String where;
+            try {
+                File dir = android.os.Environment
+                        .getExternalStoragePublicDirectory(
+                                android.os.Environment.DIRECTORY_DOWNLOADS);
+                if (!dir.exists()) dir.mkdirs();
+                String ts = new SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US)
+                        .format(new Date());
+                File f = new File(dir, "opencode-chat-" + ts + ".txt");
+                try (OutputStream o = new FileOutputStream(f)) {
+                    o.write(sb.toString().getBytes("UTF-8"));
+                }
+                out = "saved " + f.getName();
+                where = f.getAbsolutePath();
+            } catch (Exception e) {
+                try {
+                    File f = new File(getExternalFilesDir(null),
+                            "opencode-chat-" + System.currentTimeMillis() + ".txt");
+                    try (OutputStream o = new FileOutputStream(f)) {
+                        o.write(sb.toString().getBytes("UTF-8"));
+                    }
+                    out = "saved " + f.getAbsolutePath();
+                    where = out;
+                } catch (Exception e2) {
+                    out = "export failed: " + e2;
+                    where = null;
+                }
+            }
+            final String msg = out;
+            final String fWhere = where;
+            ui.post(() -> {
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+                if (fWhere != null) sys("chat exported → " + fWhere);
+            });
+        });
+    }
+
+    // ---------------------------------------------------------- helpers
+
+    private static double num(Object o) {
+        return (o instanceof Number) ? ((Number) o).doubleValue() : 0;
+    }
+
+    private static String nz(String s, String dflt) {
+        return (s == null || s.isEmpty()) ? dflt : s;
+    }
+
+    private static String relTime(double sec) {
+        if (sec <= 0) return "";
+        long ms = (long) (sec * 1000.0);
+        long diff = System.currentTimeMillis() - ms;
+        if (diff < 0) diff = 0;
+        long m = diff / 60000;
+        if (m < 1) return "just now";
+        if (m < 60) return m + " min ago";
+        long h = m / 60;
+        if (h < 24) return h + " h ago";
+        return (h / 24) + " d ago";
     }
 }

@@ -1,12 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- OpenCode Mobile — P1 skeleton.
+<!-- OpenCode Mobile — P7 "the real chat app".
+
+     Single-purpose flow: launch → chat. MainActivity is only a boot screen
+     when the server isn't already healthy. No proot anywhere (P3-P6
+     sandbox removed): the bundled static binary runs natively via the
+     targetSdk-28 exec allowance, and a local CONNECT proxy bridges DNS.
 
      usesCleartextTraffic: app talks ONLY to the in-process loopback server
-     (127.0.0.1:4096). P2 will scope this with networkSecurityConfig.
+     (127.0.0.1:4096) and the local proxy.
 
      FOREGROUND_SERVICE: hosts `opencode serve` for the whole app lifetime.
      No foregroundServiceType needed — enforcement applies to apps targeting
-     API 34+, and we deliberately target 28.
+     API 34+, and we deliberately target 28 (Termux exec pattern).
 
      POST_NOTIFICATIONS: intentionally NOT requested at runtime — apps with
      targetSdk < 33 are granted it automatically on Android 13+. -->
@@ -15,12 +20,13 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
-    <!-- P3 sandbox: legacy storage for the agent's /sdcard bind (Termux
-         pattern — targetSdk 28 + these = legacy view on modern Android). -->
+    <!-- legacy storage: agent file tools can reach /sdcard; chat export
+         writes to Downloads (Termux pattern — targetSdk 28). -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
 
     <application
+        android:name=".App"
         android:label="OpenCode"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -41,14 +47,16 @@
             android:windowSoftInputMode="adjustResize"/>
 
         <activity
-            android:name=".SessionsActivity"
-            android:exported="false"/>
-
-        <activity
-            android:name=".ProviderSetupActivity"
+            android:name=".KeysActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
-            android:label="Connect APIs"/>
+            android:label="API keys"/>
+
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:label="Diagnostics"/>
 
         <service android:name=".ServerService" android:exported="false"/>
     </application>

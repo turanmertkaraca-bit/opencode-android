@@ -213,7 +213,7 @@ public class ServerService extends Service {
                 return;
             }
             try {
-                if (Api.status("/project", 2000) == 200) {
+                if (serverUp()) {
                     long ms = System.currentTimeMillis() - t0;
                     setState(ST_HEALTHY, "http 200 in " + ms + " ms");
                     updateNotif("running · 127.0.0.1:" + Api.PORT);
@@ -236,7 +236,7 @@ public class ServerService extends Service {
             }
             if (state != ST_HEALTHY) {
                 try {
-                    if (Api.status("/project", 2000) == 200) {
+                    if (serverUp()) {
                         setState(ST_HEALTHY, "http 200 (late)");
                         updateNotif("running · 127.0.0.1:" + Api.PORT);
                         startSse();
@@ -244,6 +244,15 @@ public class ServerService extends Service {
                 } catch (Exception ignored) {}
             }
         }
+    }
+
+    /** Health = any known server endpoint answering. P7: /project is not
+     *  guaranteed on every build, so /config/providers is accepted too. */
+    private static boolean serverUp() {
+        try { if (Api.status("/project", 2000) == 200) return true; } catch (Exception ignored) {}
+        try { if (Api.status("/config/providers", 2000) == 200) return true; } catch (Exception ignored) {}
+        try { if (Api.status("/doc", 2000) == 200) return true; } catch (Exception ignored) {}
+        return false;
     }
 
     // ------------------------------------------------------------------ SSE

@@ -2,7 +2,6 @@ package ai.opencode.app;
 
 import android.content.Context;
 import android.net.Uri;
-
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -182,13 +181,31 @@ public final class Binaries {
         java.util.Map<String, String> e = pb.environment();
         e.put("HOME", home);
         e.put("TMPDIR", c.getCacheDir().getAbsolutePath());
-        // shims FIRST: bare `bash`/`git` from the opencode server resolve to
-        // the sandbox shims (Sandboxes.ensureShims); everything else falls
-        // through to the host. Idempotent + cheap.
-        Sandboxes.ensureShims(c);
-        e.put("PATH", files + "/shims:" + files + ":/system/bin:/system/xbin");
+        // P7 native shims (no proot): bin/ (user + busybox) → shims/ → system.
+        Shims.ensure(c);
+        e.put("PATH", files + "/bin:" + files + "/shims:" + files
+                + ":/system/bin:/system/xbin");
         e.put("XDG_DATA_HOME", home + "/.local/share");
         e.put("XDG_CONFIG_HOME", home + "/.config");
         e.put("XDG_CACHE_HOME", home + "/.cache");
+        // P7 DNS: the bundled binary is a bionic/NDK Android build (interpreter
+        // /system/bin/linker64 — verified), so it uses netd DNS natively, like
+        // every Termux program. The local CONNECT proxy is an OPT-IN escape
+        // hatch (Diagnostics → "DNS bridge") for devices with exotic DNS/VPN
+        // setups; it is OFF by default so provider traffic takes the direct,
+        // proven path.
+        boolean bridge = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                .getBoolean("dns_bridge", false);
+        if (bridge) {
+            int pp = ProxyServer.ensureStarted(c);
+            if (pp > 0) {
+                String px = "http://127.0.0.1:" + pp;
+                String no = "127.0.0.1,localhost,::1";
+                e.put("HTTPS_PROXY", px); e.put("https_proxy", px);
+                e.put("HTTP_PROXY", px);  e.put("http_proxy", px);
+                e.put("ALL_PROXY", px);   e.put("all_proxy", px);
+                e.put("NO_PROXY", no);    e.put("no_proxy", no);
+            }
+        }
     }
 }
