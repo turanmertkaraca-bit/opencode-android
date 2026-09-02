@@ -1,23 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Pixel-dark palette (P4 refresh): deeper background, cleaner surfaces,
-     Google blue accent. background #0F1113 / surfaces #17191D, #1F2226,
-     blue #0B57D0, dark-mode blue #A8C7FA. -->
+<!-- P8 "midnight deck" palette: deep blue-black background, indigo accent,
+     glassy surfaces. Same color NAMES as P4-P7 (all screens keep working),
+     values refreshed for the new visual language. -->
 <resources>
-    <color name="bg">#0F1113</color>
-    <color name="surface">#17191D</color>
-    <color name="surface2">#1F2226</color>
-    <color name="stroke">#2C3037</color>
-    <color name="accent">#0B57D0</color>
-    <color name="accent_light">#A8C7FA</color>
+    <color name="bg">#0A0C12</color>
+    <color name="surface">#12151E</color>
+    <color name="surface2">#1A1F2C</color>
+    <color name="stroke">#262B38</color>
+    <color name="accent">#5B6CFF</color>
+    <color name="accent_light">#A5B4FF</color>
     <color name="on_accent">#FFFFFF</color>
-    <color name="text_primary">#E8EAED</color>
-    <color name="text_secondary">#9AA0A6</color>
-    <color name="user_bubble">#1A73E8</color>
+    <color name="text_primary">#ECEFF7</color>
+    <color name="text_secondary">#8B93A8</color>
+    <color name="user_bubble">#4F5BD5</color>
     <color name="user_text">#FFFFFF</color>
-    <color name="ok">#81C995</color>
-    <color name="err">#F28B82</color>
-    <!-- P6 tool-card status dots -->
-    <color name="warn">#FDD663</color>
-    <!-- P5 launcher icon background -->
-    <color name="ic_bg">#0B57D0</color>
+    <color name="ok">#7EE0A3</color>
+    <color name="err">#FF8A8A</color>
+    <color name="warn">#FFD166</color>
+    <color name="ic_bg">#5B6CFF</color>
+    <!-- P8 extras -->
+    <color name="bg_glow">#141B31</color>
+    <color name="dot_ready">#7EE0A3</color>
+    <color name="dot_busy">#FFD166</color>
+    <color name="dot_down">#FF8A8A</color>
+    <color name="dot_idle">#8B93A8</color>
 </resources>

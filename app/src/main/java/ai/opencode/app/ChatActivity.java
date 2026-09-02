@@ -1,5 +1,6 @@
 package ai.opencode.app;
 
+import android.animation.ObjectAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
@@ -19,6 +20,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.ScrollView;
@@ -61,6 +63,9 @@ public class ChatActivity extends Activity
     // row kinds
     static final int K_USER = 0, K_ASSISTANT = 1, K_REASON = 2, K_TOOL = 3, K_SYS = 4, K_ERR = 5;
 
+    // P8: which project sandbox this chat is attached to (from the deck)
+    private String projectName;
+
     static final class Row {
         int kind;
         String key;                 // stable identity for SSE upserts
@@ -90,6 +95,12 @@ public class ChatActivity extends Activity
     private TextView tvTitle, tvSub, tvStatus, chipMode, chipModel, btnSend;
     private EditText input;
     private LinearLayout permSlot;
+    // P8 polish
+    private View veil;
+    private LinearLayout typing;
+    private TextView scrollPill;
+    private boolean pillShown;
+    private final List<ObjectAnimator> typingAnims = new ArrayList<>();
 
     private String sessionId, sessionTitle;
     private String agent = "build";     // Tab parity: build <-> plan
@@ -124,12 +135,32 @@ public class ChatActivity extends Activity
         input = findViewById(R.id.input);
         permSlot = findViewById(R.id.permSlot);
 
+        // P8: project context from the deck (name shown in the subtitle;
+        // path is a safety net — switch sandbox if Home somehow didn't,
+        // but never during an in-flight restart Home already triggered).
+        Intent in = getIntent();
+        if (in != null) {
+            projectName = in.getStringExtra("project");
+            String path = in.getStringExtra("path");
+            if (path != null && Projects.validDir(path)
+                    && !ServerService.pendingRestart()
+                    && ServerService.needsSwitch(new File(path))) {
+                ServerService.switchTo(this, new File(path));
+            }
+        }
+
         findViewById(R.id.btnPalette).setOnClickListener(v -> palette());
         chipMode.setOnClickListener(v -> toggleMode());
         chipModel.setOnClickListener(v -> modelSheet());
         btnSend.setOnClickListener(v -> { if (busy) abortRun(); else send(); });
-        scroll.getViewTreeObserver().addOnScrollChangedListener(() ->
-                pinnedBottom = atBottom());
+        scroll.getViewTreeObserver().addOnScrollChangedListener(() -> {
+            pinnedBottom = atBottom();
+            syncPill();
+        });
+
+        buildVeil();
+        buildTyping();
+        buildPill();
 
         refreshChips();
         refreshServerUi();
@@ -142,8 +173,8 @@ public class ChatActivity extends Activity
         ServerService.subscribe(this);
         ServerService.subscribeEvents(this);
         int st = ServerService.getState();
-        if (st == ServerService.ST_IDLE || st == ServerService.ST_STOPPED
-                || st == ServerService.ST_EXITED) {
+        if ((st == ServerService.ST_IDLE || st == ServerService.ST_STOPPED
+                || st == ServerService.ST_EXITED) && !ServerService.pendingRestart()) {
             if (Binaries.binaryReady(this)) {
                 try {
                     startForegroundService(new Intent(this, ServerService.class));
@@ -171,11 +202,175 @@ public class ChatActivity extends Activity
         if (pinnedBottom) scroll.post(() -> scroll.fullScroll(ScrollView.FOCUS_DOWN));
     }
 
+    // -------------------------------------------------------- P8 ui extras
+
+    /** Full-screen "starting sandbox" veil — shown only while unhealthy. */
+    private void buildVeil() {
+        FrameLayout content = (FrameLayout) ((ViewGroup)
+                getWindow().getDecorView().findViewById(android.R.id.content));
+        FrameLayout fl = new FrameLayout(this);
+        fl.setBackgroundColor(0xE60A0C12);
+        fl.setClickable(true);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setBackground(Theme.panel(this));
+        int p = Theme.dp(this, 26);
+        card.setPadding(p, p, p, p);
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER);
+
+        TextView dot = new TextView(this);
+        dot.setText("●");
+        dot.setTextSize(18);
+        dot.setTextColor(Theme.WARN);
+        dot.setGravity(Gravity.CENTER);
+        card.addView(dot);
+        if (Theme.motionOn(this)) Theme.pulse(dot);
+
+        TextView t1 = new TextView(this);
+        t1.setText("starting sandbox");
+        t1.setTextSize(16);
+        t1.setTypeface(Typeface.DEFAULT_BOLD);
+        t1.setTextColor(Theme.TXT);
+        t1.setGravity(Gravity.CENTER);
+        t1.setPadding(0, Theme.dp(this, 10), 0, 0);
+        card.addView(t1);
+
+        TextView t2 = new TextView(this);
+        t2.setText(projectName == null ? "" : projectName);
+        t2.setTextSize(12);
+        t2.setTextColor(Theme.ACCENT_LT);
+        t2.setGravity(Gravity.CENTER);
+        t2.setPadding(0, Theme.dp(this, 4), 0, 0);
+        card.addView(t2);
+
+        TextView t3 = new TextView(this);
+        t3.setText("cold start ≈ 5 s · sessions and tools are rooted at\nyour project folder");
+        t3.setTextSize(11);
+        t3.setTextColor(Theme.TXT_DIM);
+        t3.setGravity(Gravity.CENTER);
+        t3.setPadding(0, Theme.dp(this, 8), 0, 0);
+        card.addView(t3);
+
+        fl.addView(card, clp);
+        content.addView(fl, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        veil = fl;
+        veil.setVisibility(View.GONE);
+    }
+
+    private void syncVeil(int st) {
+        if (veil == null) return;
+        boolean show = st != ServerService.ST_HEALTHY;
+        int vis = show ? View.VISIBLE : View.GONE;
+        if (veil.getVisibility() != vis) {
+            veil.setVisibility(vis);
+            if (show && Theme.motionOn(this)) Theme.appear(veil);
+        }
+    }
+
+    /** Three-dot typing indicator between transcript and composer. */
+    private void buildTyping() {
+        typing = new LinearLayout(this);
+        typing.setOrientation(LinearLayout.HORIZONTAL);
+        typing.setGravity(Gravity.CENTER_VERTICAL);
+        typing.setPadding(Theme.dp(this, 18), Theme.dp(this, 4), 0, Theme.dp(this, 2));
+        for (int i = 0; i < 3; i++) {
+            TextView d = new TextView(this);
+            d.setText("●");
+            d.setTextSize(9);
+            d.setTextColor(Theme.ACCENT_LT);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.rightMargin = Theme.dp(this, 4);
+            d.setLayoutParams(lp);
+            typing.addView(d);
+        }
+        TextView t = new TextView(this);
+        t.setText("thinking…");
+        t.setTextSize(12);
+        t.setTextColor(Theme.TXT_DIM);
+        typing.addView(t);
+        typing.setVisibility(View.GONE);
+
+        ViewGroup parent = (ViewGroup) scroll.getParent();
+        parent.addView(typing, Math.max(0, parent.indexOfChild(permSlot)));
+    }
+
+    private void syncTyping() {
+        if (typing == null) return;
+        int vis = busy ? View.VISIBLE : View.GONE;
+        if (typing.getVisibility() != vis) {
+            typing.setVisibility(vis);
+            if (vis == View.VISIBLE) {
+                if (Theme.motionOn(this)) {
+                    typingAnims.clear();
+                    long d = 0;
+                    for (int i = 0; i < 3; i++) {
+                        View dot = typing.getChildAt(i);
+                        dot.setAlpha(1f);
+                        ObjectAnimator a = Theme.pulse(dot);
+                        a.setStartDelay(d);
+                        d += 180;
+                        typingAnims.add(a);
+                    }
+                }
+            } else {
+                for (ObjectAnimator a : typingAnims) a.cancel();
+                typingAnims.clear();
+                for (int i = 0; i < 3; i++) typing.getChildAt(i).setAlpha(1f);
+            }
+        }
+    }
+
+    /** "↓ latest" pill above the composer when scrolled up. */
+    private void buildPill() {
+        FrameLayout content = (FrameLayout) ((ViewGroup)
+                getWindow().getDecorView().findViewById(android.R.id.content));
+        scrollPill = new TextView(this);
+        scrollPill.setText("↓  latest");
+        scrollPill.setTextSize(12);
+        scrollPill.setTextColor(Theme.ACCENT_LT);
+        scrollPill.setBackground(Theme.ripple(this, Theme.panel(this)));
+        scrollPill.setPadding(Theme.dp(this, 16), Theme.dp(this, 7), Theme.dp(this, 16), Theme.dp(this, 7));
+        FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        flp.bottomMargin = Theme.dp(this, 96);
+        content.addView(scrollPill, flp);
+        scrollPill.setVisibility(View.GONE);
+        scrollPill.setOnClickListener(v -> {
+            pinnedBottom = true;
+            scroll.fullScroll(ScrollView.FOCUS_DOWN);
+            syncPill();
+        });
+    }
+
+    private void syncPill() {
+        if (scrollPill == null) return;
+        boolean want = !pinnedBottom;
+        if (want == pillShown) return;
+        pillShown = want;
+        if (Theme.motionOn(this)) {
+            scrollPill.animate().alpha(want ? 1f : 0f).setDuration(140)
+                    .setInterpolator(Theme.DECEL)
+                    .withStartAction(() -> { if (want) scrollPill.setVisibility(View.VISIBLE); })
+                    .withEndAction(() -> { if (!want) scrollPill.setVisibility(View.GONE); })
+                    .start();
+        } else {
+            scrollPill.setVisibility(want ? View.VISIBLE : View.GONE);
+        }
+    }
+
     // ----------------------------------------------------------- composer
 
     private void toggleMode() {
         agent = "build".equals(agent) ? "plan" : "build";
         refreshChips();
+        Theme.pop(chipMode);
         Toast.makeText(this, "agent: " + agent, Toast.LENGTH_SHORT).show();
     }
 
@@ -204,6 +399,7 @@ public class ChatActivity extends Activity
                 btnSend.setTextColor(getColor(R.color.on_accent));
                 tvStatus.setVisibility(View.GONE);
             }
+            syncTyping();
         });
     }
 
@@ -211,6 +407,7 @@ public class ChatActivity extends Activity
         final String q = input.getText().toString().trim();
         if (q.isEmpty() || busy) return;
         input.setText("");
+        Theme.pop(btnSend); // P8 micro-anim: the send button springs
         ex.execute(() -> {
             try {
                 String sid = ensureSession();
@@ -360,16 +557,18 @@ public class ChatActivity extends Activity
         int st = ServerService.getState();
         String s;
         switch (st) {
-            case ServerService.ST_HEALTHY: s = "server ready"; break;
-            case ServerService.ST_STARTING: s = "server starting…"; break;
+            case ServerService.ST_HEALTHY: s = "sandbox ready"; break;
+            case ServerService.ST_STARTING: s = "starting sandbox…"; break;
             case ServerService.ST_EXITED: s = "server exited — ⌘ → Restart server"; break;
             case ServerService.ST_STOPPED: s = "server stopped — ⌘ → Restart server"; break;
             default: s = "server idle";
         }
+        if (projectName != null && !projectName.isEmpty()) s = projectName + " · " + s;
         if (!AuthStore.hasAnyKey(this) && st == ServerService.ST_HEALTHY) {
             s += " · no API key yet — ⌘ → API keys";
         }
         tvSub.setText(s);
+        syncVeil(st);
     }
 
     // ------------------------------------------------------------ history
@@ -785,9 +984,10 @@ public class ChatActivity extends Activity
         View nv = buildRowView(r);
         if (idx < list.getChildCount()) {
             list.removeViewAt(idx);
-            list.addView(nv, idx);
+            list.addView(nv, idx);   // streaming update — instant, no animation
         } else if (idx == list.getChildCount()) {
             list.addView(nv);
+            if (Theme.motionOn(this)) Theme.appear(nv); // new row: fade+rise
             trimViews();
         } else {
             renderAll();
@@ -1147,6 +1347,7 @@ public class ChatActivity extends Activity
     private void palette() {
         final String[] cmds = {
                 "New chat", "Sessions…", "Model…", "Toggle Build / Plan",
+                "Projects →", "Settings",
                 "API keys…", "Server logs & shell…", "Restart server",
                 "Expand all cards", "Collapse all cards",
                 "Copy last response", "Export chat to Downloads"};
@@ -1195,6 +1396,10 @@ public class ChatActivity extends Activity
             case "Sessions…": sessionsSheet(); break;
             case "Model…": modelSheet(); break;
             case "Toggle Build / Plan": toggleMode(); break;
+            case "Projects →":
+                startActivity(new Intent(this, HomeActivity.class)); break;
+            case "Settings":
+                startActivity(new Intent(this, SettingsActivity.class)); break;
             case "API keys…":
                 startActivity(new Intent(this, KeysActivity.class)); break;
             case "Server logs & shell…":

@@ -32,7 +32,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme"
-        android:allowBackup="false">
+        android:allowBackup="false"
+        android:requestLegacyExternalStorage="true">
 
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
@@ -41,10 +42,22 @@
             </intent-filter>
         </activity>
 
+        <!-- P8: the project deck — credit-card carousel, one sandbox per card -->
+        <activity
+            android:name=".HomeActivity"
+            android:exported="false"/>
+
         <activity
             android:name=".ChatActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"/>
+
+        <!-- P8: animated settings hub -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:label="Settings"/>
 
         <activity
             android:name=".KeysActivity"

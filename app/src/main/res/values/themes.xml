@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Dark-only for the P1 skeleton (developer-tool aesthetic; matches the
-         opencode TUI). Light/DynamicColor theming lands in P5 polish. -->
+    <!-- P8: dark-only, now with motion. windowAnimationStyle gives every
+         activity a fast slide/fade (150-220 ms) without touching any code. -->
     <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
         <item name="android:colorPrimary">@color/accent</item>
@@ -9,7 +9,19 @@
         <item name="android:colorAccent">@color/accent_light</item>
         <item name="android:statusBarColor">@color/bg</item>
         <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:windowLightStatusBar">false</item>
         <item name="android:textColorPrimary">@color/text_primary</item>
         <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:windowAnimationStyle">@style/OcWindowAnim</item>
+    </style>
+
+    <!-- fast + snappy: nothing lingers longer than ~220 ms -->
+    <style name="OcWindowAnim" parent="@android:style/Animation.Activity">
+        <item name="android:activityOpenEnterAnimation">@anim/slide_in_right</item>
+        <item name="android:activityOpenExitAnimation">@anim/fade_out</item>
+        <item name="android:activityCloseEnterAnimation">@anim/fade_in</item>
+        <item name="android:activityCloseExitAnimation">@anim/slide_out_right</item>
+        <item name="android:taskOpenEnterAnimation">@anim/slide_in_right</item>
+        <item name="android:taskOpenExitAnimation">@anim/fade_out</item>
     </style>
 </resources>

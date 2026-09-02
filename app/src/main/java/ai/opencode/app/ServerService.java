@@ -58,6 +58,31 @@ public class ServerService extends Service {
     private static final CopyOnWriteArrayList<EventListener> evtListeners = new CopyOnWriteArrayList<>();
 
     // ---- permission queue (P2, P4 rework) ----
+    // ---- P8 per-project sandbox ----
+    /** Desired server working directory (the project folder). opencode
+     *  scopes its project tools + sessions to cwd, so each project card
+     *  opens ITS OWN sandbox rooted at that folder. Null → app home. */
+    private static volatile File startDir;
+    private static volatile File servingDir;
+    /** True between restart() and the next spawn — screens must not
+     *  "helpfully" auto-start the service in that window. */
+    private static volatile boolean pendingRestart;
+
+    public static void setStartDir(File d) { startDir = d; }
+    public static boolean pendingRestart() { return pendingRestart; }
+    /** The directory the RUNNING server was started in (null = not serving). */
+    public static File servingDir() { return servingDir; }
+    /** True when opening this folder requires a server restart. */
+    public static boolean needsSwitch(File dir) {
+        return dir != null && (servingDir == null || !dir.equals(servingDir));
+    }
+    /** Runtime project switch: set the sandbox root and restart the server. */
+    public static void switchTo(Context c, File dir) {
+        if (dir == null || !dir.isDirectory()) return;
+        startDir = dir;
+        if (!dir.equals(servingDir)) restart(c);
+    }
+
     private static final ConcurrentLinkedQueue<Map<String, Object>> PERMS = new ConcurrentLinkedQueue<>();
     private static final Set<String> seenPermIds = ConcurrentHashMap.newKeySet();
     /** Request ids we already answered — tombstones so a re-seed/refresh can
@@ -73,6 +98,7 @@ public class ServerService extends Service {
      * them up; cold start is ~5 s). Safe to call from any foreground screen.
      */
     public static void restart(Context c) {
+        pendingRestart = true;
         Intent stop = new Intent(c, ServerService.class).setAction(ACTION_STOP);
         try { c.startService(stop); } catch (Exception ignored) {}
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
@@ -150,6 +176,7 @@ public class ServerService extends Service {
             return START_NOT_STICKY;
         }
         RUNNING = true;
+        pendingRestart = false;
         setState(ST_STARTING, "spawning opencode serve");
         runner = new Thread(() -> runServer(bin), "oc-server");
         runner.setDaemon(false);
@@ -169,11 +196,18 @@ public class ServerService extends Service {
 
         acquireWakeLock();
 
+        // P8: the project card decides the sandbox root. Everything the
+        // agent touches (sessions, file tools, shell cwd) is scoped to it.
+        File cwd = (startDir != null && startDir.isDirectory())
+                ? startDir : Binaries.homeDir(this);
+        servingDir = cwd;
+        setState(ST_STARTING, "sandbox: " + cwd.getName());
+
         ProcessBuilder pb = new ProcessBuilder(
                 bin.getAbsolutePath(), "serve",
                 "--port", String.valueOf(Api.PORT),
                 "--hostname", Api.HOST);
-        pb.directory(Binaries.homeDir(this));
+        pb.directory(cwd);
         pb.redirectErrorStream(true);
         Binaries.applyEnv(this, pb);
 
@@ -216,7 +250,7 @@ public class ServerService extends Service {
                 if (serverUp()) {
                     long ms = System.currentTimeMillis() - t0;
                     setState(ST_HEALTHY, "http 200 in " + ms + " ms");
-                    updateNotif("running · 127.0.0.1:" + Api.PORT);
+                    updateNotif("running · " + cwd.getName());
                     break;
                 }
             } catch (Exception ignored) {}
@@ -238,7 +272,7 @@ public class ServerService extends Service {
                 try {
                     if (serverUp()) {
                         setState(ST_HEALTHY, "http 200 (late)");
-                        updateNotif("running · 127.0.0.1:" + Api.PORT);
+                        updateNotif("running · " + cwd.getName());
                         startSse();
                     }
                 } catch (Exception ignored) {}
@@ -395,6 +429,7 @@ public class ServerService extends Service {
 
     private void stopServer() {
         RUNNING = false;
+        servingDir = null;
         HttpURLConnection c = sseConn;
         if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
         Process p = proc;

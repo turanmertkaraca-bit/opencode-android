@@ -7,13 +7,48 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.7.0 — open the app, land in the chat)
+## Install (v0.8.0 — projects as cards, one sandbox each)
 
-1. Grab `opencode-p7-v0.7.0-debug.apk` from the releases page and sideload
-   it (same signing key as v0.6.0 → updates in place).
+1. Grab `opencode-p8-v0.8.0-debug.apk` from the releases page and sideload
+   it (same signing key as v0.6.0/v0.7.0 → updates in place).
 2. Open the app. A short boot log runs once (unpack → server → health),
-   then the chat screen opens — like launching the TUI.
-3. **⌘ → API keys** → paste a key (OpenRouter/Groq have free tiers) → send.
+   then the **project deck** opens: your projects as credit-card gradient
+   cards, swipe up/down between them.
+3. Tap a card → that project's own sandbox → chat. **＋ → pick a folder**
+   adds a project. **⚙ → API keys** → paste a key (OpenRouter/Groq have
+   free tiers) → send.
+
+## What's in v0.8.0 (P8 — the deck: style, motion, per-project sandboxes)
+
+- **Project deck (home)** — projects shown as credit-card-style gradient
+  cards in a vertical snap carousel (`DeckView`, a custom framework-only
+  pager: one card per gesture, neighbors peek + shrink + dim, animated
+  page dots, pulsing status pill, staggered entrances). ＋ ghost card →
+  folder picker (browse /sdcard, create folders) → new card; long-press →
+  open / rename / remove (files are never touched).
+- **A sandbox per project** — tapping a card opens that project's OWN
+  sandbox: the opencode server is (re)started with the project folder as
+  its working directory, so the agent's file tools, sessions and shell
+  cwd are rooted exactly there. The last-used project is pre-warmed at
+  boot — opening its card is INSTANT (no restart); switching projects
+  shows an animated "starting sandbox" veil (~5 s cold start).
+- **Midnight-deck restyle** — deep blue-black background, indigo accent,
+  glassy surfaces, fast (≤ 230 ms) activity transitions app-wide; chat
+  rows animate in, a three-dot typing indicator pulses while the agent
+  thinks, a "↓ latest" pill appears when you scroll up, send/mode chips
+  spring on tap. Everything is framework views/APIs — still zero
+  dependencies.
+- **Settings, restyled** — animated hub (rounded sections, staggered
+  entrances, switch rows) with: server state + restart, DNS bridge,
+  default-model picker (all models), API keys, project deck link, and a
+  **sandbox doctor** that shows what the agent can actually run
+  (opencode version, busybox, bash/git shims, python3/node/gcc, PATH) —
+  plus an **Animations** toggle that also honors the system's "remove
+  animations" accessibility setting.
+- Chat logic from P7 is unchanged (⌘ palette — now with Projects and
+  Settings entries — Build/Plan chip, collapsed thinking/tool cards,
+  pinned permission card, searchable all-models, stop/abort, sessions,
+  export, crash capture).
 
 ## What's in v0.7.0 (P7 — from-scratch chat-first rewrite)
 
@@ -121,12 +156,10 @@ app/src/main/java/ai/opencode/app/
 scripts/                     toolchain setup, binary API scanners, packaging
 ```
 
-## Checksums (v0.7.0 release artifacts)
+## Checksums (v0.8.0 release artifacts)
 
 ```
-6384e745af0ee988a6f51e8aa205c0d71b614e0bb100d22c4e535b355d673a7d  opencode-linux-arm64-android.tar.gz
-f89839bd1ae7cf068b5b540b344a42aabe7147c6db4c65ec094d0e50379fa794  opencode-p7-v0.7.0-debug.apk
-90873aaf585ca23fd03274040d2555d8a91c43fb3effb64e2273c38f2692adc5  opencode-p7-kit.tar.gz
+(see SHA256SUMS.txt in the release assets — APK + kit + binary tarball)
 ```
 
 ## Status / roadmap
@@ -140,5 +173,6 @@ f89839bd1ae7cf068b5b540b344a42aabe7147c6db4c65ec094d0e50379fa794  opencode-p7-v0
 | P4 permissions + abort + polish | shipped |
 | P5 model picker + stop + session mgmt | shipped |
 | P6 wizard + bundled binary + in-app keys | shipped |
-| P7 chat-first rewrite, no proot, crash-proofing | **current** |
+| P7 chat-first rewrite, no proot, crash-proofing | shipped |
+| P8 project deck, per-project sandboxes, motion design | **current** |
 | Next: on-device toolchain (clang) import path | planned |

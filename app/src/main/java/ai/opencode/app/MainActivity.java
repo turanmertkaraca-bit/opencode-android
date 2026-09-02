@@ -14,14 +14,13 @@ import java.io.FileInputStream;
 import java.io.InputStream;
 
 /**
- * P7 boot: launch → (server healthy? chat : auto-boot → chat).
+ * P8 boot: launch → (home? chat : auto-boot → home).
  *
- * The P6 wizard (progress cards, Connect card, sandbox steps) is GONE —
- * the user opens the app and lands in the chat like the opencode TUI.
  * Boot is a quiet log: unpack the bundled binary if needed, start the
- * foreground service, wait for health, jump to chat. Any failure shows
- * two buttons: Retry and Diagnostics. No step is ever user-blocking by
- * design; the chat screen itself tolerates a not-yet-healthy server.
+ * foreground service, wait for health, then hand off to the PROJECT DECK
+ * (HomeActivity) — the new home screen with the credit-card carousel.
+ * The last-used project is pre-warmed as the server's sandbox root so
+ * opening its card needs no restart. Any failure shows Retry/Diagnostics.
  */
 public class MainActivity extends Activity implements ServerService.Evt {
 
@@ -51,7 +50,7 @@ public class MainActivity extends Activity implements ServerService.Evt {
         }
 
         if (ServerService.healthy()) {
-            goChat();
+            goHome();
             return;
         }
         ServerService.subscribe(this);
@@ -68,6 +67,15 @@ public class MainActivity extends Activity implements ServerService.Evt {
 
     private void boot() {
         line("OpenCode · starting");
+        // P8: pre-warm the last project's sandbox root BEFORE the server
+        // spawns — opening its card later is instant (no restart).
+        try {
+            Projects.P last = Projects.last(this);
+            if (last != null && Projects.validDir(last.path)) {
+                ServerService.setStartDir(new File(last.path));
+                line("sandbox: " + last.name);
+            }
+        } catch (Exception ignored) {}
         new Thread(() -> {
             try {
                 if (!Binaries.binaryReady(this)) {
@@ -88,7 +96,7 @@ public class MainActivity extends Activity implements ServerService.Evt {
                 long t0 = System.currentTimeMillis();
                 while (!failed && System.currentTimeMillis() - t0 < 90_000) {
                     Thread.sleep(400);
-                    if (ServerService.healthy()) { goChat(); return; }
+                    if (ServerService.healthy()) { goHome(); return; }
                     int s = ServerService.getState();
                     if (s == ServerService.ST_EXITED) {
                         fail("server exited · " + ServerService.getTail());
@@ -116,17 +124,17 @@ public class MainActivity extends Activity implements ServerService.Evt {
         diag.setVisibility(View.GONE);
     }
 
-    private void goChat() {
+    private void goHome() {
         synchronized (this) {
             if (launched) return;
             launched = true;
         }
         runOnUiThread(() -> {
             try {
-                startActivity(new Intent(this, ChatActivity.class));
+                startActivity(new Intent(this, HomeActivity.class));
                 finish();
             } catch (Exception e) {
-                fail("cannot open chat: " + e);
+                fail("cannot open home: " + e);
             }
         });
     }
@@ -173,7 +181,7 @@ public class MainActivity extends Activity implements ServerService.Evt {
 
     @Override
     public void on(int newState, String detail) {
-        if (newState == ServerService.ST_HEALTHY) goChat();
+        if (newState == ServerService.ST_HEALTHY) goHome();
         else if (newState == ServerService.ST_EXITED && !launched) {
             fail(detail == null ? "server exited" : detail);
         }
