@@ -7,17 +7,41 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.9.0 — pkg package manager + realtime chat)
+## Install (v0.10.0 — self-tested polish: permission fix, deck feel, chat blocks)
 
-1. Grab `opencode-p9-v0.9.0-debug.apk` from the releases page and sideload
-   it (same signing key as v0.6.0-v0.8.0 → updates in place).
+1. Grab `opencode-p10-v0.10.0-debug.apk` from the releases page and sideload
+   it (same signing key as v0.6.0-v0.9.0 → updates in place).
 2. Open the app. The first boot unpacks the agent (~60 MB) and the sandbox
    toolkit (~4 MB, watch the log), then the **project deck** opens.
 3. Tap a project card → that project's own sandbox → chat. **＋ → pick a
-   folder** adds a project. **⌘ → API keys** → paste a key → send.
-4. The agent can now install its own tooling — `pkg install python3 git
+   folder** adds a project. **⌘ → API keys** → OpenCode Zen (first row) or
+   any provider → paste a key → send.
+4. The agent can install its own tooling — `pkg install python3 git
    nodejs gcc …` (Alpine packages via apk, no proot; wrappers auto-link
    onto PATH; downloads flow through the in-app proxy).
+
+## What's in v0.10.0 (P10 — every fix verified by an automated self-test)
+
+- **Permission buttons FIXED** — Allow / Always allow / Deny were dead
+  because replies queued on the same single thread as the (blocking)
+  message POST — and permissions always arrive mid-run. Replies now run
+  on a dedicated pool; an automated test taps Allow and watches
+  `POST /permission/{id}/reply {"reply":"once"}` arrive on the wire.
+  Endpoint + reply values verified against the shipped v1.18.25 binary.
+  The approval card is now an indigo sheet with big buttons + toasts.
+- **Fast fling FIXED** — a quick flick on the deck always lands on the
+  next/previous card (ViewPager's direction rule anchored at the gesture's
+  start page). 5 regression tests encode the complaint.
+- **Cards stay together** — the deck is a stacked wallet: card-height +
+  small gap between cards, neighbors peek above/below, strip biased up.
+- **Chat blocks redesigned** — tool calls are icon-disc cards (per-tool
+  color, status line, tap-anywhere expand, rounded INPUT/OUTPUT code
+  blocks); THINKING cards are violet with italic voice.
+- **OpenCode Zen key** — listed first on the API keys screen.
+- **Easier navigation** — visible back button in the chat header.
+- **Self-test harness shipped** (`app/src/test/`): DeckSnapTest (5),
+  PermissionFlowTest (2, real HTTP round-trips), ScreenTest (3, renders
+  real views to PNGs) — 10/10 green at release time.
 
 ## What's in v0.9.0 (P9)
 
