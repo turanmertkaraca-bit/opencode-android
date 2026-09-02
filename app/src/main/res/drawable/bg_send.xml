@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- P9: circular gradient send FAB. -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
-    <solid android:color="@color/user_bubble"/>
+    <gradient android:angle="45" android:startColor="#5B6CFF" android:endColor="#8B5CF6"/>
 </shape>

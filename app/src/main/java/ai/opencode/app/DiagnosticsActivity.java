@@ -136,7 +136,8 @@ public class DiagnosticsActivity extends Activity {
         TextView run = chip("Run");
         run.setOnClickListener(v -> runShell(cmd.getText().toString(), tvShellOut));
         b3.addView(run);
-        for (String preset : new String[]{"uname -a", "busybox | head -1", "ls /system/bin"}) {
+        for (String preset : new String[]{"uname -a", "busybox | head -1", "pkg version",
+                "pkg list | head -12", "pkg rehash", "ls /system/bin"}) {
             TextView c = chip(preset);
             c.setOnClickListener(v -> { cmd.setText(preset); runShell(preset, tvShellOut); });
             b3.addView(c);

@@ -181,13 +181,21 @@ public final class Binaries {
         java.util.Map<String, String> e = pb.environment();
         e.put("HOME", home);
         e.put("TMPDIR", c.getCacheDir().getAbsolutePath());
-        // P7 native shims (no proot): bin/ (user + busybox) → shims/ → system.
+        // P7 native shims (no proot): bin/ (user + busybox) → P9 wrappers/ (alpine)
+        // → shims/ (bash/git/pkg fallbacks) → system.
         Shims.ensure(c);
-        e.put("PATH", files + "/bin:" + files + "/shims:" + files
+        e.put("PATH", files + "/bin:" + files + "/wrappers:" + files
+                + "/shims:" + files
                 + ":/system/bin:/system/xbin");
         e.put("XDG_DATA_HOME", home + "/.local/share");
         e.put("XDG_CONFIG_HOME", home + "/.config");
         e.put("XDG_CACHE_HOME", home + "/.cache");
+        // P9: alpine toolkit — refresh the musl-world proxy file when ready;
+        // otherwise kick a one-shot background extraction (never blocks spawn).
+        try {
+            if (Sandbox.ready(c)) Sandbox.refreshProxy(c);
+            else Sandbox.ensureAsync(c);
+        } catch (Exception ignored) {}
         // P7 DNS: the bundled binary is a bionic/NDK Android build (interpreter
         // /system/bin/linker64 — verified), so it uses netd DNS natively, like
         // every Termux program. The local CONNECT proxy is an OPT-IN escape

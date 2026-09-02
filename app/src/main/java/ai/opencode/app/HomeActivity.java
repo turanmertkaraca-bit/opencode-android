@@ -144,19 +144,26 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         top.addView(gear);
         root.addView(top);
 
-        // ---- deck
+        // ---- deck + vertical page rail (P9: the old HORIZONTAL dots sat
+        // under a VERTICAL deck and read as left/right — misleading).
+        FrameLayout deckHost = new FrameLayout(this);
         deck = new DeckView(this);
         deck.setPadding(0, Theme.dp(this, 8), 0, Theme.dp(this, 8));
-        root.addView(deck, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        deckHost.addView(deck, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
 
-        // ---- dots
         dots = new LinearLayout(this);
-        dots.setOrientation(LinearLayout.HORIZONTAL);
-        dots.setGravity(Gravity.CENTER);
-        dots.setPadding(0, Theme.dp(this, 2), 0, Theme.dp(this, 6));
-        root.addView(dots, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        dots.setOrientation(LinearLayout.VERTICAL);
+        dots.setGravity(Gravity.CENTER_VERTICAL);
+        dots.setPadding(0, 0, Theme.dp(this, 5), 0);
+        FrameLayout.LayoutParams rlp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.END | Gravity.CENTER_VERTICAL);
+        deckHost.addView(dots, rlp);
+
+        root.addView(deckHost, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         // ---- status pill
         LinearLayout pill = new LinearLayout(this);
@@ -324,6 +331,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         }
     }
 
+    /** P9: vertical rail on the right edge — page dots READ as up/down. */
     private void syncDots(int page) {
         int n = cur.size() + 1;
         if (dots.getChildCount() != n) {
@@ -332,7 +340,8 @@ public class HomeActivity extends Activity implements ServerService.Evt {
                 View d = new View(this);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         Theme.dp(this, 6), Theme.dp(this, 6));
-                lp.rightMargin = Theme.dp(this, 5);
+                lp.topMargin = Theme.dp(this, 4);
+                lp.bottomMargin = Theme.dp(this, 4);
                 d.setLayoutParams(lp);
                 d.setBackground(Theme.circle(0x558B93A8));
                 dots.addView(d);
@@ -341,8 +350,10 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         for (int i = 0; i < n; i++) {
             View d = dots.getChildAt(i);
             boolean active = i == page;
-            d.getLayoutParams().width = Theme.dp(this, active ? 18 : 6);
-            d.requestLayout();
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) d.getLayoutParams();
+            lp.height = Theme.dp(this, active ? 20 : 6);
+            lp.width = Theme.dp(this, active ? 6 : 6);
+            d.setLayoutParams(lp);
             d.setBackground(Theme.circle(active ? Theme.ACCENT_LT : 0x558B93A8));
         }
     }

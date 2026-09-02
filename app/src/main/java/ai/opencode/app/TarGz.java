@@ -31,12 +31,27 @@ public final class TarGz {
 
     public interface Progress { void on(String msg); }
 
+    /**
+     * P9: pluggable symlink policy. The P5 rootfs emulates links with
+     * proot-style "#!/bin/sh" shims; the P9 Alpine layer needs
+     * musl-loader wrapper scripts instead. Implementations receive the
+     * archive-relative name, raw target, and exec bit.
+     */
+    public interface LinkHandler { void link(File destDir, String name, String target, boolean exec); }
+
     private static final class Link {
         final String name, target;
         Link(String n, String t) { name = n; target = t; }
     }
 
+    /** Legacy entry point (P5 proot-style link emulation). */
     public static void extractAll(InputStream raw, File destDir, boolean gz, Progress cb)
+            throws IOException {
+        extractAll(raw, destDir, gz, cb, null);
+    }
+
+    public static void extractAll(InputStream raw, File destDir, boolean gz, Progress cb,
+                                  LinkHandler handler)
             throws IOException {
         InputStream in = raw;
         if (gz) in = new GZIPInputStream(new BufferedInputStream(raw, 1 << 16));
@@ -107,8 +122,13 @@ public final class TarGz {
                 } else if (type == '2') {
                     String target = cstr(hdr, 157, 100);
                     links.add(new Link(name, target));
+                } else if (type == '1' && handler != null) {
+                    // P9: hardlinks appear in some Alpine packages. Same
+                    // treatment as a symlink to a regular file.
+                    String target = cstr(hdr, 157, 100);
+                    handler.link(destDir, name, target, (mode & 0111) != 0);
                 }
-                // types '1' (hardlink), '3','4','6' (dev nodes), 'g': not present
+                // types '3','4','6' (dev nodes), 'g': not present
                 // in the Alpine minirootfs — skip data if any size attached.
                 skipPad(in, size);
             }
@@ -117,6 +137,17 @@ public final class TarGz {
         }
 
         cb.on("resolving " + links.size() + " symlinks…");
+
+        if (handler != null) {
+            // P9: custom policy (Alpine musl-loader wrappers).
+            int made = 0;
+            for (Link l : links) {
+                if (made++ % 60 == 0) cb.on("linking… " + made + "/" + links.size());
+                handler.link(destDir, l.name, l.target, false);
+            }
+            finish(destDir, links, execFiles, cb, files);
+            return;
+        }
 
         // Real copies first: shebangs must land on genuine executables.
         copyWithin(destDir, "bin/busybox", "bin/sh");
@@ -127,6 +158,11 @@ public final class TarGz {
             if (made++ % 40 == 0) cb.on("resolving symlinks… " + made + "/" + links.size());
             resolveLink(destDir, l.name, l.target);
         }
+        finish(destDir, links, execFiles, cb, files);
+    }
+
+    private static void finish(File destDir, List<Link> links, List<String> execFiles,
+                               Progress cb, int files) {
 
         for (String e : execFiles) {
             File f = new File(destDir, e);
@@ -204,14 +240,14 @@ public final class TarGz {
     }
 
     /** Resolve a relative link target against the link's directory. */
-    private static String rel(String name, String target) {
+    static String rel(String name, String target) {
         int slash = name.lastIndexOf('/');
         String dir = slash >= 0 ? name.substring(0, slash + 1) : "";
         return dir + target;
     }
 
     /** Normalize: strip leading './', collapse 'x/../y', reject escapes. */
-    private static String norm(String p) {
+    static String norm(String p) {
         if (p == null) return "";
         String[] parts = p.split("/");
         java.util.Deque<String> st = new java.util.ArrayDeque<>();

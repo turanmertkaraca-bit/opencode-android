@@ -70,6 +70,7 @@ public class ChatActivity extends Activity
         int kind;
         String key;                 // stable identity for SSE upserts
         StringBuffer text = new StringBuffer();
+        int shown;                  // P9: chars painted so far (streaming caret)
         String tool, status, title, meta;
         StringBuffer input = new StringBuffer();
         StringBuffer output = new StringBuffer();
@@ -95,6 +96,14 @@ public class ChatActivity extends Activity
     private TextView tvTitle, tvSub, tvStatus, chipMode, chipModel, btnSend;
     private EditText input;
     private LinearLayout permSlot;
+    // P9: hero empty state + in-place view cache for smooth streaming
+    private LinearLayout emptyHero, suggestBox;
+    private TextView btnSessions;
+    private final Map<String, View> viewByKey = new HashMap<>();
+    private final Map<String, TextView> bodyByKey = new HashMap<>();
+    private final Map<String, TextView> metaByKey = new HashMap<>();
+    private final Handler smoother = new Handler(Looper.getMainLooper());
+    private boolean smootherRunning;
     // P8 polish
     private View veil;
     private LinearLayout typing;
@@ -150,6 +159,10 @@ public class ChatActivity extends Activity
         }
 
         findViewById(R.id.btnPalette).setOnClickListener(v -> palette());
+        btnSessions = findViewById(R.id.btnSessions);
+        if (btnSessions != null) btnSessions.setOnClickListener(v -> sessionsSheet());
+        emptyHero = findViewById(R.id.emptyHero);
+        suggestBox = findViewById(R.id.suggestBox);
         chipMode.setOnClickListener(v -> toggleMode());
         chipModel.setOnClickListener(v -> modelSheet());
         btnSend.setOnClickListener(v -> { if (busy) abortRun(); else send(); });
@@ -161,6 +174,7 @@ public class ChatActivity extends Activity
         buildVeil();
         buildTyping();
         buildPill();
+        buildSuggestions();
 
         refreshChips();
         refreshServerUi();
@@ -200,6 +214,113 @@ public class ChatActivity extends Activity
 
     private void autoscroll() {
         if (pinnedBottom) scroll.post(() -> scroll.fullScroll(ScrollView.FOCUS_DOWN));
+    }
+
+    // ------------------------------------------------- P9 stream smoother
+
+    /**
+     * Token-by-token feel: SSE deltas land in Row.text (the target) and a
+     * 24 ms ticker paints a few more chars into the row's TextView with a
+     * caret — plain text while streaming (cheap), full markdown ONCE when
+     * the part catches up. Adaptive step = remaining/8 + 3 chars, so short
+     * replies land instantly and long ones glide.
+     */
+    private void startSmoother() {
+        if (smootherRunning) return;
+        smootherRunning = true;
+        smoother.postDelayed(tick, 24);
+    }
+
+    private final Runnable tick = new Runnable() {
+        @Override public void run() {
+            boolean more = false;
+            synchronized (lock) {
+                for (int i = rows.size() - 1; i >= 0; i--) {
+                    Row r = rows.get(i);
+                    int len = r.text.length();
+                    if (r.shown > len) r.shown = len;
+                    if (r.kind != K_ASSISTANT || r.shown >= len) continue;
+                    if (i != rows.size() - 1) {
+                        r.shown = len;          // a newer row appeared: snap
+                    } else {
+                        int step = 3 + (len - r.shown) / 8;
+                        r.shown = Math.min(len, r.shown + step);
+                    }
+                    paintStreaming(r);
+                    if (r.shown < len) more = true;
+                }
+            }
+            if (pinnedBottom) scroll.fullScroll(ScrollView.FOCUS_DOWN);
+            if (more) {
+                smoother.postDelayed(this, 24);
+            } else {
+                smootherRunning = false;
+            }
+        }
+    };
+
+    /** In-place text paint while streaming (no view rebuilds). */
+    private void paintStreaming(Row r) {
+        TextView body = bodyByKey.get(r.key);
+        View root = viewByKey.get(r.key);
+        if (body == null || root == null) { touchView(r); return; }
+        int len = r.text.length();
+        int upto = Math.min(r.shown, len);
+        String s = r.text.substring(0, upto);
+        body.setText(s.length() == 0 ? "…" : s + "▍");
+        if (r.shown >= len) {
+            // caught up → finalize with markdown (single rebuild)
+            touchView(r);
+        }
+    }
+
+    private boolean isStreamingTail(Row r) {
+        if (!Theme.motionOn(this)) return false;
+        synchronized (lock) {
+            boolean last = !rows.isEmpty() && rows.get(rows.size() - 1) == r;
+            return last && r.kind == K_ASSISTANT && r.shown < r.text.length()
+                    && r.text.length() <= 40000;
+        }
+    }
+
+    // --------------------------------------------------- P9 empty state
+
+    private void buildSuggestions() {
+        if (suggestBox == null) return;
+        String[][] ideas = {
+                {"Explain this codebase", "walk me through how this project is structured"},
+                {"Fix a bug", "find a bug in this project and fix it"},
+                {"Add a feature", "suggest and build one useful feature for this project"},
+                {"Write tests", "add tests for the most important code here"}};
+        for (String[] idea : ideas) {
+            TextView c = new TextView(this);
+            c.setText(idea[0]);
+            c.setTextSize(13);
+            c.setTypeface(Typeface.DEFAULT_BOLD);
+            c.setTextColor(getColor(R.color.accent_light));
+            c.setBackgroundResource(R.drawable.bg_suggest);
+            int p = dp(14);
+            c.setPadding(p, dp(9), p, dp(9));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = dp(8);
+            c.setLayoutParams(lp);
+            Theme.press(c);
+            c.setOnClickListener(v -> {
+                input.setText(idea[1]);
+                input.setSelection(idea[1].length());
+                input.requestFocus();
+            });
+            suggestBox.addView(c);
+        }
+    }
+
+    private void syncEmpty() {
+        if (emptyHero == null) return;
+        boolean empty;
+        synchronized (lock) { empty = rows.isEmpty(); }
+        int vis = empty ? View.VISIBLE : View.GONE;
+        if (emptyHero.getVisibility() != vis) emptyHero.setVisibility(vis);
     }
 
     // -------------------------------------------------------- P8 ui extras
@@ -578,9 +699,11 @@ public class ChatActivity extends Activity
         ui.post(() -> {
             synchronized (lock) {
                 rows.clear(); idxByKey.clear(); typeCount.clear(); msgs.clear();
+                viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
             }
             list.removeAllViews();
             pinnedBottom = true;
+            syncEmpty();
         });
         if (id == null) {
             sessionTitle = "New chat";
@@ -975,12 +1098,37 @@ public class ChatActivity extends Activity
 
     private boolean needFullRender;
 
-    /** Rebuild the view for one row (or append it) — main thread only. */
+    /** Rebuild the view for one row (or append it) — main thread only.
+     *  P9: text rows update their cached TextView in place; only the
+     *  streaming tail animates char-by-char via the smoother. */
     private void touchView(Row r) {
         if (needFullRender) { renderAll(); return; }
         Integer i = r.key == null ? null : idxByKey.get(r.key);
         if (i == null || i >= rows.size() || rows.get(i) != r) { renderAll(); return; }
         int idx = i;
+        int len = r.text.length();
+        if (r.shown > len) r.shown = len;
+
+        if (r.kind == K_ASSISTANT && r.shown < len && isStreamingTail(r)) {
+            // hand the row to the smoother: first paint shows the tail view
+            View nv = buildRowView(r);
+            if (idx < list.getChildCount()) {
+                list.removeViewAt(idx);
+                list.addView(nv, idx);
+            } else if (idx == list.getChildCount()) {
+                list.addView(nv);
+                trimViews();
+            } else {
+                renderAll();
+                return;
+            }
+            startSmoother();
+            autoscroll();
+            return;
+        }
+
+        // not streaming: everything painted now
+        r.shown = len;
         View nv = buildRowView(r);
         if (idx < list.getChildCount()) {
             list.removeViewAt(idx);
@@ -992,6 +1140,7 @@ public class ChatActivity extends Activity
         } else {
             renderAll();
         }
+        syncEmpty();
     }
 
     private void trimViews() {
@@ -999,13 +1148,13 @@ public class ChatActivity extends Activity
         synchronized (lock) {
             int cut = rows.size() - 350;
             idxByKey.clear();
-            for (int i = 0; i < cut; i++) { /* dropped */ }
             rows.subList(0, cut).clear();
             for (int i = 0; i < rows.size(); i++) {
                 Row r = rows.get(i);
                 if (r.key != null) idxByKey.put(r.key, i);
             }
             needFullRender = true;
+            viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
         }
         renderAll();
     }
@@ -1015,6 +1164,8 @@ public class ChatActivity extends Activity
         synchronized (lock) {
             snapshot = new ArrayList<>(rows);
             needFullRender = false;
+            viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
+            for (Row r : snapshot) r.shown = r.text.length(); // history: no caret
         }
         list.removeAllViews();
         for (Row r : snapshot) {
@@ -1026,6 +1177,7 @@ public class ChatActivity extends Activity
                 list.addView(tv);
             }
         }
+        syncEmpty();
         autoscroll();
     }
 
@@ -1072,46 +1224,77 @@ public class ChatActivity extends Activity
                 wrap.setOrientation(LinearLayout.HORIZONTAL);
                 TextView tv = text(15, R.color.user_text, false);
                 tv.setBackgroundResource(R.drawable.bg_bubble_user);
-                int p = dp(11);
-                tv.setPadding(p, dp(8), p, dp(8));
+                int p = dp(13);
+                tv.setPadding(p, dp(9), p, dp(9));
                 tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.78));
                 tv.setText(r.text.toString());
+                tv.setTextIsSelectable(true);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.gravity = Gravity.END;
-                lp.topMargin = dp(6);
+                lp.topMargin = dp(8);
                 tv.setLayoutParams(lp);
+                Theme.press(tv);
+                tv.setOnLongClickListener(v -> {
+                    copyText(r.text.toString(), "message");
+                    return true;
+                });
                 wrap.addView(tv);
                 return wrap;
             }
             case K_ASSISTANT: {
                 LinearLayout box = new LinearLayout(this);
                 box.setOrientation(LinearLayout.VERTICAL);
-                box.setPadding(0, dp(6), 0, dp(2));
+                box.setPadding(dp(2), dp(8), 0, dp(2));
+                boolean streaming = r.shown < r.text.length();
                 TextView body = text(15, R.color.text_primary, false);
                 body.setTextIsSelectable(true);
-                CharSequence md;
-                try { md = Markdown.render(r.text.toString()); }
-                catch (Exception e) { md = r.text.toString(); }
-                body.setText(md.length() == 0 ? "…" : md);
+                body.setLineSpacing(dp(1), 1f);
+                if (streaming) {
+                    // plain tail with caret — cheap, re-painted by the smoother
+                    int upto = Math.min(r.shown, r.text.length());
+                    String s = r.text.substring(0, upto);
+                    body.setText(s.length() == 0 ? "…" : s + "▍");
+                } else {
+                    CharSequence md;
+                    try { md = Markdown.render(r.text.toString()); }
+                    catch (Exception e) { md = r.text.toString(); }
+                    body.setText(md.length() == 0 ? "…" : md);
+                    body.setOnLongClickListener(v -> {
+                        copyText(r.text.toString(), "response");
+                        return true;
+                    });
+                }
                 box.addView(body);
                 if (r.meta != null && !r.meta.isEmpty()) {
                     TextView meta = text(11, R.color.text_secondary, false);
                     meta.setText(r.meta);
-                    meta.setPadding(0, dp(2), 0, dp(4));
+                    meta.setPadding(0, dp(3), 0, dp(6));
                     box.addView(meta);
                 }
+                String key = r.key == null ? "" : r.key;
+                viewByKey.put(key, box);
+                bodyByKey.put(key, body);
+                TextView m = r.meta == null ? null
+                        : (TextView) box.getChildAt(box.getChildCount() - 1);
+                if (m != null && m != body) metaByKey.put(key, m);
                 return box;
             }
             case K_REASON: {
                 LinearLayout c = card();
                 LinearLayout head = new LinearLayout(this);
                 head.setOrientation(LinearLayout.HORIZONTAL);
-                TextView h = text(13, R.color.accent_light, false);
-                h.setText("✦ Thinking" + (r.text.length() == 0 ? "…" : ""));
+                head.setGravity(Gravity.CENTER_VERTICAL);
+                TextView spark = text(13, R.color.accent_light, false);
+                spark.setText("✦");
+                spark.setPadding(0, 0, dp(6), 0);
+                TextView h = text(12, R.color.accent_light, true);
+                h.setText("THINKING" + (r.text.length() == 0 ? "…" : ""));
+                h.setLetterSpacing(0.08f);
                 TextView chev = text(12, R.color.text_secondary, false);
                 chev.setText(r.open ? "▾" : "▸");
+                head.addView(spark);
                 head.addView(h, new LinearLayout.LayoutParams(0,
                         ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                 head.addView(chev);
@@ -1122,7 +1305,7 @@ public class ChatActivity extends Activity
                     head.setLayoutParams(hp);
                 }
                 if (r.open) {
-                    TextView body = text(13, R.color.text_secondary, false);
+                    TextView body = text(12, R.color.text_secondary, false);
                     body.setTypeface(Typeface.MONOSPACE);
                     body.setTextIsSelectable(true);
                     String t = r.text.toString();
@@ -1140,18 +1323,20 @@ public class ChatActivity extends Activity
                 return c;
             }
             case K_TOOL: {
+                // P9: colored status stripe + card
                 LinearLayout c = card();
-                LinearLayout head = new LinearLayout(this);
-                head.setOrientation(LinearLayout.HORIZONTAL);
-                head.setGravity(Gravity.CENTER_VERTICAL);
                 int dotColor = "error".equals(r.status) ? R.color.err
                         : "completed".equals(r.status) ? R.color.ok
                         : ("running".equals(r.status) || "pending".equals(r.status))
                         ? R.color.warn : R.color.text_secondary;
+                LinearLayout head = new LinearLayout(this);
+                head.setOrientation(LinearLayout.HORIZONTAL);
+                head.setGravity(Gravity.CENTER_VERTICAL);
                 TextView dot = text(11, dotColor, false);
                 dot.setText("●");
+                dot.setPadding(0, 0, dp(7), 0);
                 TextView name = text(13, R.color.text_primary, true);
-                name.setText(r.tool == null ? "tool" : r.tool);
+                name.setText(toolLabel(r.tool));
                 TextView st = text(12, R.color.text_secondary, false);
                 String word = "completed".equals(r.status) ? "done"
                         : "error".equals(r.status) ? "error"
@@ -1202,21 +1387,30 @@ public class ChatActivity extends Activity
                         ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.topMargin = dp(6);
                 c.setLayoutParams(lp);
+                Theme.press(c);
                 head.setOnClickListener(v -> { r.open = !r.open; touchView(r); });
                 return c;
             }
             case K_ERR: {
-                TextView tv = text(13, R.color.err, false);
-                String t = r.text + (r.output.length() > 0
-                        ? " — tap for details" : "");
-                tv.setText(t);
-                tv.setOnClickListener(v -> new AlertDialog.Builder(this)
+                LinearLayout c = new LinearLayout(this);
+                c.setOrientation(LinearLayout.VERTICAL);
+                c.setBackgroundResource(R.drawable.bg_err_card);
+                int p = dp(12);
+                c.setPadding(p, dp(10), p, dp(10));
+                TextView t1 = text(13, R.color.err, true);
+                t1.setText("✕  " + r.text);
+                c.addView(t1);
+                if (r.output.length() > 0) {
+                    TextView t2 = text(12, R.color.text_secondary, false);
+                    t2.setText("tap for details");
+                    t2.setPadding(0, dp(3), 0, 0);
+                    c.addView(t2);
+                }
+                c.setOnClickListener(v -> new AlertDialog.Builder(this)
                         .setTitle(r.text.toString())
                         .setMessage(r.output.toString())
                         .setPositiveButton("Copy", (d, w) -> {
-                            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                            cm.setPrimaryClip(ClipData.newPlainText("error", r.output.toString()));
-                            Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show();
+                            copyText(r.output.toString(), "error");
                         })
                         .setNegativeButton("Close", null)
                         .show());
@@ -1224,16 +1418,22 @@ public class ChatActivity extends Activity
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.topMargin = dp(6);
-                tv.setLayoutParams(lp);
-                return tv;
+                c.setLayoutParams(lp);
+                return c;
             }
             default: {
-                TextView tv = text(12, R.color.text_secondary, false);
+                // K_SYS — centered dim pill
+                TextView tv = text(11, R.color.text_secondary, false);
                 tv.setText(r.text.toString());
+                tv.setGravity(Gravity.CENTER_HORIZONTAL);
+                tv.setBackgroundResource(R.drawable.bg_sys_pill);
+                int p = dp(12);
+                tv.setPadding(p, dp(6), p, dp(6));
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.topMargin = dp(6);
+                lp.topMargin = dp(8);
+                lp.bottomMargin = dp(2);
                 tv.setLayoutParams(lp);
                 return tv;
             }
@@ -1243,8 +1443,34 @@ public class ChatActivity extends Activity
     private TextView label(String s) {
         TextView tv = text(10, R.color.text_secondary, false);
         tv.setText(s.toUpperCase(Locale.US));
+        tv.setLetterSpacing(0.1f);
         tv.setPadding(0, dp(8), 0, dp(2));
         return tv;
+    }
+
+    /** P9: friendly tool names on the cards. */
+    private static String toolLabel(String tool) {
+        if (tool == null || tool.isEmpty()) return "tool";
+        switch (tool) {
+            case "bash": return "shell";
+            case "read": return "read file";
+            case "write": return "write file";
+            case "edit": return "edit file";
+            case "patch": return "patch";
+            case "glob": return "find files";
+            case "grep": return "search";
+            case "list": return "list files";
+            case "webfetch": return "web fetch";
+            case "todowrite": return "plan";
+            case "task": return "sub-agent";
+            default: return tool.toLowerCase(Locale.US);
+        }
+    }
+
+    private void copyText(String s, String label) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        cm.setPrimaryClip(ClipData.newPlainText(label, s));
+        Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show();
     }
 
     // ------------------------------------------------------- permissions
@@ -1570,7 +1796,7 @@ public class ChatActivity extends Activity
                 }
                 if (shown.isEmpty() && !provHit) continue;
                 items.add(new Object[]{"h", pr, null});
-                int cap = Math.min(shown.size(), 120);
+                int cap = Math.min(shown.size(), 400);
                 for (int i = 0; i < cap; i++) items.add(new Object[]{"m", pr, shown.get(i)});
                 if (shown.size() > cap) items.add(new Object[]{"t", pr,
                         "… " + (shown.size() - cap) + " more (refine search)"});
@@ -1587,8 +1813,10 @@ public class ChatActivity extends Activity
                     box.setPadding(pad, dp(8), pad, dp(8));
                     if ("h".equals(it[0])) {
                         Models.Prov pr = (Models.Prov) it[1];
-                        TextView t = text(12, R.color.accent_light, true);
-                        t.setText(pr.name + (pr.configured ? "  ✓" : "  (no key)"));
+                        TextView t = text(12, pr.configured ? R.color.ok : R.color.accent_light, true);
+                        String mark = pr.configured ? "  ✓ ready"
+                                : pr.usable ? "  (no key)" : "  (add API key)";
+                        t.setText(pr.name + mark);
                         box.addView(t);
                     } else if ("m".equals(it[0])) {
                         Models.Mdl m = (Models.Mdl) it[2];
@@ -1628,8 +1856,10 @@ public class ChatActivity extends Activity
             Models.save(this, pr.id, m.id);
             try { AuthStore.setDefaultModel(this, pr.id, m.id); } catch (Exception ignored) {}
             refreshChips();
-            Toast.makeText(this, "model → " + pr.id + "/" + m.id,
-                    Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, (!pr.configured
+                    ? "no key yet for " + pr.name + " — ⌘ → API keys · " : "")
+                    + "model → " + pr.id + "/" + m.id,
+                    Toast.LENGTH_LONG).show();
             dlg.dismiss();
         });
         dlg.show();

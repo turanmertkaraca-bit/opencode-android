@@ -7,18 +7,44 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.8.0 — projects as cards, one sandbox each)
+## Install (v0.9.0 — pkg package manager + realtime chat)
 
-1. Grab `opencode-p8-v0.8.0-debug.apk` from the releases page and sideload
-   it (same signing key as v0.6.0/v0.7.0 → updates in place).
-2. Open the app. A short boot log runs once (unpack → server → health),
-   then the **project deck** opens: your projects as credit-card gradient
-   cards, swipe up/down between them.
-3. Tap a card → that project's own sandbox → chat. **＋ → pick a folder**
-   adds a project. **⚙ → API keys** → paste a key (OpenRouter/Groq have
-   free tiers) → send.
+1. Grab `opencode-p9-v0.9.0-debug.apk` from the releases page and sideload
+   it (same signing key as v0.6.0-v0.8.0 → updates in place).
+2. Open the app. The first boot unpacks the agent (~60 MB) and the sandbox
+   toolkit (~4 MB, watch the log), then the **project deck** opens.
+3. Tap a project card → that project's own sandbox → chat. **＋ → pick a
+   folder** adds a project. **⌘ → API keys** → paste a key → send.
+4. The agent can now install its own tooling — `pkg install python3 git
+   nodejs gcc …` (Alpine packages via apk, no proot; wrappers auto-link
+   onto PATH; downloads flow through the in-app proxy).
+
+## What's in v0.9.0 (P9)
+
+- **Sandbox package manager (`pkg`)** — the Alpine minirootfs (aarch64)
+  ships inside the APK; every binary runs through the musl dynamic loader
+  directly from app-private storage. `pkg update / install / remove /
+  search / list / rehash` maps onto apk with signatures verified. The
+  agent's shell gets python3, pip, git, node, gcc, ripgrep, jq, curl,
+  openssh and 30k+ more Alpine packages on demand.
+- **Realtime chat** — SSE deltas feed a 24 ms smoothing ticker: text
+  materializes token-by-token with a live caret, then finalizes with one
+  markdown render. In-place view updates keep it snappy on long chats.
+- **Chat redesign** — gradient user bubbles, THINKING cards, tool cards
+  with status dots + friendly names, error cards, hero empty state with
+  starter prompts, raised composer bar (⌘ · Build/Plan · model chips ·
+  gradient send FAB).
+- **Full model catalog** — /config/providers merged with the complete
+  models.dev catalog: every provider/model that exists, searchable, with
+  "(no key)" markers, disk-cached.
+- **Settings from zero** — gradient hero server card, section cards with
+  icon discs, custom animated switch, sandbox section (pkg status,
+  install/repair, rehash, doctor).
+- **Deck fix** — page indicator is now a vertical rail (the old horizontal
+  dots read as left/right while paging was up/down).
 
 ## What's in v0.8.0 (P8 — the deck: style, motion, per-project sandboxes)
+— the deck: style, motion, per-project sandboxes)
 
 - **Project deck (home)** — projects shown as credit-card-style gradient
   cards in a vertical snap carousel (`DeckView`, a custom framework-only

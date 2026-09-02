@@ -2,23 +2,34 @@ package ai.opencode.app;
 
 import android.content.Context;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * P6 model catalog: EVERY provider the server knows, grouped, searchable.
+ * P9 model catalog: EVERY provider the server knows + the FULL models.dev
+ * catalog for discovery.
  *
- * Endpoint verified against the shipped v1.18.25 binary:
- *   GET /config/providers
- * and the message body accepts
- *   {"parts":[...], "model":{"providerID":..,"modelID":..}}
- * (scan evidence: "variant:Ze,model:{providerID:k,modelID:be},parts:[...").
+ * Problem this fixes (user): "the model select screen only shows opencode
+ * zen free models like 7 of em and nothing else". /config/providers only
+ * lists providers that are usable with current auth — so with no keys it
+ * degrades to the bundled free tier. The app now ALSO fetches
+ * https://models.dev/api.json (the exact catalog opencode syncs from) and
+ * merges it in: configured providers first, everything else searchable
+ * below, with a clear "(no key)" marker. Catalog is cached on disk so the
+ * sheet opens instantly and works offline.
  *
- * Parsing stays defensive: the response may be {"providers":[...]} / a bare
- * array / an object keyed by provider id; models may be a map or an array.
- * Whatever parses, parses; nothing throws. Model info fields seen in the
- * models.dev catalog embedded server-side: id, name, description, pricing.
+ * Parsing stays defensive: whatever parses, parses; nothing throws.
  */
 public final class Models {
 
@@ -27,10 +38,11 @@ public final class Models {
         public String provider, id, label;
     }
 
-    /** Grouped provider, P6. */
+    /** Grouped provider, P6/P9. */
     public static final class Prov {
         public String id, name;
         public boolean configured;          // has a key in auth.json
+        public boolean usable;              // listed by /config/providers
         public final List<Mdl> models = new ArrayList<>();
     }
 
@@ -47,72 +59,115 @@ public final class Models {
         return lastFetch;
     }
 
-    /** Fetch ALL providers + models from the running server. Never null. */
-    @SuppressWarnings("unchecked")
+    /** Fetch ALL providers + models (server list ⊕ models.dev catalog). */
     public static List<Prov> fetch(Context c) {
-        List<Prov> out = new ArrayList<>();
+        Map<String, Prov> byId = new LinkedHashMap<>();
+
+        // ---- 1. the running server (authoritative for what is usable) ----
         try {
             Api.Resp r = Api.get("/config/providers");
-            if (!r.ok()) { lastFetch = out; return out; }
-            Object root = Json.parse(r.body);
-            Map<String, Object> m = Json.obj(root);
-
-            List<Object> pl = null;
-            if (m != null) {
-                pl = Json.arr(m.get("providers"));
-                if (pl == null) {
-                    Map<String, Object> pm = Json.map(m, "providers");
-                    if (pm != null) {
-                        // object keyed by provider id
-                        for (Map.Entry<String, Object> e : pm.entrySet()) {
-                            Map<String, Object> p = Json.obj(e.getValue());
-                            if (p == null) continue;
-                            if (Json.str(p, "id") == null) p.put("id", e.getKey());
-                            collectProvider(out, p, c);
+            if (r.ok()) {
+                Object root = Json.parse(r.body);
+                Map<String, Object> m = Json.obj(root);
+                List<Object> pl = null;
+                if (m != null) {
+                    pl = Json.arr(m.get("providers"));
+                    if (pl == null) {
+                        Map<String, Object> pm = Json.map(m, "providers");
+                        if (pm != null) {
+                            for (Map.Entry<String, Object> e : pm.entrySet()) {
+                                Map<String, Object> p = Json.obj(e.getValue());
+                                if (p == null) continue;
+                                if (Json.str(p, "id") == null) p.put("id", e.getKey());
+                                collectProvider(byId, p, c, true);
+                            }
+                            lastFetch = order(byId);
+                            return lastFetch;
                         }
-                        lastFetch = out;
-                        return out;
                     }
+                } else {
+                    pl = Json.arr(root);
                 }
-            } else {
-                pl = Json.arr(root);
-            }
-            if (pl != null) {
-                for (Object po : pl) {
-                    Map<String, Object> p = Json.obj(po);
-                    if (p != null) collectProvider(out, p, c);
+                if (pl != null) {
+                    for (Object po : pl) {
+                        Map<String, Object> p = Json.obj(po);
+                        if (p != null) collectProvider(byId, p, c, true);
+                    }
                 }
             }
         } catch (Exception ignored) {}
-        lastFetch = out;
+
+        // ---- 2. models.dev catalog (full discovery, disk-cached) ----
+        String cat = httpGet("https://models.dev/api.json", 8000);
+        if (cat != null && cat.length() > 1000) {
+            writeCache(c, cat);
+        } else {
+            cat = readCache(c);
+        }
+        if (cat != null) {
+            try {
+                Map<String, Object> root = Json.obj(Json.parse(cat));
+                if (root != null) {
+                    for (Map.Entry<String, Object> e : root.entrySet()) {
+                        Map<String, Object> p = Json.obj(e.getValue());
+                        if (p == null) continue;
+                        if (Json.str(p, "id") == null) p.put("id", e.getKey());
+                        collectProvider(byId, p, c, false);
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        lastFetch = order(byId);
+        return lastFetch;
+    }
+
+    /** Configured providers first, then alphabetical by name. */
+    private static List<Prov> order(Map<String, Prov> byId) {
+        List<Prov> out = new ArrayList<>(byId.values());
+        out.sort((a, b) -> {
+            if (a.configured != b.configured) return a.configured ? -1 : 1;
+            return a.name.toLowerCase(Locale.US)
+                    .compareTo(b.name.toLowerCase(Locale.US));
+        });
         return out;
     }
 
-    @SuppressWarnings("unchecked")
-    private static void collectProvider(List<Prov> out, Map<String, Object> p,
-                                        Context c) {
+    private static void collectProvider(Map<String, Prov> byId, Map<String, Object> p,
+                                        Context c, boolean fromServer) {
         String pid = Json.str(p, "id");
         if (pid == null || pid.isEmpty()) return;
-        Prov prov = new Prov();
-        prov.id = pid;
-        String pname = Json.str(p, "name");
-        prov.name = (pname == null || pname.isEmpty()) ? pid : pname;
-        prov.configured = AuthStore.hasKey(c, pid);
-
+        Prov prov = byId.get(pid);
+        if (prov == null) {
+            prov = new Prov();
+            prov.id = pid;
+            String pname = Json.str(p, "name");
+            prov.name = (pname == null || pname.isEmpty()) ? pid : pname;
+            prov.configured = AuthStore.hasKey(c, pid);
+            byId.put(pid, prov);
+        }
+        if (fromServer) {
+            prov.usable = true;
+            if (AuthStore.hasKey(c, pid)) prov.configured = true;
+        }
         Object models = p.get("models");
         if (models instanceof Map) {
+            Set<String> have = new HashSet<>();
+            for (Mdl m : prov.models) have.add(m.id);
             for (Map.Entry<String, Object> e
                     : ((Map<String, Object>) models).entrySet()) {
                 Map<String, Object> mm = Json.obj(e.getValue());
                 if (mm == null) continue;
                 if (Json.str(mm, "id") == null) mm.put("id", e.getKey());
+                String mid = Json.str(mm, "id");
+                if (mid == null || have.contains(mid)) continue;
                 addModel(prov, mm);
+                have.add(mid);
             }
         } else {
             List<Object> ml = Json.arr(models);
             if (ml != null) for (Object mo : ml) addModel(prov, Json.obj(mo));
         }
-        out.add(prov);
     }
 
     private static void addModel(Prov prov, Map<String, Object> mm) {
@@ -126,6 +181,50 @@ public final class Models {
         String d = Json.str(mm, "description");
         mdl.desc = (d == null || d.isEmpty()) ? null : d;
         prov.models.add(mdl);
+    }
+
+    // ------------------------------------------------------- catalog net
+
+    /** Plain-HTTPS GET to models.dev (bionic/Java resolver — no sandbox). */
+    private static String httpGet(String url, int timeoutMs) {
+        try {
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(timeoutMs);
+            c.setReadTimeout(timeoutMs);
+            c.setUseCaches(false);
+            c.setRequestProperty("Accept", "application/json");
+            int code = c.getResponseCode();
+            if (code != 200) { c.disconnect(); return null; }
+            String body = Api.readAll(c.getInputStream());
+            c.disconnect();
+            return body;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static File cacheFile(Context c) {
+        return new File(c.getFilesDir(), "models-cache.json");
+    }
+
+    private static void writeCache(Context c, String body) {
+        try {
+            File f = cacheFile(c);
+            File tmp = new File(f.getParentFile(), f.getName() + ".part");
+            try (OutputStream o = new FileOutputStream(tmp)) {
+                o.write(body.getBytes("UTF-8"));
+            }
+            if (f.exists()) f.delete();
+            tmp.renameTo(f);
+        } catch (Exception ignored) {}
+    }
+
+    private static String readCache(Context c) {
+        try {
+            return Api.readAll(new FileInputStream(cacheFile(c)));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** Flatten to a plain item list (kept for send-path compatibility). */

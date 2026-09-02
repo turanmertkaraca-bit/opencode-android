@@ -85,6 +85,15 @@ public class MainActivity extends Activity implements ServerService.Evt {
                 File bin = Binaries.binaryFile(this);
                 line("binary ok · " + Binaries.human(bin.length())
                         + " · sha " + Binaries.sha256(bin));
+                // P9: sandbox toolkit (pkg package manager) — one-time ~4 MB
+                // unpack. Failure is NON-fatal: chat works without it.
+                if (!Sandbox.ready(this)) {
+                    boolean ok = Sandbox.ensure(this, msg -> line("  " + msg));
+                    line(ok ? "sandbox toolkit ready (pkg install …)"
+                            : "toolkit install failed — pkg unavailable (chat still works)");
+                } else {
+                    line("sandbox toolkit ready (pkg)");
+                }
                 line("starting server…");
                 int st = ServerService.getState();
                 if (st == ServerService.ST_IDLE || st == ServerService.ST_STOPPED
