@@ -47,12 +47,16 @@ public class KeysActivity extends Activity {
         note.setText("Paste an API key for any provider you use. Keys are "
                 + "stored in the app's private auth.json and picked up on "
                 + "your next message — no restart needed.\n\n"
-                + "The first row, OpenCode, IS opencode's own provider — Zen "
-                + "and the Go plan use THE SAME row and key (console.opencode.ai). "
-                + "Its FREE models (grok-code, mimo, big-pickle, nemotron…) run "
-                + "WITHOUT any key; a paid key is only for the paid ones. If a "
-                + "model errors with 401/402, that model is paid — your plan "
-                + "doesn't cover it. No other key yet? OpenRouter and Groq "
+                + "P16, verified against the catalog: OpenCode ZEN and "
+                + "OpenCode GO are SEPARATE providers with SEPARATE keys — "
+                + "both issued at console.opencode.ai, but they are NOT "
+                + "interchangeable. The ZEN key runs the zen models (its FREE "
+                + "ones — grok-code, mimo, big-pickle… — run with no key at "
+                + "all); the GO key runs the Go models (kimi, qwen, deepseek…). "
+                + "A model asking for the opencode-go key needs the GO row "
+                + "below — that is why your Zen key alone left them dead. If a "
+                + "model still errors 401/402, that specific model is paid "
+                + "outside your plan. No other key yet? OpenRouter and Groq "
                 + "have free tiers.");
         int p2 = dp(10);
         note.setPadding(0, p2, 0, p2);
@@ -152,9 +156,20 @@ public class KeysActivity extends Activity {
                 .setTitle(name + " (" + id + ")")
                 .setView(box)
                 .setPositiveButton("Save", (d, w) -> {
+                    // P16: a FIRST-TIME key changes what /config/providers
+                    // can offer (opencode-go is invisible to the server until
+                    // its key exists) — restart once so the provider goes
+                    // live immediately instead of waiting for a manual one.
+                    boolean first = !AuthStore.hasKey(this, id);
                     try {
                         AuthStore.setApiKey(this, id, input.getText().toString());
-                        Toast.makeText(this, "saved", Toast.LENGTH_SHORT).show();
+                        if (first) {
+                            ServerService.restart(this);
+                            Toast.makeText(this, "saved — restarting server so "
+                                    + name + " goes live", Toast.LENGTH_LONG).show();
+                        } else {
+                            Toast.makeText(this, "saved", Toast.LENGTH_SHORT).show();
+                        }
                     } catch (Exception e) {
                         Toast.makeText(this, "save failed: " + e, Toast.LENGTH_LONG).show();
                     }

@@ -40,19 +40,29 @@ public final class AuthStore {
     /** Known providers for the Connect screen: id, display name, key hint.
      *  P12: the first row is THE "opencode" provider — display name no
      *  longer says only "Zen", because users with a plain opencode API key
-     *  couldn't tell where it goes (the exact P12 report). */
+     *  couldn't tell where it goes (the exact P12 report).
+     *
+     *  P16 — the P14 claim "Zen and Go are plans on the same gateway, same
+     *  row, same key" was WRONG and the user proved it in the field: the
+     *  bundled models.dev catalog (and the server) carry TWO distinct
+     *  opencode providers — "opencode" (OpenCode Zen, 97 models) and
+     *  "opencode-go" (OpenCode Go, 34 models) — each authenticated with
+     *  its OWN key. With no Go row, users were stuck at "add opencode go
+     *  key to use this" with nowhere to add it. Both rows now exist,
+     *  ids match the catalog/server exactly. */
     public static final String[][] KNOWN = {
-            {"opencode",   "OpenCode",   "your opencode API key (console.opencode.ai) — free models run keyless"},
-            {"anthropic",  "Anthropic",  "sk-ant-…"},
-            {"openai",     "OpenAI",     "sk-…"},
-            {"google",     "Google",     "AIza…"},
-            {"openrouter", "OpenRouter", "sk-or-…"},
-            {"groq",       "Groq",       "gsk_…"},
-            {"xai",        "xAI",        "xai-…"},
-            {"mistral",    "Mistral",    "…"},
-            {"deepseek",   "DeepSeek",   "sk-…"},
-            {"together",   "TogetherAI", "…"},
-            {"perplexity", "Perplexity", "pplx-…"},
+            {"opencode",     "OpenCode Zen", "your opencode ZEN key (console.opencode.ai) — zen models · SEPARATE from the Go key · free ones run keyless"},
+            {"opencode-go",  "OpenCode Go",  "your opencode GO key (console.opencode.ai) — SEPARATE from the Zen key, powers the Go models"},
+            {"anthropic",    "Anthropic",    "sk-ant-…"},
+            {"openai",       "OpenAI",       "sk-…"},
+            {"google",       "Google",       "AIza…"},
+            {"openrouter",   "OpenRouter",   "sk-or-…"},
+            {"groq",         "Groq",         "gsk_…"},
+            {"xai",          "xAI",          "xai-…"},
+            {"mistral",      "Mistral",      "…"},
+            {"deepseek",     "DeepSeek",     "sk-…"},
+            {"together",     "TogetherAI",   "…"},
+            {"perplexity",   "Perplexity",   "pplx-…"},
     };
 
     // ------------------------------------------------------------- file io
