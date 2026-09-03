@@ -134,6 +134,11 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         sb.addView(rowLink("Sandbox doctor", "what can the agent actually run?",
                 "✚", v -> runDoctor()));
         sb.addView(divider());
+        // P15: the visual project file manager
+        sb.addView(rowLink("Project files →",
+                "browse · preview · rename · delete — inside this project",
+                "▤", v -> startActivity(new Intent(this, FilesActivity.class))));
+        sb.addView(divider());
         sb.addView(rowLink("Logs & shell console", "live server log + native shell",
                 "›_", v -> startActivity(new Intent(this, DiagnosticsActivity.class))));
         sb.addView(divider());
@@ -145,6 +150,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         root.addView(Theme.sectionLabel(this, "environment"));
         LinearLayout env = section();
         env.addView(debianRow());
+        env.addView(divider());
+        // P15: the agent's own "environment detection" ask — one tap shows
+        // kernel/user/os/tools/storage + whether the dirs proot needs exist.
+        env.addView(rowLink("Environment check",
+                "kernel · user · os · tools · storage · project bind",
+                "ⓘ", v -> runEnvCheck()));
         env.addView(divider());
         env.addView(rowLink("Why two environments?",
                 "Lite (Alpine) always works · Debian adds real apt — the\n"
@@ -186,7 +197,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.13.0-p13 · Debian install fix + picker diagnostics", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.15.0-p15 · picker restored to P12 semantics + dirs/env/files", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -400,6 +411,45 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 if (done) return;
             }
         }, "oc-debian-watch").start();
+    }
+
+    /** P15 — the agent's own environment-detection ask, surfaced: runs the
+     *  Debian env report (kernel · user · os · tools · storage · project)
+     *  and also verifies the dirs proot needs actually exist. */
+    private void runEnvCheck() {
+        android.app.AlertDialog waiting = new android.app.AlertDialog.Builder(this)
+                .setTitle("Environment")
+                .setMessage("checking…")
+                .setCancelable(false)
+                .show();
+        new Thread(() -> {
+            // dir audit — the exact paths the field report called out
+            java.io.File deb = Debian.dir(this);
+            java.io.File tmp = new java.io.File(deb, "tmp");
+            java.io.File home = Binaries.homeDir(this);
+            java.io.File dl = new java.io.File("/storage/emulated/0/Download");
+            String dirs = "debian dir      : " + (deb.isDirectory() ? "ok" : "MISSING")
+                    + "\ndebian/tmp (PROOT_TMP_DIR): " + (tmp.isDirectory() ? "ok" : "MISSING")
+                    + "\nfiles/home      : " + (home.isDirectory() ? "ok" : "MISSING")
+                    + "\nDownload bind   : " + (dl.isDirectory() ? "ok" : "not visible");
+            final String rep = dirs + "\n\n" + Debian.envReport(this);
+            ui.post(() -> {
+                try {
+                    waiting.dismiss();
+                } catch (Exception ignored) {}
+                new android.app.AlertDialog.Builder(this)
+                        .setTitle("Environment")
+                        .setMessage(rep)
+                        .setPositiveButton("copy", (d, w) -> {
+                            ClipboardManager cm =
+                                    (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                            cm.setPrimaryClip(ClipData.newPlainText("env", rep));
+                            Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show();
+                        })
+                        .setNegativeButton("close", null)
+                        .show();
+            });
+        }).start();
     }
 
     private void envExplain() {

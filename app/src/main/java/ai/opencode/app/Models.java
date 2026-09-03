@@ -50,6 +50,14 @@ public final class Models {
         public String id, name, desc;
         public boolean free;                // P14: zero input+output cost
         public double costIn, costOut;      // P14: $/Mtok, shown in the sheet
+        /** P15 RESTORES the P12 flag the P14 rework dropped — the exact
+         *  regression the user kept reporting ("the working model picker is
+         *  in the first p12"). true when the RUNNING SERVER listed this
+         *  model in /config/providers — picking it actually works.
+         *  models.dev/bundled entries are discovery-only: selectable-looking
+         *  but the server answers "Model not found", which is what made the
+         *  picker "broken" again after P14 let every catalog row save. */
+        public boolean live;
     }
 
     /** Last successful fetch — the picker reuses it for instant re-opens. */
@@ -107,6 +115,10 @@ public final class Models {
         } catch (Exception ignored) {}
 
         // ---- 2. models.dev catalog (full discovery, disk-cached) ----
+        // P15: NO early return here — the P12a bug (map-shaped provider
+        // responses skipped the catalog merge) stays fixed; every source
+        // always merges. The fix for "picker looks broken" is the live
+        // flag above + the sheet refusing dead picks, NOT a smaller list.
         String cat = httpGet("https://models.dev/api.json", 8000);
         if (cat != null && cat.length() > 1000) {
             writeCache(c, cat);
@@ -140,15 +152,22 @@ public final class Models {
         return lastFetch;
     }
 
-    /** Configured providers first, then alphabetical by name. */
+    /** P15: usable (server-live) providers first — the P12a order that made
+     *  the picker feel right — then configured, then alphabetical. */
     private static List<Prov> order(Map<String, Prov> byId) {
         List<Prov> out = new ArrayList<>(byId.values());
         out.sort((a, b) -> {
+            if (a.usable != b.usable) return a.usable ? -1 : 1;   // live first
             if (a.configured != b.configured) return a.configured ? -1 : 1;
             return a.name.toLowerCase(Locale.US)
                     .compareTo(b.name.toLowerCase(Locale.US));
         });
         return out;
+    }
+
+    /** Package-private hook so the P15 regression tests pin the sort. */
+    static List<Prov> orderForTest(Map<String, Prov> byId) {
+        return order(byId);
     }
 
     private static void collectProvider(Map<String, Prov> byId, Map<String, Object> p,
@@ -179,16 +198,16 @@ public final class Models {
                 if (Json.str(mm, "id") == null) mm.put("id", e.getKey());
                 String mid = Json.str(mm, "id");
                 if (mid == null || have.contains(mid)) continue;
-                addModel(prov, mm);
+                addModel(prov, mm, fromServer);
                 have.add(mid);
             }
         } else {
             List<Object> ml = Json.arr(models);
-            if (ml != null) for (Object mo : ml) addModel(prov, Json.obj(mo));
+            if (ml != null) for (Object mo : ml) addModel(prov, Json.obj(mo), fromServer);
         }
     }
 
-    private static void addModel(Prov prov, Map<String, Object> mm) {
+    private static void addModel(Prov prov, Map<String, Object> mm, boolean live) {
         if (mm == null) return;
         String mid = Json.str(mm, "id");
         if (mid == null || mid.isEmpty()) return;
@@ -198,6 +217,7 @@ public final class Models {
         mdl.name = (mn == null || mn.isEmpty()) ? mid : mn;
         String d = Json.str(mm, "description");
         mdl.desc = (d == null || d.isEmpty()) ? null : d;
+        mdl.live = live;                    // P15: P12 semantics restored
         // P14: cost block (models.dev schema) — $ per Mtok. Zero input AND
         // output cost = the "free" badge in the picker (31 zen models today).
         try {
@@ -264,12 +284,17 @@ public final class Models {
         }
     }
 
-    /** True when (provider, id) exists in the fetched provider list. */
+    /** True when (provider, id) exists AND the running server serves it.
+     *  P15: back to the P12 rule — discovery (models.dev / bundled) entries
+     *  do NOT pass, so validateSelectedModel() self-heals dead picks BEFORE
+     *  the request instead of the server answering "Model not found". This
+     *  exact gate is why the first P12 picker felt like it worked. */
     public static boolean available(List<Prov> provs, String provider, String id) {
         if (provs == null || provider == null || id == null) return false;
         for (Prov p : provs) {
             if (!provider.equals(p.id)) continue;
-            for (Mdl m : p.models) if (id.equals(m.id)) return true;
+            for (Mdl m : p.models)
+                if (id.equals(m.id)) return m.live;
         }
         return false;
     }
