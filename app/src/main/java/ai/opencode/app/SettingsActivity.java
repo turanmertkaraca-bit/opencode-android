@@ -110,6 +110,16 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         mk.addView(divider());
         mk.addView(rowLink("API keys", "paste keys · import auth.json · endpoints",
                 "⚿", v -> startActivity(new Intent(this, KeysActivity.class))));
+        mk.addView(divider());
+        // P14: unattended mode — the agent answers its own approval requests
+        mk.addView(switchRow("Unattended mode (auto-allow)", "auto_allow",
+                "agent approves its own tool calls — leave it running hands-free"));
+        mk.addView(divider());
+        mk.addView(rowLink("Agent GitHub access",
+                getSharedPreferences("oc", MODE_PRIVATE).getString("gh_token", null) != null
+                        ? "token saved — the AI can clone · commit · push"
+                        : "not set — give the AI a scoped token to push for you",
+                "⑂", v -> startActivity(new Intent(this, KeysActivity.class))));
         root.addView(mk);
 
         // ---- sandbox
@@ -857,8 +867,10 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         if (keyOrNull == null) return r;
 
         // P9 custom switch: animated track + knob (framework-only)
-        // defaults: motion ON (matches Theme.motionOn), dns_bridge OFF
-        boolean dflt = !"dns_bridge".equals(keyOrNull);
+        // defaults: motion ON (matches Theme.motionOn), dns_bridge OFF,
+        // auto_allow OFF (approving tool calls silently is opt-in — P14)
+        boolean dflt = !"dns_bridge".equals(keyOrNull)
+                && !"auto_allow".equals(keyOrNull);
         boolean on = getSharedPreferences("oc", MODE_PRIVATE).getBoolean(keyOrNull, dflt);
         FrameLayout sw = new FrameLayout(this);
         GradientDrawable track = new GradientDrawable();

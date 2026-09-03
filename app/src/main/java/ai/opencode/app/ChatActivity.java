@@ -106,6 +106,7 @@ public class ChatActivity extends Activity
     private LinearLayout list;
     private ScrollView scroll;
     private TextView tvTitle, tvSub, tvStatus, chipMode, chipModel, btnSend;
+    private TextView tvSpend;               // P14: dedicated session-spend pill
     private EditText input;
     private LinearLayout permSlot;
     // P9: hero empty state + in-place view cache for smooth streaming
@@ -157,6 +158,7 @@ public class ChatActivity extends Activity
         tvTitle = findViewById(R.id.tvTitle);
         tvSub = findViewById(R.id.tvSub);
         tvStatus = findViewById(R.id.tvStatus);
+        tvSpend = findViewById(R.id.tvSpend);
         chipMode = findViewById(R.id.chipMode);
         chipModel = findViewById(R.id.chipModel);
         btnSend = findViewById(R.id.btnSend);
@@ -854,8 +856,22 @@ public class ChatActivity extends Activity
             default: s = "server idle";
         }
         if (projectName != null && !projectName.isEmpty()) s = projectName + " · " + s;
+        // P14: the spend line MOVED OUT of the subtitle — it was appended to
+        // a maxLines=1 ellipsized TextView, so the ⇅ tok AND the $ number
+        // (last thing in the string) were the first to be cut off. It now
+        // lives in its own header pill that always shows in full.
         String spend = spendLine();
-        if (!spend.isEmpty()) s += spend;
+        if (tvSpend != null) {
+            if (spend.isEmpty()) {
+                tvSpend.setVisibility(View.GONE);
+            } else {
+                tvSpend.setVisibility(View.VISIBLE);
+                // spendLine starts with " · " for its subtitle role — strip
+                // it for the pill and compact the text ("⇅ 12.3k · $0.0041")
+                String pill = spend.startsWith(" · ") ? spend.substring(3) : spend;
+                tvSpend.setText(pill.replace(" tok", ""));
+            }
+        }
         if (!AuthStore.hasAnyKey(this) && st == ServerService.ST_HEALTHY) {
             s += " · no API key yet — ⌘ → API keys";
         }
@@ -1734,10 +1750,19 @@ public class ChatActivity extends Activity
     /** P10: rounded, hairline code block used for tool input/output. */
     private TextView codeBlock(String content, int maxLen) {
         TextView tv = mono(text(12, R.color.text_primary, false), 12);
-        tv.setTextIsSelectable(true);
         String t = content;
-        if (t.length() > maxLen) t = t.substring(0, maxLen) + "…";
+        if (t.length() > maxLen) t = t.substring(0, maxLen) + "…\n(+" + (content.length() - maxLen) + " more chars — long-press to copy all)";
         tv.setText(t);
+        // P14: NOT textIsSelectable — selectable spans make TextViews measure
+        // and lay out an order of magnitude slower, and a 12k-char block
+        // rebuilt on every streaming tick was the "chat bugs out when long
+        // commands fill it" report. Long-press copies the full text instead.
+        tv.setTextIsSelectable(false);
+        tv.setLongClickable(true);
+        tv.setOnLongClickListener(v -> {
+            copyText(content, "code");
+            return true;
+        });
         tv.setBackgroundResource(R.drawable.bg_code);
         int p = dp(10);
         tv.setPadding(p, p, p, p);
@@ -1757,11 +1782,58 @@ public class ChatActivity extends Activity
 
     // ------------------------------------------------------- permissions
 
+    // P14: unattended mode — ids already auto-answered this session, so a
+    // failed reply falls back to the card instead of looping forever.
+    private final java.util.Set<String> autoReplied = new java.util.HashSet<>();
+
+    private boolean autoAllowOn() {
+        return getSharedPreferences("oc", MODE_PRIVATE)
+                .getBoolean("auto_allow", false);
+    }
+
+    private void setAutoAllow(boolean on) {
+        getSharedPreferences("oc", MODE_PRIVATE).edit()
+                .putBoolean("auto_allow", on).apply();
+        sys(on ? "⏵ unattended mode ON — tool approvals auto-allowed"
+              : "⏵ unattended mode OFF — approvals ask again");
+        if (!on) autoReplied.clear();
+        checkPermissionQueue();
+    }
+
     private void checkPermissionQueue() {
         Map<String, Object> perm = ServerService.peekPermission();
         if (perm == null) {
             permSlot.setVisibility(View.GONE);
             permSlot.removeAllViews();
+            return;
+        }
+        // P14: AUTO-ALLOW (unattended mode). When the toggle is on, every
+        // incoming approval request is answered "always" immediately — the
+        // agent runs hands-free ("leave the agent unatended so it doesnt
+        // need permision gor every single comand"). The perm slot shows a
+        // slim status pill (tap = turn OFF) instead of the blocking card.
+        // If the reply fails, the id drops out of autoReplied and the normal
+        // card returns on the next tick — the agent can never hang silently.
+        if (autoAllowOn()) {
+            final String id = Json.str(perm, "id");
+            String action = nz(Json.str(perm, "permission"),
+                    nz(Json.str(perm, "type"), "tool"));
+            if (id != null && !autoReplied.contains(id)) {
+                if (autoReplied.size() > 400) autoReplied.clear();
+                autoReplied.add(id);
+                sys("⏵ auto-allowed " + action);
+                answerPermission(id, "always");
+            }
+            permSlot.setVisibility(View.VISIBLE);
+            permSlot.removeAllViews();
+            TextView pill = text(12, R.color.ok, true);
+            pill.setText("⏵ unattended — auto-allowing " + action
+                    + " · tap to turn off");
+            pill.setBackgroundResource(R.drawable.bg_sys_pill);
+            int pp = dp(12);
+            pill.setPadding(pp, dp(7), pp, dp(7));
+            pill.setOnClickListener(v -> setAutoAllow(false));
+            permSlot.addView(pill);
             return;
         }
         permSlot.setVisibility(View.VISIBLE);
@@ -1925,6 +1997,8 @@ public class ChatActivity extends Activity
     private void palette() {
         final String[] cmds = {
                 "New chat", "Sessions…", "Model…", "Toggle Build / Plan",
+                autoAllowOn() ? "Turn OFF unattended (auto-allow)"
+                              : "Turn ON unattended (auto-allow)",
                 "Projects →", "Settings",
                 "API keys…", "Server logs & shell…", "Restart server",
                 "Expand all cards", "Collapse all cards",
@@ -1974,6 +2048,9 @@ public class ChatActivity extends Activity
             case "Sessions…": sessionsSheet(); break;
             case "Model…": modelSheet(); break;
             case "Toggle Build / Plan": toggleMode(); break;
+            case "Turn ON unattended (auto-allow)":
+            case "Turn OFF unattended (auto-allow)":
+                setAutoAllow(!autoAllowOn()); break;
             case "Projects →":
                 startActivity(new Intent(this, HomeActivity.class)); break;
             case "Settings":
@@ -2124,8 +2201,10 @@ public class ChatActivity extends Activity
         // the data source. "only 7 zen models" mysteries end here: if the
         // line ever reads badly, we know exactly which leg failed.
         TextView srcLine = text(11, R.color.text_secondary, false);
+        int freeN = 0;
+        for (Models.Prov pr : provs) for (Models.Mdl m : pr.models) if (m.free) freeN++;
         srcLine.setText(provs.size() + " providers · " + countModels(provs)
-                + " models · " + Models.lastSource);
+                + " models · " + freeN + " free · " + Models.lastSource);
         srcLine.setPadding(dp(4), 0, dp(4), dp(6));
         root.addView(srcLine);
         final EditText search = new EditText(this);
@@ -2134,15 +2213,23 @@ public class ChatActivity extends Activity
         search.setSingleLine(true);
         root.addView(search);
         final ListView lv = new ListView(this);
+        // P14: weight-1 list + the dialog sized to 88% of the screen — the
+        // fixed 430dp box could get crushed (or crushed the hint below it)
+        // on taller/shorter screens and keyboard-open; weight always fits.
         root.addView(lv, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(430)));
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
         TextView hint = text(11, R.color.text_secondary, false);
-        hint.setText("configured providers first · “(add API key)” = paste its "
-                + "key in ⌘ → API keys · free models need nothing");
+        hint.setText("configured first · tap a provider marked (add API key) "
+                + "to paste its key · free = runs keyless");
         hint.setPadding(dp(4), dp(8), dp(4), dp(10));
         root.addView(hint);
         b.setView(root);
         final AlertDialog dlg = b.create();
+        dlg.show();
+        android.view.Window w = dlg.getWindow();
+        if (w != null) w.setLayout(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                (int) (getResources().getDisplayMetrics().heightPixels * 0.88));
 
         final List<Object[]> items = new ArrayList<>(); // [kind, Prov, Mdl]
         Runnable refill = () -> {
@@ -2172,8 +2259,13 @@ public class ChatActivity extends Activity
                 public long getItemId(int i) { return i; }
                 public View getView(int i, View cv, ViewGroup parent) {
                     Object[] it = items.get(i);
-                    LinearLayout box = new LinearLayout(ChatActivity.this);
+                    // P14: reuse the row container when recycled — the sheet
+                    // can hold thousands of rows; fresh views per scroll frame
+                    // were part of the "not snappy" report.
+                    LinearLayout box = (cv instanceof LinearLayout)
+                            ? (LinearLayout) cv : new LinearLayout(ChatActivity.this);
                     box.setOrientation(LinearLayout.VERTICAL);
+                    box.removeAllViews();
                     int pad = dp(14);
                     box.setPadding(pad, dp(8), pad, dp(8));
                     if ("h".equals(it[0])) {
@@ -2181,9 +2273,9 @@ public class ChatActivity extends Activity
                         TextView t = text(12, pr.configured ? R.color.ok : R.color.accent_light, true);
                         String mark;
                         if ("opencode".equals(pr.id))
-                            mark = "  free · no key needed";   // P11 verified live
-                        else if (pr.configured) mark = "  ✓ ready";
-                        else mark = pr.usable ? "  (no key)" : "  (add API key)";
+                            mark = "  · free models keyless";   // P11 verified live
+                        else if (pr.configured) mark = "  · ✓ key saved";
+                        else mark = pr.usable ? "  · (no key)" : "  · (add API key) ▸";
                         t.setText(pr.name + mark);
                         box.addView(t);
                     } else if ("m".equals(it[0])) {
@@ -2192,11 +2284,15 @@ public class ChatActivity extends Activity
                         boolean isCur = cur != null && cur[0].equals(pr.id)
                                 && cur[1].equals(m.id);
                         TextView t1 = text(14, isCur ? R.color.ok : R.color.text_primary, isCur);
-                        t1.setText((isCur ? "✓ " : "") + m.name);
+                        t1.setText((isCur ? "✓ " : "") + m.name + (m.free ? "   ⟨free⟩" : ""));
                         t1.setSingleLine(true);
                         t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
                         TextView t2 = text(11, R.color.text_secondary, false);
-                        t2.setText(pr.id + "/" + m.id);
+                        t2.setText(pr.id + "/" + m.id
+                                + (!m.free && m.costIn > 0
+                                        ? String.format(Locale.US,
+                                          "   · $%g in / $%g out per Mtok",
+                                          m.costIn, m.costOut) : ""));
                         t2.setSingleLine(true);
                         t2.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
                         box.addView(t1);
@@ -2216,15 +2312,19 @@ public class ChatActivity extends Activity
             public void afterTextChanged(Editable s) { refill.run(); }
         });
         refill.run();
-        // P13: long-press a provider header → straight to API keys
-        lv.setOnItemLongClickListener((parent, v, pos, id4) -> {
-            Object[] it = items.get(pos);
-            if (!"h".equals(it[0])) return false;
-            startActivity(new Intent(this, KeysActivity.class));
-            return true;
-        });
+        // P14: a provider WITHOUT a key now opens API keys on a SINGLE tap of
+        // its header — "(add API key)" is an instruction, and the instruction
+        // is one tap away (the P13 long-press-only path was undiscoverable).
         lv.setOnItemClickListener((parent, v, pos, id4) -> {
             Object[] it = items.get(pos);
+            if ("h".equals(it[0])) {
+                Models.Prov pr = (Models.Prov) it[1];
+                if (!pr.configured) {
+                    dlg.dismiss();
+                    startActivity(new Intent(this, KeysActivity.class));
+                }
+                return;
+            }
             if (!"m".equals(it[0])) return;
             Models.Prov pr = (Models.Prov) it[1];
             Models.Mdl m = (Models.Mdl) it[2];
@@ -2236,11 +2336,11 @@ public class ChatActivity extends Activity
             refreshChips();
             Toast.makeText(this, (!pr.configured && !"opencode".equals(pr.id)
                     ? "no key yet for " + pr.name + " — ⌘ → API keys · " : "")
-                    + "model → " + pr.id + "/" + m.id,
+                    + "model → " + pr.id + "/" + m.id
+                    + (m.free ? " (free)" : ""),
                     Toast.LENGTH_LONG).show();
             dlg.dismiss();
         });
-        dlg.show();
     }
 
     private int countModels(List<Models.Prov> provs) {

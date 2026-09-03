@@ -7,83 +7,56 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.8.0 — projects as cards, one sandbox each)
+## Install (v0.14.0 — P14)
 
-1. Grab `opencode-p8-v0.8.0-debug.apk` from the releases page and sideload
-   it (same signing key as v0.6.0/v0.7.0 → updates in place).
-2. Open the app. A short boot log runs once (unpack → server → health),
-   then the **project deck** opens: your projects as credit-card gradient
-   cards, swipe up/down between them.
-3. Tap a card → that project's own sandbox → chat. **＋ → pick a folder**
-   adds a project. **⚙ → API keys** → paste a key (OpenRouter/Groq have
-   free tiers) → send.
+1. Grab `opencode-p14-v0.14.0-debug.apk` from the releases page and sideload
+   it (same signing key as every earlier build → updates in place, no
+   uninstall; your projects, keys and sessions survive).
+2. Open the app: the project deck opens, tap a card → that project's
+   sandbox → chat. **＋** adds a project. **⌘** is the command palette.
+3. **⌘ → API keys** to paste keys; the OpenCode row (Zen + Go plans,
+   console.opencode.ai) runs its 31 FREE models with no key at all.
+4. Leaving the agent alone? **⌘ → Turn ON unattended (auto-allow)** —
+   tool approvals are answered automatically. Tap the green pill to stop.
 
-## What's in v0.8.0 (P8 — the deck: style, motion, per-project sandboxes)
+## What's in v0.14.0 (P14 — the field-report killer)
 
-- **Project deck (home)** — projects shown as credit-card-style gradient
-  cards in a vertical snap carousel (`DeckView`, a custom framework-only
-  pager: one card per gesture, neighbors peek + shrink + dim, animated
-  page dots, pulsing status pill, staggered entrances). ＋ ghost card →
-  folder picker (browse /sdcard, create folders) → new card; long-press →
-  open / rename / remove (files are never touched).
-- **A sandbox per project** — tapping a card opens that project's OWN
-  sandbox: the opencode server is (re)started with the project folder as
-  its working directory, so the agent's file tools, sessions and shell
-  cwd are rooted exactly there. The last-used project is pre-warmed at
-  boot — opening its card is INSTANT (no restart); switching projects
-  shows an animated "starting sandbox" veil (~5 s cold start).
-- **Midnight-deck restyle** — deep blue-black background, indigo accent,
-  glassy surfaces, fast (≤ 230 ms) activity transitions app-wide; chat
-  rows animate in, a three-dot typing indicator pulses while the agent
-  thinks, a "↓ latest" pill appears when you scroll up, send/mode chips
-  spring on tap. Everything is framework views/APIs — still zero
-  dependencies.
-- **Settings, restyled** — animated hub (rounded sections, staggered
-  entrances, switch rows) with: server state + restart, DNS bridge,
-  default-model picker (all models), API keys, project deck link, and a
-  **sandbox doctor** that shows what the agent can actually run
-  (opencode version, busybox, bash/git shims, python3/node/gcc, PATH) —
-  plus an **Animations** toggle that also honors the system's "remove
-  animations" accessibility setting.
-- Chat logic from P7 is unchanged (⌘ palette — now with Projects and
-  Settings entries — Build/Plan chip, collapsed thinking/tool cards,
-  pinned permission card, searchable all-models, stop/abort, sessions,
-  export, crash capture).
+- **bash shim fixed for real** — the Debian branch test was emitted as two
+  lines; mksh cannot parse a newline before `&&` (a leading operator is a
+  syntax error), so every bash tool call died at line 5. Now single-line,
+  the generator refuses to ever write a continuation-operator line, and
+  JVM regression tests pin it. Updating repairs the shim on-device.
+- **model picker merge fixed** — a server response no longer short-circuits
+  the models.dev catalog (bundled snapshot keeps everything visible even
+  offline); key state comes from the app's own auth.json; "(add API key)"
+  providers open the keys screen on a single tap; free models badged,
+  paid models show $/Mtok.
+- **session spend pill** — ⇅ tokens + $ cost in their own header pill, no
+  longer ellipsized away inside the one-line subtitle.
+- **unattended mode** — auto-answers tool approvals ("always"), status
+  pill instead of the blocking card, failed replies fall back to the card.
+- **long-output jank fixed** — tool I/O blocks dropped selectable spans,
+  cap with a "+N more chars" tail, long-press copies the full text.
+- **model sheet rebuilt** — 88%-height bottom sheet, weight-based list,
+  recycled rows; **settings gained an agent section** (unattended toggle +
+  GitHub token access). **Zen/Go clarified**: same row, same key.
+- **Debian 12 + apt** (from P12/P13, intact here): one shared rootfs in
+  app-private storage — install packages ONCE, every project session
+  binds only its own folder. Probed at install; falls back to the Lite
+  (Alpine) layer if the device refuses it.
 
-## What's in v0.7.0 (P7 — from-scratch chat-first rewrite)
+## What came before (highlights)
 
-- **Chat-first flow** — no wizard, no setup cards, no sandbox gate. Boot is
-  a quiet log; a warm launch skips straight to the transcript.
-- **⌘ palette** = the TUI's Ctrl+P: new chat, sessions, model picker,
-  Build/Plan toggle, API keys, server logs & shell, restart server,
-  expand/collapse all cards, copy last response, export chat to Downloads.
-- **Build / Plan chip** = the TUI's Tab; the agent travels with every
-  message (with graceful no-agent retry on 400/422/500).
-- **"✦ Thinking" reasoning cards and tool-call cards, collapsed by
-  default**, tap to expand; tool cards carry live status dots
-  (queued/running/done/error) and show input/output; errors auto-expand;
-  expand/collapse-all in the palette.
-- **Permission asks** (bash, edit, webfetch…) pin above the composer with
-  Allow once / Always / Deny. The foreground service catches asks even
-  when the screen is closed and tombstones answered ids.
-- **Every model, searchable** — `GET /config/providers` grouped by
-  provider with search; picking sets the per-message model and the
-  server-side default (`opencode.json`).
-- **In-app API keys** (⌘ → API keys) — provider keys land in the
-  app-private `auth.json`; custom OpenAI-compatible endpoints
-  (OpenRouter, Groq, Ollama, LM Studio, vLLM…) register in
-  `opencode.json`; auth.json import kept for desktop migrations.
-- **Diagnostics** (⌘ → Server logs & shell): live server log tail, a
-  native shell console (busybox + system tools), binary facts + one-tap
-  re-unpack, SAF import of your own static arm64 tools into `bin/` (first
-  on the agent's PATH), and an optional DNS bridge proxy.
-- **Crash capture** — any uncaught exception is written to
-  `last-crash.txt` and shown on the next boot; every SSE frame and part
-  renders through defensive paths, so a malformed payload degrades to a
-  plain line instead of taking the chat down.
-- Token/cost footers per assistant message (formula verified in the
-  binary), stop/abort, session delete, relative timestamps, partial wake
-  lock during agent runs.
+- **P13** Debian install actually installs (probed, with proxy wiring for
+  apt/pip/git); **P12** monochrome "graphite" theme, session spend meter,
+  agent GitHub token; **P11** per-chat model picks + model-not-found
+  self-heal (verified live); **P10** permission/stop on a control lane
+  (they finally fire mid-turn), deck fling fix, tool/thought card
+  redesign; **P9** `pkg` package manager + realtime chat + full model
+  catalog; **P8** project deck with per-project sandboxes; **P7**
+  from-scratch chat-first rewrite (palette, collapsed reasoning/tool
+  cards, in-app keys, diagnostics); **P6** zero-setup wizard with the
+  bundled binary.
 
 ## Architecture notes
 
@@ -156,7 +129,7 @@ app/src/main/java/ai/opencode/app/
 scripts/                     toolchain setup, binary API scanners, packaging
 ```
 
-## Checksums (v0.8.0 release artifacts)
+## Checksums (see SHA256SUMS.txt in each release / kit)
 
 ```
 (see SHA256SUMS.txt in the release assets — APK + kit + binary tarball)

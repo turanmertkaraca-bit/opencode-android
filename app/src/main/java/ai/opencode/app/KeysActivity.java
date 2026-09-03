@@ -47,10 +47,12 @@ public class KeysActivity extends Activity {
         note.setText("Paste an API key for any provider you use. Keys are "
                 + "stored in the app's private auth.json and picked up on "
                 + "your next message — no restart needed.\n\n"
-                + "The first row, OpenCode, IS opencode's own provider: "
-                + "its FREE models (nemotron, mimo, big-pickle…) run WITHOUT "
-                + "any key; paste your opencode key from console.opencode.ai "
-                + "for the paid ones. No other key yet? OpenRouter and Groq "
+                + "The first row, OpenCode, IS opencode's own provider — Zen "
+                + "and the Go plan use THE SAME row and key (console.opencode.ai). "
+                + "Its FREE models (grok-code, mimo, big-pickle, nemotron…) run "
+                + "WITHOUT any key; a paid key is only for the paid ones. If a "
+                + "model errors with 401/402, that model is paid — your plan "
+                + "doesn't cover it. No other key yet? OpenRouter and Groq "
                 + "have free tiers.");
         int p2 = dp(10);
         note.setPadding(0, p2, 0, p2);
@@ -211,7 +213,8 @@ public class KeysActivity extends Activity {
                 + "Contents: Read and write. Nothing else.\n\n"
                 + "github.com/settings/personal-access-tokens/new\n\n"
                 + "It becomes GH_TOKEN in the sandbox so the AI can analyze "
-                + "and push new versions. A scoped token keeps a runaway "
+                + "and push new versions. In Debian it can `apt install git` "
+                + "and commit right away. A scoped token keeps a runaway "
                 + "tool from touching anything else.");
         guide.setPadding(0, dp(8), 0, 0);
         box.addView(guide);
