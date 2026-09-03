@@ -181,6 +181,9 @@ public class ChatActivity extends Activity
     private volatile boolean runHadOutput;
     private volatile boolean modelFixRetried;
     private volatile boolean flakeRetried;
+    /** P18: tokens of the newest assistant message ≈ how much context each
+     *  new turn re-reads. Drives the Σ popover's heavy-context advice. */
+    private volatile long lastAssistantTok;
     private boolean pinnedBottom = true;
 
     private final Runnable watchdog = new Runnable() {
@@ -241,6 +244,7 @@ public class ChatActivity extends Activity
         if (btnVision != null) btnVision.setOnClickListener(v -> pickImage());
         chipMode.setOnClickListener(v -> toggleMode());
         chipModel.setOnClickListener(v -> modelSheet());
+        if (tvSpend != null) tvSpend.setOnClickListener(v -> spendPopover());   // P18
         btnSend.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
             if (busy) abortRun(); else send();
@@ -785,7 +789,9 @@ public class ChatActivity extends Activity
                 Api.Resp r = null;
                 boolean modelDropped = false;
                 for (int i = 0; i < bodies.size(); i++) {
-                    r = Api.post("/session/" + sid + "/message", bodies.get(i), 300_000);
+                    // P18: 900s read budget — a long tool loop on a slow
+                    // free model can legitimately out-think the old 300s.
+                    r = Api.post("/session/" + sid + "/message", bodies.get(i), 900_000);
                     if (r.ok()) {
                         // P11: variant indices 0–1 still carry the model
                         // (ma, m); later ones silently lost the pick.
@@ -829,8 +835,25 @@ public class ChatActivity extends Activity
                 ui.removeCallbacks(watchdog);
                 ui.postDelayed(watchdog, 2000);
             } catch (Exception e) {
-                sys("send failed: " + e);
-                setBusy(false);
+                // P18: the POST timed out but the RUN may still be alive
+                // server-side — never kill it, never say "send failed".
+                // SSE events keep rendering; the watchdog ends busy only
+                // when the feed goes truly silent. NO auto-retry either:
+                // re-POSTing a message the server already accepted would
+                // run the agent twice (doubled tokens — field report #3).
+                if (Resilience.isSendTimeout(e)) {
+                    sys("⏱ " + Resilience.prettyNetError(e)
+                            + " — still watching the run; tap ■ to stop if nothing moves");
+                    ui.removeCallbacks(watchdog);
+                    ui.postDelayed(watchdog, 1200);
+                } else if (Resilience.isBrokenPipe(e)) {
+                    sys("⚠ " + Resilience.prettyNetError(e)
+                            + " — the sandbox restarts itself; resend this message in a moment");
+                    setBusy(false);
+                } else {
+                    sys("send failed · " + Resilience.prettyNetError(e));
+                    setBusy(false);
+                }
             }
         });
     }
@@ -844,7 +867,7 @@ public class ChatActivity extends Activity
                 List<String> bodies = buildBodies(q);
                 Api.Resp r = null;
                 for (String body : bodies) {
-                    r = Api.post("/session/" + sid + "/message", body, 300_000);
+                    r = Api.post("/session/" + sid + "/message", body, 900_000);
                     if (r.ok()) break;
                 }
                 if (r == null || !r.ok()) {
@@ -858,8 +881,16 @@ public class ChatActivity extends Activity
                 ui.removeCallbacks(watchdog);
                 ui.postDelayed(watchdog, 2000);
             } catch (Exception e) {
-                sys("retry failed: " + e);
-                setBusy(false);
+                if (Resilience.isSendTimeout(e)) {
+                    // same soft landing as send(): the run outlives the HTTP read
+                    sys("⏱ " + Resilience.prettyNetError(e)
+                            + " — still watching the run; tap ■ to stop if nothing moves");
+                    ui.removeCallbacks(watchdog);
+                    ui.postDelayed(watchdog, 1200);
+                } else {
+                    sys("retry failed · " + Resilience.prettyNetError(e));
+                    setBusy(false);
+                }
             }
         });
     }
@@ -1067,6 +1098,11 @@ public class ChatActivity extends Activity
         if (newState == ServerService.ST_HEALTHY) {
             ui.post(this::checkPermissionQueue);
             ui.post(this::showEnvWelcome);          // P15: one-shot env report
+            // P18: an AUTO-recovery happened while this chat was open —
+            // say so, and make clear the chat survived (sessions are on
+            // disk). This replaces the old cold-boot ritual entirely.
+            final String note = ServerService.consumeRecoveryNote();
+            if (note != null) ui.post(() -> sys("♻ " + note));
         }
     }
 
@@ -1106,9 +1142,14 @@ public class ChatActivity extends Activity
             } else {
                 tvSpend.setVisibility(View.VISIBLE);
                 // spendLine starts with " · " for its subtitle role — strip
-                // it for the pill and compact the text ("⇅ 12.3k · $0.0041")
+                // it for the pill. P18: the pill now OPENS WITH Σ (it is a
+                // session-SUM, the field report read ⇅ as a live meter "going
+                // up way too much") and keeps the tok unit; tapping it
+                // explains the number and offers a fresh chat when context
+                // gets heavy (listener attached in onCreate).
                 String pill = spend.startsWith(" · ") ? spend.substring(3) : spend;
-                tvSpend.setText(pill.replace(" tok", ""));
+                if (pill.startsWith("⇅")) pill = "Σ" + pill.substring(1);
+                tvSpend.setText(pill);
             }
         }
         if (!AuthStore.hasAnyKey(this) && st == ServerService.ST_HEALTHY) {
@@ -2082,6 +2123,7 @@ public class ChatActivity extends Activity
         final double fCost = cost;
         final long fTok = total;
         final boolean hasSpend = total > 0 || cost > 0;
+        if (hasSpend && "assistant".equals(role)) lastAssistantTok = fTok;   // P18
         Map<String, Object> e = Json.map(info, "error");
         final String fErrName = e != null
                 ? nz(Json.str(e, "name"), "error") : null;
@@ -2133,11 +2175,53 @@ public class ChatActivity extends Activity
         }
         if (tok <= 0 && cost <= 0) return "";
         StringBuilder b = new StringBuilder(" · ⇅ ");
-        b.append(tok >= 1000
-                ? String.format(Locale.US, "%.1fk", tok / 1000.0)
-                : String.valueOf(tok)).append(" tok");
+        b.append(Resilience.fmtTok(tok)).append(" tok");
         if (cost > 0) b.append(String.format(Locale.US, " · $%.4f", cost));
         return b.toString();
+    }
+
+    /** P18: tap the Σ pill → what this number actually is. The field
+     *  report (“the counter at top.. what is it? its going up way too
+     *  much”) is really two things: an unlabeled cumulative meter, and
+     *  context that grows every turn — each turn re-sends the whole chat,
+     *  so late-session turns cost multiples of early ones. Explain both,
+     *  and when the context is heavy offer the one-button fix: a fresh
+     *  chat resets per-turn cost without touching history on disk. */
+    private void spendPopover() {
+        long sum; double sumCost; long lastTok;
+        synchronized (lock) {
+            long t = 0; double c = 0;
+            for (MsgInfo mi : msgs.values()) { t += mi.tok; c += mi.cost; }
+            sum = t; sumCost = c; lastTok = lastAssistantTok;
+        }
+        if (sum <= 0 && sumCost <= 0) return;
+        StringBuilder m = new StringBuilder();
+        m.append("Σ is this chat's TOTAL token use — it only ever goes up. ")
+         .append("Every message you send re-reads the whole conversation, ")
+         .append("so the total climbs even when replies are short. “$” is ")
+         .append("what the provider billed for all of it.\n\n");
+        if (lastTok > 0) {
+            m.append("Depth: the conversation is now ~")
+             .append(Resilience.fmtTok(lastTok))
+             .append(" tokens deep — that's what every NEW turn costs ")
+             .append("before the model writes a single word.\n\n");
+        }
+        String verdict = Resilience.contextVerdict(lastTok);
+        boolean heavy = lastTok >= 50_000;
+        if (!verdict.isEmpty()) m.append(verdict).append("\n");
+        AlertDialog.Builder b = new AlertDialog.Builder(this)
+                .setTitle("Σ " + Resilience.fmtTok(sum) + " tok · "
+                        + Resilience.fmtCost(sumCost))
+                .setMessage(m)
+                .setPositiveButton("Got it", null);
+        if (heavy) {
+            b.setNegativeButton("＋ Fresh chat", (d, w) -> {
+                loadSession(null);
+                sys("＋ fresh chat — the context (and per-turn cost) just reset; "
+                        + "the old chat is still in Sessions");
+            });
+        }
+        b.show();
     }
 
     private void sys(String s) {

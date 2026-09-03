@@ -7,18 +7,48 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.15.0 — P15)
+## Install (v0.18.0 — P18)
 
-1. Grab `opencode-p15-v0.15.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p18-v0.18.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
    sandbox → chat. **＋** adds a project. **⌘** is the command palette.
 3. **⌘ → API keys** to paste keys; the OpenCode row (Zen + Go plans,
    console.opencode.ai) runs its 31 FREE models with no key at all.
-4. Leaving the agent alone? **⌘ → Turn ON unattended (auto-allow)** —
-   tool approvals are answered automatically. Tap the green pill to stop.
-5. **⌘ → Project files →** — the visual file manager for this project.
+4. One-minute armor against Galaxy process kills: **Settings → keep alive →
+   Battery optimization — exempt ✓**, plus Device care → Never sleeping apps.
+
+## What's in v0.18.0 (P18 — the unstoppable sandbox)
+
+- **the sandbox heals itself** — when the opencode server process dies
+  (the field report: "chat and sandbox shuts off, cold boot again"), the
+  service now auto-restarts it in place with growing backoff (1.5 s → 4 s
+  → 8 s), kills any stale port squatter first so a zombie listener can
+  never wedge the respawn, and the chat stays attached: a ♻ row says
+  "sandbox auto-recovered — this chat is still attached". Sessions live
+  on disk, so you keep working. Three deaths inside 10 minutes trips a
+  crash-loop guard that stops burning battery and says so.
+- **every death leaves a black-box record** — files/sandbox-diag.log
+  (timestamp · event · exit code · last server output · free memory),
+  one tap away in Settings → keep alive → **Sandbox incident log**. No
+  more "no Java crash file is written" dead ends.
+- **send timeouts can't kill a thinking run** — the field report's
+  `send failed: java.net.SocketTimeoutException: timeout` fired while
+  the agent was still working. The send POST now has a 15-minute read
+  budget, a timeout is soft-landed ("still watching the run — tap ■ to
+  stop if nothing moves") and the SSE feed keeps rendering; the run is
+  NEVER re-POSTed (a blind retry would run the agent twice and double
+  the tokens). Broken-pipe errors get their own human wording. Raw
+  java.net text is banned from the chat.
+- **the Σ pill explains itself** — the top counter is the chat's
+  cumulative token + cost sum; it only ever climbs because every turn
+  re-sends the whole conversation. Now labeled **Σ**, and tapping it
+  opens a breakdown: what the number is, how deep the conversation is
+  (~context each new turn re-reads), and at ≥50k depth a **＋ Fresh
+  chat** button that resets per-turn cost in one tap (old chat stays in
+  Sessions). The 1.9 M tok field report was the runaway diagnosis loop
+  the other two fixes eliminate.
 
 ## What's in v0.15.0 (P15 — the P12 picker restored + proot dirs/env + the UI rework)
 
