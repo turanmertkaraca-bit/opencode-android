@@ -52,6 +52,17 @@ public final class Json {
         return obj(m == null ? null : m.get(key));
     }
 
+    /** P14: numeric field, 0 when absent or malformed. */
+    public static double num(Map<String, Object> m, String key) {
+        if (m == null) return 0;
+        Object v = m.get(key);
+        if (v instanceof Number) return ((Number) v).doubleValue();
+        if (v instanceof String) {
+            try { return Double.parseDouble((String) v); } catch (Exception ignored) {}
+        }
+        return 0;
+    }
+
     public static List<Object> list(Map<String, Object> m, String key) {
         return arr(m == null ? null : m.get(key));
     }

@@ -48,6 +48,8 @@ public final class Models {
 
     public static final class Mdl {
         public String id, name, desc;
+        public boolean free;                // P14: zero input+output cost
+        public double costIn, costOut;      // P14: $/Mtok, shown in the sheet
     }
 
     /** Last successful fetch — the picker reuses it for instant re-opens. */
@@ -89,10 +91,6 @@ public final class Models {
                                 if (Json.str(p, "id") == null) p.put("id", e.getKey());
                                 collectProvider(byId, p, c, true);
                             }
-                            serverOk = !byId.isEmpty();
-                            lastFetch = order(byId);
-                            lastSource = serverOk ? "server" : "server empty";
-                            return lastFetch;
                         }
                     }
                 } else {
@@ -200,6 +198,16 @@ public final class Models {
         mdl.name = (mn == null || mn.isEmpty()) ? mid : mn;
         String d = Json.str(mm, "description");
         mdl.desc = (d == null || d.isEmpty()) ? null : d;
+        // P14: cost block (models.dev schema) — $ per Mtok. Zero input AND
+        // output cost = the "free" badge in the picker (31 zen models today).
+        try {
+            Map<String, Object> cost = Json.obj(mm.get("cost"));
+            if (cost != null) {
+                mdl.costIn = Json.num(cost, "input");
+                mdl.costOut = Json.num(cost, "output");
+                mdl.free = mdl.costIn == 0 && mdl.costOut == 0;
+            }
+        } catch (Exception ignored) {}
         prov.models.add(mdl);
     }
 

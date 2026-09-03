@@ -20,7 +20,7 @@ SDK="$HOME/p0-tools/android-sdk"
 mkdir -p "$TOOLS" "$SDK"
 
 say "JDK in use"
-java -version 2>&1 | head -2 || true   # head closes the pipe; never SIGPIPE-kill
+java -version 2>&1 | head -2
 
 cd "$TOOLS"
 

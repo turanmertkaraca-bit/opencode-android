@@ -197,8 +197,15 @@ public final class Shims {
                 "if [ -x \"" + f + "/bin/bash.real\" ]; then\n" +
                 "  exec \"" + f + "/bin/bash.real\" \"$@\"\n" +
                 "fi\n" +
-                "if [ -x \"" + launcher.getAbsolutePath() + "\" ]\n" +
-                "    && [ -f \"" + new File(Debian.dir(c), ".probe") + "\" ]; then\n" +
+                // P14 CRITICAL FIX: the condition must be ONE line. mksh
+                // (/system/bin/sh) treats the newline after `if [ … ]` as the
+                // end of the condition list — an `&&` starting the NEXT line
+                // is a syntax error, the shim dies before exec, and EVERY
+                // bash tool call fails ("sh: syntax error at line 5: '&&'
+                // unexpected" — the exact P13 field report). Never split a
+                // test across lines without a trailing operator or backslash.
+                "if [ -x \"" + launcher.getAbsolutePath() + "\" ] && [ -f \""
+                + new File(Debian.dir(c), ".probe") + "\" ]; then\n" +
                 "  exec \"" + launcher.getAbsolutePath() + "\" bash \"$@\"\n" +
                 "fi\n" +
                 "exec /system/bin/sh \"$@\"\n";
@@ -207,6 +214,13 @@ public final class Shims {
 
     private static void writeShim(File f, String content) {
         try {
+            // P14 guard: a shim line that STARTS with && or || is unparseable
+            // by mksh (newline ends the previous command). Refuse to write —
+            // the previous (working) shim stays instead of a broken one.
+            for (String line : content.split("\n")) {
+                String t = line.trim();
+                if (t.startsWith("&&") || t.startsWith("||")) return;
+            }
             if (f.exists() && content.equals(new String(read(f), "UTF-8"))) return;
             File tmp = new File(f.getParentFile(), f.getName() + ".part");
             try (OutputStream o = new FileOutputStream(tmp)) {

@@ -477,6 +477,12 @@ public final class Debian {
      */
     public static void writeLauncher(Context c) {
         try {
+            // P14: mkdir the debian dir FIRST — on a fresh install (or the
+            // JVM regression tests) files/debian/ does not exist yet and
+            // the FileOutputStream below would silently throw, leaving no
+            // launcher at all (caught-and-ignored hid it until now).
+            File d = dir(c);
+            if (!d.exists()) d.mkdirs();
             File files = c.getFilesDir();
             String bin = binDir(c).getAbsolutePath();
             String lib = libDir(c).getAbsolutePath();
