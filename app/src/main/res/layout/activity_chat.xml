@@ -191,7 +191,9 @@
         android:ellipsize="end"
         android:visibility="gone"/>
 
+    <!-- composer (P16: id added so DeX wide layout can cap it) -->
     <LinearLayout
+        android:id="@+id/composerBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"

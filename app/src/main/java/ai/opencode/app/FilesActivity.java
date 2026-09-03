@@ -1,5 +1,6 @@
 package ai.opencode.app;
 
+import android.animation.ObjectAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
@@ -22,8 +23,10 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * P15 — the visual file manager the user asked for ("a more visually
@@ -46,9 +49,28 @@ public class FilesActivity extends Activity {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout root;
+    private ScrollView scrollV;
     private TextView crumb;
     private File cwd;
     private File baseDir;
+
+    // ---- P16: LIVE project watching -----------------------------------
+    // The user: "one that lets me see the real time changes that are being
+    // made — that would be soo cool if done right". The whole project root
+    // is watched (recursively, capped) while the screen is open; changes
+    // from ANY folder land in the live rail, changes inside the open
+    // folder additionally re-render the list with a hot badge.
+    private DirWatcher watcher;
+    private boolean liveOn = true;
+    private TextView livePill;
+    private LinearLayout feedBox;
+    private ObjectAnimator livePulse;
+    private boolean heatClearQueued;
+    /** newest-first rail entries: {action, path, tsMillis}. */
+    private final List<String[]> feed = new ArrayList<>();
+    /** abs path → last-change ms; drives the ● badge on rows. */
+    private final Map<String, Long> heat = new HashMap<>();
+    private static final long HEAT_MS = 10_000;
 
     @Override
     protected void onCreate(Bundle b) {
@@ -62,17 +84,212 @@ public class FilesActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundResource(R.drawable.bg_home);
         scroll.setFillViewport(true);
+        scrollV = scroll;
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        int pad = Theme.dp(this, 18);
+        int pad = contentInset();
         root.setPadding(pad, Theme.dp(this, 14), pad, Theme.dp(this, 40));
         scroll.addView(root);
         setContentView(scroll);
     }
 
+    /** P16 DeX: centered content column on wide windows. */
+    private int contentInset() {
+        int wdp = getResources().getConfiguration().screenWidthDp;
+        if (wdp < 600) return Theme.dp(this, 18);
+        return Theme.dp(this, Math.min(200, Math.max(18, (wdp - 720) / 2 + 18)));
+    }
+
     @Override
     protected void onResume() {
         super.onResume();
+        render();
+        if (liveOn) startWatching();
+    }
+
+    @Override
+    protected void onPause() {
+        if (watcher != null) watcher.stop();
+        if (livePulse != null) { livePulse.cancel(); livePulse = null; }
+        super.onPause();
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newCfg) {
+        super.onConfigurationChanged(newCfg);
+        ui.post(this::render);   // DeX window resizes re-set the column
+    }
+
+    // -------------------------------------------------------------- live
+
+    private void startWatching() {
+        if (watcher == null) {
+            watcher = new DirWatcher(Looper.getMainLooper(),
+                    (path, action) -> onLiveChange(path, action));
+        }
+        watcher.start(baseDir);
+        updateLivePill();
+    }
+
+    /** Live event (main thread): feed the rail, heat the row when the
+     *  change is inside the open folder, re-render preserving scroll. */
+    private void onLiveChange(String path, String action) {
+        if (isFinishing() || isDestroyed()) return;
+        feed.add(0, new String[]{action, path,
+                String.valueOf(System.currentTimeMillis())});
+        while (feed.size() > 8) feed.remove(feed.size() - 1);
+        heat.put(path, System.currentTimeMillis());
+        pruneHeat();
+        renderFeed();
+        String dirOf = new File(path).getParent();
+        if (dirOf != null && dirOf.equals(cwd.getAbsolutePath())) {
+            renderPreservingScroll();
+        }
+        scheduleHeatClear();
+    }
+
+    private void renderPreservingScroll() {
+        int y = scrollV != null ? scrollV.getScrollY() : 0;
+        render();
+        if (scrollV != null) scrollV.post(() -> scrollV.scrollTo(0, y));
+    }
+
+    private void scheduleHeatClear() {
+        if (heatClearQueued) return;
+        heatClearQueued = true;
+        ui.postDelayed(() -> {
+            heatClearQueued = false;
+            if (!isFinishing() && !isDestroyed()) renderPreservingScroll();
+        }, HEAT_MS + 500);
+    }
+
+    private void pruneHeat() {
+        long now = System.currentTimeMillis();
+        heat.values().removeIf(t -> now - t > HEAT_MS);
+    }
+
+    /** The LIVE pill in the title row — tap pauses/resumes watching. */
+    private TextView livePillView() {
+        TextView p = new TextView(this);
+        p.setTextSize(11);
+        p.setTypeface(Typeface.MONOSPACE);
+        int pad = Theme.dp(this, 10);
+        p.setPadding(pad, Theme.dp(this, 5), pad, Theme.dp(this, 5));
+        p.setBackgroundResource(R.drawable.bg_chip);
+        Theme.press(p);
+        p.setOnClickListener(v -> {
+            liveOn = !liveOn;
+            if (liveOn) {
+                startWatching();
+            } else {
+                if (watcher != null) watcher.stop();
+                updateLivePill();
+            }
+            Toast.makeText(this, liveOn ? "live changes on"
+                    : "live changes paused", Toast.LENGTH_SHORT).show();
+        });
+        return p;
+    }
+
+    private void updateLivePill() {
+        if (livePill == null) return;
+        if (livePulse != null) { livePulse.cancel(); livePulse = null; }
+        boolean watching = liveOn && watcher != null && watcher.isRunning();
+        livePill.setText(watching ? "● LIVE" : liveOn ? "● live…" : "◌ paused");
+        livePill.setTextColor(watching || liveOn ? Theme.ACCENT : Theme.TXT_DIM);
+        if (watching && Theme.motionOn(this)) livePulse = Theme.pulse(livePill);
+    }
+
+    /** P16 live rail: what changed in this project, newest first. Tap a
+     *  row to jump to its folder. Returns true when rows are visible. */
+    private boolean renderFeed() {
+        if (feedBox == null) return false;
+        if (feed.isEmpty()) {
+            feedBox.setVisibility(View.GONE);
+            return false;
+        }
+        feedBox.setVisibility(View.VISIBLE);
+        feedBox.removeAllViews();
+        long now = System.currentTimeMillis();
+        int n = 0;
+        for (String[] ev : feed) {
+            if (n++ >= 5) break;
+            final File f = new File(ev[1]);
+            String act = ev[0];
+            LinearLayout line = new LinearLayout(this);
+            line.setOrientation(LinearLayout.HORIZONTAL);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            line.setPadding(Theme.dp(this, 10), Theme.dp(this, 6),
+                    Theme.dp(this, 10), Theme.dp(this, 6));
+            line.setBackground(Theme.ripple(this, Theme.panel(this)));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = Theme.dp(this, 3);
+            line.setLayoutParams(lp);
+
+            TextView a = new TextView(this);
+            a.setText(act.equals("del") ? "del" : act.equals("new") ? "new" : "mod");
+            a.setTextSize(10);
+            a.setTypeface(Typeface.MONOSPACE);
+            a.setTextColor(act.equals("del") ? Theme.ERR
+                    : act.equals("new") ? Theme.ACCENT : Theme.ACCENT_LT);
+            LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            alp.rightMargin = Theme.dp(this, 9);
+            line.addView(a, alp);
+
+            TextView p = new TextView(this);
+            p.setText(relPath(f));
+            p.setTextSize(11);
+            p.setTypeface(Typeface.MONOSPACE);
+            p.setTextColor(Theme.TXT);
+            p.setSingleLine(true);
+            p.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+            line.addView(p, new LinearLayout.LayoutParams(0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+            TextView age = new TextView(this);
+            age.setText(ageStr(now - Long.parseLong(ev[2])));
+            age.setTextSize(10);
+            age.setTypeface(Typeface.MONOSPACE);
+            age.setTextColor(Theme.TXT_DIM);
+            LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            glp.leftMargin = Theme.dp(this, 8);
+            line.addView(age, glp);
+
+            line.setOnClickListener(v -> jumpTo(f));
+            feedBox.addView(line);
+            Theme.appear(line);
+        }
+        return true;
+    }
+
+    private String relPath(File f) {
+        String b = baseDir.getAbsolutePath();
+        String p = f.getAbsolutePath();
+        String parent = f.getParent();
+        boolean inCwd = parent != null && parent.equals(cwd.getAbsolutePath());
+        if (p.startsWith(b + "/")) p = p.substring(b.length() + 1);
+        return inCwd ? f.getName() : p;
+    }
+
+    private static String ageStr(long ms) {
+        if (ms < 60_000) return Math.max(1, ms / 1000) + "s";
+        if (ms < 3_600_000) return (ms / 60_000) + "m";
+        return (ms / 3_600_000) + "h";
+    }
+
+    private void jumpTo(File f) {
+        File dir = f.isDirectory() ? f : f.getParentFile();
+        if (dir == null) return;
+        String base = baseDir.getAbsolutePath();
+        String dp2 = dir.getAbsolutePath();
+        if (!dp2.equals(base) && !dp2.startsWith(base + "/")) return;
+        cwd = dir;
         render();
     }
 
@@ -80,13 +297,25 @@ public class FilesActivity extends Activity {
 
     private void render() {
         root.removeAllViews();
+        int inset = contentInset();
+        root.setPadding(inset, Theme.dp(this, 14), inset, Theme.dp(this, 40));
 
+        // P16 title row: Files ····· [● LIVE] (tap toggles watching)
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
         TextView h1 = new TextView(this);
         h1.setText("Files");
         h1.setTextSize(27);
         h1.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         h1.setTextColor(Theme.TXT);
-        root.addView(h1);
+        titleRow.addView(h1, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        livePill = livePillView();
+        titleRow.addView(livePill, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(titleRow);
 
         crumb = new TextView(this);
         crumb.setTextSize(12);
@@ -98,12 +327,22 @@ public class FilesActivity extends Activity {
         root.addView(crumb);
         root.addView(breadcrumb());
 
+        // P16: the live-change rail sits between the breadcrumb and the rows
+        feedBox = new LinearLayout(this);
+        feedBox.setOrientation(LinearLayout.VERTICAL);
+        feedBox.setPadding(0, Theme.dp(this, 4), 0, 0);
+        root.addView(feedBox, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
         File[] kids = cwd.listFiles();
         if (kids == null) {
             TextView empty = Theme.sectionLabel(this,
                     "this folder is empty (or unreadable)");
             root.addView(empty);
             root.addView(newRowGhost());
+            updateLivePill();
+            renderFeed();
             return;
         }
         List<File> dirs = new ArrayList<>(), files = new ArrayList<>();
@@ -120,6 +359,8 @@ public class FilesActivity extends Activity {
         for (File d : dirs) { root.addView(rowFor(d, delay)); delay += 24; }
         for (File f : files) { root.addView(rowFor(f, delay)); delay += 24; }
         root.addView(newRowGhost());
+        updateLivePill();
+        renderFeed();
     }
 
     /** Segmented breadcrumb chips: tap any segment to jump back to it. */
@@ -195,9 +436,13 @@ public class FilesActivity extends Activity {
         col.setLayoutParams(clp);
 
         TextView name = new TextView(this);
-        name.setText(f.getName());
+        // P16: a recent change heats the row — bright dot + bold, fading on
+        // the scheduled heat-clear re-render (~10 s).
+        boolean isHot = heat.containsKey(f.getAbsolutePath());
+        name.setText((isHot ? "● " : "") + f.getName());
         name.setTextSize(15);
-        name.setTextColor(Theme.TXT);
+        name.setTextColor(isHot ? Theme.ACCENT : Theme.TXT);
+        name.setTypeface(isHot ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         name.setSingleLine(true);
         name.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         col.addView(name);

@@ -761,7 +761,10 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
               .append("Lite tools:  pkg install python3 py3-pip git nodejs gcc make\n")
               .append("Debian tools:  apt install <anything>  (Settings → environment)\n")
               .append("downloads ride the in-app proxy; signatures verified.\n")
-              .append("opencode zen FREE models need no API key at all.");
+              .append("opencode zen FREE models need no API key at all.\n")
+              .append("Zen and Go keys are SEPARATE (P16): OpenCode Zen runs\n")
+              .append("the zen models, OpenCode Go runs the Go models — both\n")
+              .append("live in API keys, one row each.");
             ui.post(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 tv.setText(sb.toString());

@@ -37,9 +37,16 @@
         android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme"
         android:allowBackup="false"
+        android:resizeableActivity="true"
         android:requestLegacyExternalStorage="true">
 
-        <activity android:name=".MainActivity" android:exported="true">
+        <!-- P16 DeX: every activity handles its own configuration changes
+             (window resize, free-form/DeX, split-screen, keyboard) so a
+             stream never dies mid-run when the window changes. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
@@ -49,30 +56,35 @@
         <!-- P8: the project deck — credit-card carousel, one sandbox per card -->
         <activity
             android:name=".HomeActivity"
-            android:exported="false"/>
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"/>
 
         <activity
             android:name=".ChatActivity"
             android:exported="false"
-            android:windowSoftInputMode="adjustResize"/>
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"/>
 
         <!-- P8: animated settings hub -->
         <activity
             android:name=".SettingsActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"
             android:label="Settings"/>
 
         <activity
             android:name=".KeysActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"
             android:label="API keys"/>
 
         <activity
             android:name=".DiagnosticsActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"
             android:label="Diagnostics"/>
 
         <!-- P15: the visual project file manager (project-scoped browser) -->
@@ -80,6 +92,7 @@
             android:name=".FilesActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"
             android:label="Files"/>
 
         <service android:name=".ServerService" android:exported="false"/>

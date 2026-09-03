@@ -164,6 +164,7 @@ public class ChatActivity extends Activity
         btnSend = findViewById(R.id.btnSend);
         input = findViewById(R.id.input);
         permSlot = findViewById(R.id.permSlot);
+        applyWideLayout();                   // P16 DeX: centered column on wide windows
 
         // P8: project context from the deck (name shown in the subtitle;
         // path is a safety net — switch sandbox if Home somehow didn't,
@@ -192,7 +193,10 @@ public class ChatActivity extends Activity
         suggestBox = findViewById(R.id.suggestBox);
         chipMode.setOnClickListener(v -> toggleMode());
         chipModel.setOnClickListener(v -> modelSheet());
-        btnSend.setOnClickListener(v -> { if (busy) abortRun(); else send(); });
+        btnSend.setOnClickListener(v -> {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            if (busy) abortRun(); else send();
+        });
         scroll.getViewTreeObserver().addOnScrollChangedListener(() -> {
             pinnedBottom = atBottom();
             syncPill();
@@ -225,6 +229,42 @@ public class ChatActivity extends Activity
         if (sessionId != null && rows.isEmpty()) loadSession(sessionId);
         checkPermissionQueue();
         refreshServerUi();
+        // P16: returning from API keys with the model sheet open → refresh
+        // the rows IN PLACE, so the provider whose key was just added goes
+        // bright/ready without closing and reopening the picker.
+        if (keysFromSheet) {
+            keysFromSheet = false;
+            if (modelDlg != null && modelDlg.isShowing() && !isFinishing()
+                    && !isDestroyed()) {
+                ex.execute(() -> {
+                    List<Models.Prov> fresh = Models.fetch(ChatActivity.this);
+                    ui.post(() -> {
+                        if (modelDlg == null || !modelDlg.isShowing()) return;
+                        sheetProvs = fresh;
+                        if (sheetRefill != null) sheetRefill.run();
+                        Toast.makeText(ChatActivity.this,
+                                "providers refreshed — your key is in",
+                                Toast.LENGTH_SHORT).show();
+                    });
+                });
+            }
+        }
+    }
+
+    /** P16 DeX: hardware-keyboard shortcuts (desktop-opencode muscle
+     *  memory): Ctrl+M models · Ctrl+K palette · Ctrl+J sessions. */
+    @Override
+    public boolean onKeyUp(int keyCode, android.view.KeyEvent event) {
+        if (event != null && event.isCtrlPressed() && !event.isShiftPressed()
+                && !event.isAltPressed()) {
+            switch (keyCode) {
+                case android.view.KeyEvent.KEYCODE_M: modelSheet(); return true;
+                case android.view.KeyEvent.KEYCODE_K: palette(); return true;
+                case android.view.KeyEvent.KEYCODE_J: sessionsSheet(); return true;
+                default: break;
+            }
+        }
+        return super.onKeyUp(keyCode, event);
     }
 
     @Override
@@ -237,6 +277,33 @@ public class ChatActivity extends Activity
         paintScheduled = false;
         dirtyRows.clear();
         super.onPause();
+    }
+
+    // --------------------------------------------------- P16 DeX / wide
+
+    /** Desktop (DeX) comfort: on wide windows the transcript, permission
+     *  slot and composer collapse to a centered ~720 dp column — the
+     *  desktop-opencode silhouette instead of a stretched phone app.
+     *  Re-applied on every window resize (configChanges handled). */
+    private void applyWideLayout() {
+        android.content.res.Configuration cfg = getResources().getConfiguration();
+        int wdp = cfg.screenWidthDp;
+        if (wdp <= 0) wdp = getResources().getDisplayMetrics().widthPixels;
+        boolean wide = wdp >= 600;
+        int inset = wide ? Theme.dp(this,
+                Math.min(200, Math.max(14, (wdp - 720) / 2 + 14))) : 0;
+        if (list != null) list.setPadding(inset > 0 ? inset : dp(14),
+                dp(14), inset > 0 ? inset : dp(14), dp(4));
+        View composer = findViewById(R.id.composerBar);
+        if (composer != null) composer.setPadding(inset, dp(8), inset, dp(10));
+        if (permSlot != null) permSlot.setPadding(inset > 0 ? inset : dp(10),
+                0, inset > 0 ? inset : dp(10), 0);
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newCfg) {
+        super.onConfigurationChanged(newCfg);
+        ui.post(this::applyWideLayout);   // DeX window resizes land here
     }
 
     private boolean atBottom() {
@@ -734,6 +801,19 @@ public class ChatActivity extends Activity
                 || l.contains("econnreset");
     }
 
+    /** P16: auth-shaped failures — missing/wrong key or the plan wall.
+     *  Loose contains-matching on purpose, same as isModelNotFound; the
+     *  phrasings come from the AI-SDK family the providers use. */
+    private static boolean isKeyError(String s) {
+        if (s == null) return false;
+        String l = s.toLowerCase(Locale.US);
+        return l.contains("401") || l.contains("unauthorized")
+                || l.contains("api key") || l.contains("apikey")
+                || l.contains("402") || l.contains("payment required")
+                || l.contains("no auth credentials")
+                || l.contains("credit balance");
+    }
+
     /** P11: if the saved model is not in the server's live catalog, drop it
      *  BEFORE the request instead of failing the send. Empty fetch (server
      *  hiccup) never clears anything. */
@@ -869,6 +949,17 @@ public class ChatActivity extends Activity
                     else setBusy(false);
                 } else {
                     err("session error", m, raw);
+                    // P16: 401/402/api-key failures get the one line the
+                    // user actually needs — WHICH key, and that Zen ≠ Go.
+                    if (isKeyError(raw + " " + m)) {
+                        String[] sel = Models.selected(this);
+                        boolean go = sel != null && "opencode-go".equals(sel[0]);
+                        sys(go
+                                ? "⚠ key problem — this model needs the OpenCode GO "
+                                  + "key (SEPARATE from the Zen key). ⌘ → API keys → OpenCode Go"
+                                : "⚠ key problem — this provider needs its API key "
+                                  + "(⌘ → API keys). OpenCode Zen and Go keys are separate");
+                    }
                     setBusy(false);
                 }
             } else if ("permission.asked".equals(type)
@@ -2249,6 +2340,14 @@ public class ChatActivity extends Activity
 
     // ------------------------------------------------------------ models
 
+    // P16: the sheet keeps LIVE references so a key added from inside it
+    // (＋ key chip → KeysActivity → back) refreshes the rows in place —
+    // no more close/reopen to see "OpenCode Go · ready".
+    private android.app.AlertDialog modelDlg;
+    private List<Models.Prov> sheetProvs;
+    private Runnable sheetRefill;
+    private boolean keysFromSheet;
+
     private void modelSheet() {
         // P13: NO server gate anymore — the sheet opens regardless and shows
         // what it sees ("server offline · bundled catalog") instead of
@@ -2287,6 +2386,9 @@ public class ChatActivity extends Activity
         root.setPadding(p, dp(8), p, 0);
 
         // P15 header: live counts + data source, then the search well.
+        LinearLayout srcRow = new LinearLayout(this);
+        srcRow.setOrientation(LinearLayout.HORIZONTAL);
+        srcRow.setGravity(Gravity.CENTER_VERTICAL);
         TextView srcLine = text(11, R.color.text_secondary, false);
         int liveN = 0, freeN = 0;
         for (Models.Prov pr : provs)
@@ -2297,7 +2399,30 @@ public class ChatActivity extends Activity
         srcLine.setText(liveN + " runnable now · " + countModels(provs)
                 + " in catalog · " + freeN + " free · " + Models.lastSource);
         srcLine.setPadding(dp(4), 0, dp(4), dp(6));
-        root.addView(srcLine);
+        srcRow.addView(srcLine, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        // P16: manual re-fetch — after saving a key elsewhere (or the server
+        // restart settling) this pulls fresh /config/providers into the OPEN
+        // sheet instead of forcing a close/reopen cycle.
+        TextView ref = text(13, R.color.accent_light, true);
+        ref.setText("↻");
+        int rp = dp(10);
+        ref.setPadding(rp, dp(2), rp, dp(5));
+        ref.setBackgroundResource(R.drawable.bg_chip);
+        Theme.press(ref);
+        ref.setOnClickListener(vv -> {
+            Toast.makeText(this, "refreshing providers…", Toast.LENGTH_SHORT).show();
+            ex.execute(() -> {
+                List<Models.Prov> fresh = Models.fetch(ChatActivity.this);
+                ui.post(() -> {
+                    sheetProvs = fresh;
+                    if (sheetRefill != null) sheetRefill.run();
+                });
+            });
+        });
+        srcRow.addView(ref, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(srcRow);
 
         final EditText search = new EditText(this);
         search.setHint("search " + countModels(provs) + " models…");
@@ -2318,9 +2443,24 @@ public class ChatActivity extends Activity
         final AlertDialog dlg = b.create();
         dlg.show();
         android.view.Window w = dlg.getWindow();
-        if (w != null) w.setLayout(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                (int) (getResources().getDisplayMetrics().heightPixels * 0.88));
+        if (w != null) {
+            // P16 DeX: a full-bleed 88% sheet looks wrong on a desktop-sized
+            // window — cap the width like the desktop opencode column.
+            int wm = ViewGroup.LayoutParams.MATCH_PARENT;
+            if (getResources().getDisplayMetrics().widthPixels >= Theme.dp(this, 720))
+                wm = Theme.dp(this, 760);
+            w.setLayout(wm,
+                    (int) (getResources().getDisplayMetrics().heightPixels * 0.88));
+        }
+        modelDlg = dlg;
+        sheetProvs = provs;
+        dlg.setOnDismissListener(d -> {
+            if (modelDlg == dlg) {
+                modelDlg = null;
+                sheetRefill = null;
+                sheetProvs = null;
+            }
+        });
 
         final List<Object[]> items = new ArrayList<>(); // [kind, Prov, Mdl-or-tag]
         Runnable refill = () -> {
@@ -2332,7 +2472,8 @@ public class ChatActivity extends Activity
                 if (a.live != b2.live) return a.live ? -1 : 1;
                 return a.name.compareToIgnoreCase(b2.name);
             };
-            for (Models.Prov pr : provs) {
+            List<Models.Prov> ps = sheetProvs != null ? sheetProvs : provs;
+            for (Models.Prov pr : ps) {
                 boolean provHit = q.isEmpty()
                         || pr.id.toLowerCase(Locale.US).contains(q)
                         || pr.name.toLowerCase(Locale.US).contains(q);
@@ -2363,8 +2504,15 @@ public class ChatActivity extends Activity
                     int pad = dp(14);
                     box.setPadding(pad, dp(8), pad, dp(8));
                     if ("h".equals(it[0])) {
-                        // P15 provider header: pill tag state, mono id chip.
+                        // P16 provider header: state mark + a direct "＋ key"
+                        // action for providers missing theirs. The header tap
+                        // itself STILL never steals the sheet (P15 rule) — the
+                        // chip is the deliberate action. After Keys closes, the
+                        // rows refresh in place (see onResume).
                         Models.Prov pr = (Models.Prov) it[1];
+                        LinearLayout hrow = new LinearLayout(ChatActivity.this);
+                        hrow.setOrientation(LinearLayout.HORIZONTAL);
+                        hrow.setGravity(Gravity.CENTER_VERTICAL);
                         TextView t = text(13, pr.usable ? R.color.ok
                                 : pr.configured ? R.color.accent_light
                                 : R.color.text_secondary, true);
@@ -2373,11 +2521,32 @@ public class ChatActivity extends Activity
                             mark = "  ·  free · no key needed";   // P11 verified
                         else if (pr.usable) mark = "  ·  ready";
                         else if (pr.configured) mark = "  ·  key saved · restarting picks it up";
-                        else mark = "  ·  discovery — add API key first";
+                        else mark = "  ·  needs its own key";
                         t.setText(pr.name + mark);
                         t.setSingleLine(true);
                         t.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                        box.addView(t);
+                        hrow.addView(t, new LinearLayout.LayoutParams(0,
+                                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                        if (!pr.usable && !pr.configured) {
+                            TextView add = text(11, R.color.accent_light, true);
+                            add.setTypeface(Typeface.MONOSPACE);
+                            add.setText("＋ key");
+                            int ap = dp(9);
+                            add.setPadding(ap, dp(4), ap, dp(4));
+                            add.setBackgroundResource(R.drawable.bg_chip);
+                            Theme.press(add);
+                            add.setOnClickListener(vv -> {
+                                keysFromSheet = true;
+                                startActivity(new Intent(ChatActivity.this,
+                                        KeysActivity.class));
+                            });
+                            LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT);
+                            alp.leftMargin = dp(8);
+                            hrow.addView(add, alp);
+                        }
+                        box.addView(hrow);
                     } else if ("m".equals(it[0])) {
                         Models.Mdl m = (Models.Mdl) it[2];
                         Models.Prov pr = (Models.Prov) it[1];
@@ -2409,6 +2578,9 @@ public class ChatActivity extends Activity
                         t.setText(String.valueOf(it[2]));
                         box.addView(t);
                     }
+                    // P16: rows unfold once, on first bind — recycled rows stay
+                    // still (no replay jitter while scrolling).
+                    if (cv == null) Theme.enter(box, Math.min(i, 10) * 18L);
                     return box;
                 }
             });
@@ -2419,6 +2591,7 @@ public class ChatActivity extends Activity
             public void afterTextChanged(Editable s) { refill.run(); }
         });
         refill.run();
+        sheetRefill = refill;
         lv.setOnItemClickListener((parent, v, pos, id4) -> {
             Object[] it = items.get(pos);
             if ("h".equals(it[0])) {
@@ -2427,8 +2600,9 @@ public class ChatActivity extends Activity
                 // picker here, which read as "tapping the picker breaks it").
                 Models.Prov pr = (Models.Prov) it[1];
                 if (!pr.usable && !pr.configured)
-                    Toast.makeText(this, pr.name + " needs its API key — "
-                            + "⌘ → API keys, paste, then reopen this sheet",
+                    Toast.makeText(this, pr.name + " needs its own key — tap "
+                            + "＋ key beside its name (⌘ → API keys), paste, "
+                            + "then tap ↻ up top",
                             Toast.LENGTH_SHORT).show();
                 return;
             }
@@ -2438,12 +2612,22 @@ public class ChatActivity extends Activity
             // P12a restored: discovery-catalog entries are NOT selectable —
             // the server would answer "Model not found". Say why instead.
             if (!m.live) {
-                Toast.makeText(this, pr.usable
-                        ? m.name + " is in the discovery catalog but not offered by "
-                          + "your server right now (free list rotates) — pick a "
-                          + "non-tagged model"
-                        : "no key for " + pr.name + " yet — ⌘ → API keys first",
-                        Toast.LENGTH_LONG).show();
+                if (pr.usable) {
+                    Toast.makeText(this, m.name + " is in the discovery catalog "
+                            + "but not offered by your server right now (the free "
+                            + "list rotates) — pick a non-tagged model",
+                            Toast.LENGTH_LONG).show();
+                } else {
+                    // P16: say WHICH key — Zen and Go are separate, and that
+                    // distinction is the whole P16 key fix.
+                    Toast.makeText(this, "no key for " + pr.name + " yet — "
+                            + (pr.id.startsWith("opencode")
+                                ? "add the " + pr.name + " key in ⌘ → API keys "
+                                  + "(separate from your other opencode key)"
+                                : "⌘ → API keys first")
+                            + ", then tap ↻ up top",
+                            Toast.LENGTH_LONG).show();
+                }
                 return;
             }
             Models.save(this, pr.id, m.id);
