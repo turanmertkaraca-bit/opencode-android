@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OpenCode Mobile — P7 "the real chat app".
+
+     Single-purpose flow: launch → chat. MainActivity is only a boot screen
+     when the server isn't already healthy. No proot anywhere (P3-P6
+     sandbox removed): the bundled static binary runs natively via the
+     targetSdk-28 exec allowance, and a local CONNECT proxy bridges DNS.
+
+     usesCleartextTraffic: app talks ONLY to the in-process loopback server
+     (127.0.0.1:4096) and the local proxy.
+
+     FOREGROUND_SERVICE: hosts `opencode serve` for the whole app lifetime.
+     No foregroundServiceType needed — enforcement applies to apps targeting
+     API 34+, and we deliberately target 28 (Termux exec pattern).
+
+     POST_NOTIFICATIONS: intentionally NOT requested at runtime — apps with
+     targetSdk < 33 are granted it automatically on Android 13+. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
+    <!-- P12 keep-alive: exempt the app from battery killing (dialog intent)
+         and relaunch the sandbox after reboot (opt-in switch). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+    <!-- legacy storage: agent file tools can reach /sdcard; chat export
+         writes to Downloads (Termux pattern — targetSdk 28). -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
+
+    <application
+        android:name=".App"
+        android:label="OpenCode"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:usesCleartextTraffic="true"
+        android:theme="@style/AppTheme"
+        android:allowBackup="false"
+        android:requestLegacyExternalStorage="true">
+
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+
+        <!-- P8: the project deck — credit-card carousel, one sandbox per card -->
+        <activity
+            android:name=".HomeActivity"
+            android:exported="false"/>
+
+        <activity
+            android:name=".ChatActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"/>
+
+        <!-- P8: animated settings hub -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:label="Settings"/>
+
+        <activity
+            android:name=".KeysActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:label="API keys"/>
+
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:label="Diagnostics"/>
+
+        <service android:name=".ServerService" android:exported="false"/>
+
+        <!-- P12 keep-alive: opt-in reboot relaunch (Settings → keep alive) -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

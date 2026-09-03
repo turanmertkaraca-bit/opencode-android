@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P8 home background: radial glow in the upper third over the base color —
+     gives the project deck depth without any image asset. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/bg"/>
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:type="radial"
+                android:gradientRadius="480dp"
+                android:centerX="0.5" android:centerY="0.16"
+                android:startColor="@color/bg_glow"
+                android:endColor="#00000000"/>
+        </shape>
+    </item>
+</layer-list>

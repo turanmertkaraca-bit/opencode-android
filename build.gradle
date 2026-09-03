@@ -1,0 +1,4 @@
+// OpenCode Mobile — P1 app skeleton (root build file)
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

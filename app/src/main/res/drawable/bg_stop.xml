@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P9: stop button — dark fill, red rim. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="oval">
+    <solid android:color="#3A1A22"/>
+    <stroke android:width="2dp" android:color="#FF8A8A"/>
+</shape>
