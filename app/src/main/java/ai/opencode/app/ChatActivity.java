@@ -6,7 +6,10 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.graphics.Bitmap;
 import android.graphics.Typeface;
+import android.net.Uri;
+import android.widget.ImageView;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -28,7 +31,9 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -62,6 +67,12 @@ public class ChatActivity extends Activity
 
     // row kinds
     static final int K_USER = 0, K_ASSISTANT = 1, K_REASON = 2, K_TOOL = 3, K_SYS = 4, K_ERR = 5;
+    // P17 row kinds
+    static final int K_LIVE = 6, K_IMAGE = 7;
+    /** The one live-edit card's stable row key. */
+    private static final String LIVE_KEY = "live:edits";
+    /** SAF image-picker request code. */
+    private static final int REQ_IMAGE = 4210;
 
     // P8: which project sandbox this chat is attached to (from the deck)
     private String projectName;
@@ -119,10 +130,45 @@ public class ChatActivity extends Activity
     private boolean smootherRunning;
     // P8 polish
     private View veil;
+    private View veilDot;                   // P17: direct handle for the pulse
+    private ObjectAnimator veilPulse;       // P17: CANCELED when the veil hides —
+    //                                          the P16 code pulsed the veil dot
+    //                                          with an INFINITE animator while
+    //                                          the veil sat GONE 24/7: real idle
+    //                                          burn on the main screen.
     private LinearLayout typing;
     private TextView scrollPill;
     private boolean pillShown;
     private final List<ObjectAnimator> typingAnims = new ArrayList<>();
+
+    // ---- P17: live edit feed (the chat's "edit shower" card) ----------
+    // Event-driven only: a DirWatcher runs WHILE THE AGENT WORKS (started
+    // by setBusy(true), stopped by setBusy(false)/onPause) — zero polling,
+    // zero steady-state CPU when idle. See EditPulse for the policy.
+    private DirWatcher editWatcher;
+    private final Map<String, EditPulse.Ev> editFeed = new HashMap<>();
+    /** edit-tool snippets keyed by abs path — the peek's line locator. */
+    private final Map<String, String> editFocus = new HashMap<>();
+    private final Map<String, String> peekCache = new HashMap<>();
+    private String editRoot;
+    private Boolean liveOpen;               // null = auto (hot → open)
+    private String liveSelPath;             // peek target
+    private boolean liveWaitingPeek;
+    private ObjectAnimator livePulseAnim;
+    private final Runnable liveCollapse = this::collapseLive;
+
+    // ---- P17: vision ---------------------------------------------------
+    private TextView btnVision;
+    /** decoded chat bubbles, keyed by row key (bounded, eldest evicted).
+      Evicted bitmaps are NOT recycled — a visible row may still draw them;
+      the GC reclaims them once their views let go. */
+    private final LinkedHashMap<String, Bitmap> imageCache = new LinkedHashMap<String, Bitmap>(8, 0.75f, true) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, Bitmap> e) {
+            return size() > 6;
+        }
+    };
+    /** rows whose image decode failed — never retried (no repaint loops). */
+    private final java.util.Set<String> failedImgs = new java.util.HashSet<>();
 
     private String sessionId, sessionTitle;
     private String agent = "build";     // Tab parity: build <-> plan
@@ -191,6 +237,8 @@ public class ChatActivity extends Activity
         if (btnSessions != null) btnSessions.setOnClickListener(v -> sessionsSheet());
         emptyHero = findViewById(R.id.emptyHero);
         suggestBox = findViewById(R.id.suggestBox);
+        btnVision = findViewById(R.id.btnVision);
+        if (btnVision != null) btnVision.setOnClickListener(v -> pickImage());
         chipMode.setOnClickListener(v -> toggleMode());
         chipModel.setOnClickListener(v -> modelSheet());
         btnSend.setOnClickListener(v -> {
@@ -229,6 +277,8 @@ public class ChatActivity extends Activity
         if (sessionId != null && rows.isEmpty()) loadSession(sessionId);
         checkPermissionQueue();
         refreshServerUi();
+        // P17: resume the live-edit watch if a run outlived the pause.
+        if (busy) startEditWatch();
         // P16: returning from API keys with the model sheet open → refresh
         // the rows IN PLACE, so the provider whose key was just added goes
         // bright/ready without closing and reopening the picker.
@@ -276,7 +326,23 @@ public class ChatActivity extends Activity
         ui.removeCallbacks(flushPaints);
         paintScheduled = false;
         dirtyRows.clear();
+        // P17: no background work from this screen while it's away — the
+        // watcher is only meaningful while the agent edits anyway, and the
+        // collapse timer / pulse animators must never tick detached.
+        stopEditWatch();
+        ui.removeCallbacks(liveCollapse);
+        if (livePulseAnim != null) { livePulseAnim.cancel(); livePulseAnim = null; }
         super.onPause();
+    }
+
+    /** P17: SAF image pick for the vision flow (no permission needed). */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_IMAGE && resultCode == RESULT_OK
+                && data != null && data.getData() != null) {
+            confirmImage(data.getData());
+        }
     }
 
     // --------------------------------------------------- P16 DeX / wide
@@ -489,7 +555,10 @@ public class ChatActivity extends Activity
         dot.setTextColor(Theme.WARN);
         dot.setGravity(Gravity.CENTER);
         card.addView(dot);
-        if (Theme.motionOn(this)) Theme.pulse(dot);
+        veilDot = dot;
+        // P17: pulse moved to syncVeil — starts when the veil shows,
+        // cancels when it hides (the old unconditional start here pulsed
+        // an INVISIBLE view 24/7 — the idle-CPU bug the user felt as heat).
 
         TextView t1 = new TextView(this);
         t1.setText("starting sandbox");
@@ -521,6 +590,9 @@ public class ChatActivity extends Activity
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         veil = fl;
         veil.setVisibility(View.GONE);
+        // P17: the pulse now starts/stops WITH the veil (syncVeil) — the old
+        // code started an INFINITE animator here on a view that stays GONE
+        // while the server is healthy: invisible 60 fps work, forever.
     }
 
     private void syncVeil(int st) {
@@ -529,7 +601,15 @@ public class ChatActivity extends Activity
         int vis = show ? View.VISIBLE : View.GONE;
         if (veil.getVisibility() != vis) {
             veil.setVisibility(vis);
-            if (show && Theme.motionOn(this)) Theme.appear(veil);
+            if (show) {
+                if (Theme.motionOn(this)) {
+                    if (veilPulse != null) veilPulse.cancel();
+                    if (veilDot != null) veilPulse = Theme.pulse(veilDot);
+                }
+                Theme.appear(veil);
+            } else if (veilPulse != null) {
+                veilPulse.cancel(); veilPulse = null;   // P17: stop the burn
+            }
         }
     }
 
@@ -658,6 +738,8 @@ public class ChatActivity extends Activity
 
     private void setBusy(boolean b) {
         busy = b;
+        // P17: the live-edit watch exists ONLY while the agent works.
+        if (b) startEditWatch(); else stopEditWatch();
         ui.post(() -> {
             if (b) {
                 btnSend.setText("■");
@@ -672,6 +754,11 @@ public class ChatActivity extends Activity
                 btnSend.setBackgroundResource(R.drawable.bg_send);
                 btnSend.setTextColor(getColor(R.color.on_accent));
                 tvStatus.setVisibility(View.GONE);
+                // P17: settle the live card (no pulse, collapse timer off) —
+                // it stays as a quiet "N edits · M files" record row.
+                ui.removeCallbacks(liveCollapse);
+                Integer li = idxByKey.get(LIVE_KEY);
+                if (li != null && li < rows.size()) requestPaint(rows.get(li));
             }
             syncTyping();
         });
@@ -1168,8 +1255,20 @@ public class ChatActivity extends Activity
                     upsertReason(key, mid, nz(Json.str(part, "text"), ""));
                     break;
                 }
-                case "tool": upsertTool(toolRow(key, part)); break;
+                case "tool":
+                    upsertTool(toolRow(key, part));
+                    captureEditFocus(part);          // P17: peek locator
+                    break;
                 case "patch": upsertTool(patchRow(key, part)); break;
+                case "file": {                       // P17: image parts → bubbles
+                    String mime = Json.str(part, "mime");
+                    String url = Json.str(part, "url");
+                    if (mime != null && mime.startsWith("image/")
+                            && url != null && url.startsWith("data:")) {
+                        upsertImage(key, url, role);
+                    }
+                    break;
+                }
                 default: break; // step-start/-finish, agent, … hidden like the TUI
             }
         } catch (Exception e) {
@@ -1331,6 +1430,610 @@ public class ChatActivity extends Activity
         r.title = n + " file" + (n == 1 ? "" : "s") + " changed";
         if (files != null) for (Object f : files) r.output.append(f).append('\n');
         return r;
+    }
+
+    /**
+     * P17: remember what the edit/write tools just wrote so the live
+     * card's PEEK can center on the exact edited line. The tool input
+     * key names drifted across opencode versions, so every plausible
+     * field is tried — worst case the peek falls back to the tail.
+     */
+    private void captureEditFocus(Map<String, Object> part) {
+        try {
+            String tool = Json.str(part, "tool");
+            if (tool == null || editRoot == null) return;
+            Map<String, Object> state = Json.map(part, "state");
+            if (state == null) state = part;
+            Map<String, Object> in = Json.map(state, "input");
+            if (in == null) return;
+            String path = firstStr(in, "path", "filePath", "file");
+            if (path == null || path.isEmpty()) return;
+            File f = new File(path);
+            String abs = f.isAbsolute() ? f.getAbsolutePath()
+                    : new File(editRoot, path).getAbsolutePath();
+            String snippet = null;
+            if ("edit".equals(tool)) snippet = firstStr(in, "newString", "new_string", "replacement");
+            else if ("write".equals(tool)) snippet = firstStr(in, "content", "text");
+            if (snippet == null || snippet.trim().isEmpty()) return;
+            if (snippet.length() > 400) snippet = snippet.substring(0, 400);
+            synchronized (editFocus) { editFocus.put(abs, snippet); }
+        } catch (Exception ignored) {
+            // a malformed tool part must never take the feed down
+        }
+    }
+
+    private static String firstStr(Map<String, Object> m, String... keys) {
+        for (String k : keys) {
+            String v = Json.str(m, k);
+            if (v != null && !v.isEmpty()) return v;
+        }
+        return null;
+    }
+
+    // ================================================= P17: live edit feed
+    // The user: "live directory changes on the chat app itself … animated
+    // and fluid, doesn't take too much space, only expands when it's
+    // currently being worked on." Event-driven only: DirWatcher runs while
+    // the agent works; the card is ONE row that auto-expands on fresh
+    // edits, self-collapses ~4 s after the last burst, and settles into a
+    // summary when the run ends. No polling anywhere.
+
+    private void startEditWatch() {
+        File dir = ServerService.servingDir();
+        if (dir == null || !dir.isDirectory()) return;
+        if (editWatcher != null && editWatcher.isRunning()
+                && dir.getAbsolutePath().equals(editRoot)) return;
+        editRoot = dir.getAbsolutePath();
+        synchronized (editFeed) { editFeed.clear(); }
+        synchronized (editFocus) { editFocus.clear(); }
+        peekCache.clear();
+        liveWaitingPeek = false;
+        if (editWatcher == null) {
+            editWatcher = new DirWatcher(getMainLooper(), this::onFsChange);
+        }
+        editWatcher.start(dir);
+    }
+
+    private void stopEditWatch() {
+        if (editWatcher != null) editWatcher.stop();
+    }
+
+    /** DirWatcher callback — already on the main looper, already debounced. */
+    private void onFsChange(String path, String action) {
+        if (!busy) return;                    // watcher is being stopped anyway
+        long now = System.currentTimeMillis();
+        synchronized (editFeed) {
+            EditPulse.record(editFeed, editRoot, path, action, now);
+        }
+        peekCache.remove(path);               // stale peek invalidates
+        ensureLiveRow();
+        ui.removeCallbacks(liveCollapse);
+        ui.postDelayed(liveCollapse, EditPulse.ACTIVE_MS + 500);
+        Row r = liveRow();
+        if (r != null) requestPaint(r);
+    }
+
+    private void collapseLive() {
+        Row r = liveRow();
+        if (r != null) requestPaint(r);
+    }
+
+    private Row liveRow() {
+        synchronized (lock) {
+            Integer i = idxByKey.get(LIVE_KEY);
+            return (i == null || i >= rows.size()) ? null : rows.get(i);
+        }
+    }
+
+    /** Insert the ONE live card row (idempotent). */
+    private void ensureLiveRow() {
+        boolean added;
+        synchronized (lock) {
+            if (idxByKey.containsKey(LIVE_KEY)) return;
+            Row r = new Row();
+            r.kind = K_LIVE; r.key = LIVE_KEY; r.ts = System.currentTimeMillis();
+            rows.add(r); idxByKey.put(LIVE_KEY, rows.size() - 1);
+            added = true;
+        }
+        if (added) {
+            Row r = liveRow();
+            if (r != null) touchView(r);      // entrance animation
+            autoscroll();
+        }
+    }
+
+    /** The "edit shower" card — slim while idle, a brief shower while hot. */
+    private View buildLiveView() {
+        boolean settled = !busy;
+        boolean hot;
+        synchronized (editFeed) { hot = EditPulse.hot(editFeed, System.currentTimeMillis()); }
+        boolean expanded = liveOpen != null ? liveOpen : (hot && !settled);
+
+        if (livePulseAnim != null) { livePulseAnim.cancel(); livePulseAnim = null; }
+
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setBackgroundResource(R.drawable.bg_tool_card);
+        int cp = dp(11);
+        c.setPadding(cp, dp(8), cp, dp(9));
+
+        // ---- header: ● LIVE · summary ………………………………………… ▸
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView dot = text(9, R.color.text_primary, false);
+        dot.setText("●");
+        dot.setTextColor(settled ? 0xFF6E6E6E : 0xFF9DB1FF);   // subtle blue live
+        head.addView(dot);
+        if (!settled && expanded && Theme.motionOn(this)) {
+            livePulseAnim = Theme.pulse(dot);
+        }
+
+        TextView tag = text(10, settled ? R.color.text_secondary : 0xFFB9C4FF, true);
+        tag.setText(settled ? "  EDITS" : "  LIVE");
+        tag.setLetterSpacing(0.14f);
+        head.addView(tag);
+
+        TextView sum = text(11, R.color.text_secondary, false);
+        sum.setPadding(dp(8), 0, 0, 0);
+        sum.setSingleLine(true);
+        sum.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        java.util.List<EditPulse.Ev> top;
+        String sumText;
+        synchronized (editFeed) {
+            top = EditPulse.picks(editFeed, EditPulse.MAX_SHOWN);
+            sumText = editFeed.isEmpty() ? "watching project files…"
+                    : EditPulse.summary(editFeed)
+                            + (top.isEmpty() ? "" : "  ·  " + top.get(0).rel);
+        }
+        sum.setText(sumText);
+        head.addView(sum, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView chev = text(11, R.color.text_secondary, false);
+        chev.setText(expanded ? "▾" : "▸");
+        chev.setPadding(dp(6), 0, 0, 0);
+        head.addView(chev);
+        c.addView(head);
+
+        // ---- shower: newest-first file rows, staggered entrance
+        if (expanded) {
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setPadding(dp(2), dp(4), 0, 0);
+            int d = 0;
+            boolean motion = Theme.motionOn(this);
+            for (EditPulse.Ev e : top) {
+                View row = liveFileRow(e);
+                box.addView(row);
+                if (!e.seen && motion) {          // only NEW events animate —
+                    row.setAlpha(0f);             // repaints never replay
+                    row.setTranslationY(dp(8));
+                    row.animate().alpha(1f).translationY(0f)
+                            .setStartDelay(d).setDuration(170)
+                            .setInterpolator(Theme.DECEL).start();
+                    d += 45;
+                }
+                e.seen = true;
+            }
+            c.addView(box);
+
+            // ---- the peek: the exact edited region, never the full file
+            if (liveSelPath != null) {
+                TextView pv = mono(text(10, R.color.text_primary, false), 10);
+                pv.setBackgroundResource(R.drawable.bg_code);
+                int pp = dp(9);
+                pv.setPadding(pp, pp, pp, pp);
+                pv.setSingleLine(false);
+                String cached = peekCache.get(liveSelPath);
+                if (cached != null) {
+                    pv.setText(cached);
+                    liveWaitingPeek = false;
+                } else {
+                    pv.setText("…");
+                    if (!liveWaitingPeek) {
+                        liveWaitingPeek = true;
+                        loadPeek(liveSelPath);
+                    }
+                }
+                LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                plp.topMargin = dp(6);
+                pv.setLayoutParams(plp);
+                c.addView(pv);
+            }
+        }
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        c.setLayoutParams(lp);
+        Theme.press(c);
+        head.setOnClickListener(v -> {
+            liveOpen = expanded ? Boolean.FALSE : Boolean.TRUE;
+            lastToggled = LIVE_KEY;
+            Row r = liveRow();
+            if (r != null) touchView(r);
+        });
+        return c;
+    }
+
+    /** One file row inside the shower — tap to peek around the edit. */
+    private View liveFileRow(final EditPulse.Ev e) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        int rp = dp(6);
+        row.setPadding(rp, dp(3), rp, dp(3));
+        boolean sel = e.abs != null && e.abs.equals(liveSelPath);
+        if (sel) row.setBackgroundResource(R.drawable.bg_code);
+        else row.setBackground(null);
+
+        TextView g = text(11, "del".equals(e.action) ? R.color.err
+                : R.color.text_secondary, false);
+        g.setText(EditPulse.glyph(e.action));
+        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        glp.rightMargin = dp(7);
+        g.setLayoutParams(glp);
+        row.addView(g);
+
+        TextView p = mono(text(11, R.color.text_primary, false), 11);
+        p.setText(e.rel + (e.hits > 1 ? "  ×" + e.hits : ""));
+        p.setSingleLine(true);
+        p.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        row.addView(p, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView age = text(10, R.color.text_secondary, false);
+        age.setPadding(dp(6), 0, 0, 0);
+        age.setText(relTime((System.currentTimeMillis() - e.ts) / 1000.0));
+        row.addView(age);
+
+        Theme.press(row);
+        row.setOnClickListener(v -> {
+            liveSelPath = (liveSelPath != null && liveSelPath.equals(e.abs))
+                    ? null : e.abs;
+            if (liveSelPath != null) liveOpen = Boolean.TRUE;
+            Row r = liveRow();
+            if (r != null) touchView(r);
+        });
+        return row;
+    }
+
+    /** Load the peek window off-thread — a bounded, line-numbered slice. */
+    private void loadPeek(final String abs) {
+        final String focus;
+        synchronized (editFocus) { focus = editFocus.get(abs); }
+        String action;
+        synchronized (editFeed) {
+            EditPulse.Ev ev = editFeed.get(abs);
+            action = ev == null ? "mod" : ev.action;
+        }
+        final boolean deleted = "del".equals(action);
+        ex.execute(() -> {
+            String text;
+            if (deleted) {
+                text = "  (deleted)";
+            } else {
+                try {
+                    File f = new File(abs);
+                    if (f.length() > 2_000_000) {
+                        text = "  (file too large to peek — open it in Files)";
+                    } else {
+                        try (FileInputStream fin = new FileInputStream(f)) {
+                            String content = Api.readAll(fin);
+                            text = EditPulse.peek(content, focus, EditPulse.PEEK_LINES);
+                        }
+                    }
+                } catch (Exception e2) {
+                    text = "  (can't peek: " + e2.getMessage() + ")";
+                }
+            }
+            final String t = text;
+            ui.post(() -> {
+                peekCache.put(abs, t);
+                liveWaitingPeek = false;
+                Row r = liveRow();
+                if (r != null) requestPaint(r);
+            });
+        });
+    }
+
+    // ================================================= P17: vision / images
+
+    private void pickImage() {
+        try {
+            Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("image/*");
+            startActivityForResult(
+                    Intent.createChooser(i, "Share a screenshot with the agent"),
+                    REQ_IMAGE);
+        } catch (Exception e) {
+            Toast.makeText(this, "no image picker available", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** Downscale off-thread, then a tiny confirm sheet with a caption. */
+    private void confirmImage(final Uri uri) {
+        ex.execute(() -> {
+            try {
+                final File jpg = Vision.downscale(this, uri);
+                ui.post(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    LinearLayout box = new LinearLayout(this);
+                    box.setOrientation(LinearLayout.VERTICAL);
+                    int p = dp(18);
+                    box.setPadding(p, p, p, 0);
+
+                    ImageView prev = new ImageView(this);
+                    Bitmap bm = Vision.decodeBounded(jpg.getAbsolutePath(), 360);
+                    prev.setImageBitmap(bm);
+                    prev.setAdjustViewBounds(true);
+                    prev.setMaxHeight(dp(240));
+                    prev.setBackgroundResource(R.drawable.bg_code);
+                    box.addView(prev);
+
+                    final EditText cap = new EditText(this);
+                    cap.setHint("tell the agent what to look at (optional)");
+                    cap.setTextSize(14);
+                    cap.setTextColor(getColor(R.color.text_primary));
+                    cap.setHintTextColor(getColor(R.color.text_secondary));
+                    cap.setBackgroundResource(R.drawable.bg_input);
+                    cap.setSingleLine(false);
+                    cap.setMaxLines(3);
+                    box.addView(cap, new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT));
+                    ((LinearLayout.LayoutParams) cap.getLayoutParams()).topMargin = dp(12);
+
+                    new AlertDialog.Builder(this)
+                            .setTitle("Show the agent")
+                            .setView(box)
+                            .setPositiveButton("Send", (d, w) -> {
+                                String c2 = cap.getText().toString().trim();
+                                attachImage(jpg, c2);
+                            })
+                            .setNegativeButton("Cancel", null)
+                            .show();
+                });
+            } catch (Exception e) {
+                ui.post(() -> sys("could not read that image: " + e.getMessage()));
+            }
+        });
+    }
+
+    /** The full vision send: native attach first, free-model describer second. */
+    private void attachImage(final File jpg, final String caption) {
+        if (busy) { sys("wait for the current run to finish, then resend"); return; }
+        final String key = "img" + System.currentTimeMillis();
+        final String cap2 = (caption == null || caption.isEmpty())
+                ? "what do you see here?" : caption;
+        // user-side image bubble FIRST — instant feedback
+        upsertImage(key, null, jpg.getAbsolutePath(), cap2, "user");
+        ex.execute(() -> {
+            try {
+                String sid = ensureSession();
+                if (sid == null) {
+                    sys("server not healthy yet — try again in a moment");
+                    return;
+                }
+                validateSelectedModel();
+                byte[] bytes = java.nio.file.Files.readAllBytes(jpg.toPath());
+                String dataUrl = Vision.dataUrl(bytes);
+                lastUserText = cap2;
+                runHadOutput = false;
+                lastPartTs = System.currentTimeMillis();
+                setBusy(true);
+
+                // ---- path 1: the server's own file part (raw pixels)
+                Api.Resp r = null;
+                for (String body : buildImageBodies(cap2, dataUrl)) {
+                    r = Api.post("/session/" + sid + "/message", body, 300_000);
+                    if (r.ok()) break;
+                }
+                if (r != null && r.ok()) {
+                    sys("◉ screenshot attached — the agent sees the pixels");
+                    reconcile(Json.parse(r.body));
+                    ui.removeCallbacks(watchdog);
+                    ui.postDelayed(watchdog, 2000);
+                    return;
+                }
+
+                // ---- path 2: a FREE vision model describes it (keyless ok)
+                sys("◉ asking a free vision model to look at it…");
+                String bearer = Vision.zenKey(this);
+                IOException last = null;
+                for (int i = 0; i < Vision.CANDIDATES.length; i++) {
+                    String[] m = Vision.modelAt(i);
+                    try {
+                        String desc = Vision.describe(m[1], Vision.prompt(cap2),
+                                bytes, bearer, 45_000);
+                        sys("◉ " + m[1] + " saw the screenshot — feeding the agent");
+                        sendText(sid, cap2 + "\n\n[screenshot shared by the user"
+                                + " · vision via " + m[0] + "/" + m[1] + "]\n" + desc);
+                        return;
+                    } catch (IOException e2) {
+                        last = e2;               // rotate to the next free model
+                    }
+                }
+                err("vision failed", last == null ? "no model answered" : last.getMessage(),
+                        last == null ? "" : String.valueOf(last));
+                setBusy(false);
+            } catch (Exception e) {
+                sys("screenshot send failed: " + e);
+                setBusy(false);
+            }
+        });
+    }
+
+    /** buildBodies' sibling: text + image file part, same variant ladder. */
+    private List<String> buildImageBodies(String caption, String dataUrl) {
+        LinkedHashMap<String, String> variants = new LinkedHashMap<>();
+        String text = "{\"type\":\"text\",\"text\":" + Json.quote(caption) + "}";
+        String file = "{\"type\":\"file\",\"mime\":\"image/jpeg\",\"url\":"
+                + Json.quote(dataUrl) + "}";
+        String[] sel = Models.selected(this);
+        String model = sel == null ? null
+                : "\"model\":{\"providerID\":" + Json.quote(sel[0])
+                + ",\"modelID\":" + Json.quote(sel[1]) + "}";
+        String ag = "\"agent\":" + Json.quote(agent);
+        String parts = "\"parts\":[" + text + "," + file + "]";
+        if (model != null) variants.put("ma", "{" + model + "," + ag + "," + parts + "}");
+        if (model != null) variants.put("m", "{" + model + "," + parts + "}");
+        variants.put("a", "{" + ag + "," + parts + "}");
+        variants.put("bare", "{" + parts + "}");
+        return new ArrayList<>(variants.values());
+    }
+
+    /** Upsert an image row (SSE/history: dataUrl; local: pre-decoded path). */
+    private void upsertImage(String key, String dataUrl, String role) {
+        upsertImage(key, dataUrl, null, "", role);
+    }
+
+    private void upsertImage(String key, String dataUrl, String localPath,
+                             String caption, String role) {
+        ui.post(() -> {
+            Row r;
+            boolean added;
+            synchronized (lock) {
+                r = rowByKey(key);
+                if (r == null) {
+                    r = new Row();
+                    r.kind = K_IMAGE; r.key = key;
+                    r.ts = System.currentTimeMillis();
+                    r.tool = role;                        // alignment marker
+                    r.text.append(caption == null ? "" : caption);
+                    rows.add(r); idxByKey.put(key, rows.size() - 1);
+                    added = true;
+                } else {
+                    added = false;
+                    if (caption != null && !caption.isEmpty()
+                            && !caption.contentEquals(r.text)) {
+                        r.text.setLength(0);
+                        r.text.append(caption);
+                        requestPaint(r);
+                    }
+                }
+            }
+            if (added) {
+                if (dataUrl != null) decodeDataUrl(r, dataUrl);
+                else if (localPath != null) {
+                    r.title = localPath;
+                    decodeLocalImage(r, localPath);
+                    touchView(r);
+                    autoscroll();
+                }
+            }
+        });
+    }
+
+    /** data:<mime>;base64,<payload> → cache file → bubble bitmap. */
+    private void decodeDataUrl(Row r, String dataUrl) {
+        ex.execute(() -> {
+            try {
+                int comma = dataUrl.indexOf(',');
+                String header = comma > 0 ? dataUrl.substring(5, comma) : "image/jpeg";
+                String payload = comma > 0 ? dataUrl.substring(comma + 1) : "";
+                if (payload.length() > 12_000_000) throw new IOException("image too large");
+                byte[] bytes = java.util.Base64.getDecoder().decode(payload);
+                String ext = header.contains("png") ? "png" : "jpg";
+                File dir = new File(getCacheDir(), "vision");
+                if (!dir.isDirectory()) dir.mkdirs();
+                File f = new File(dir, "msg-" + Integer.toHexString(r.key.hashCode())
+                        + "." + ext);
+                try (FileOutputStream fo = new FileOutputStream(f)) {
+                    fo.write(bytes);
+                }
+                r.title = f.getAbsolutePath();
+                decodeLocalImage(r, f.getAbsolutePath());
+                ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) touchView(rr); });
+            } catch (Exception e) {
+                ui.post(() -> sys("image part could not be decoded: " + e.getMessage()));
+            }
+        });
+    }
+
+    private void decodeLocalImage(final Row r, final String path) {
+        synchronized (failedImgs) {
+            if (failedImgs.contains(r.key)) return;
+        }
+        ex.execute(() -> {
+            Bitmap bm = Vision.decodeBounded(path, 1024);
+            if (bm == null) {
+                synchronized (failedImgs) { failedImgs.add(r.key); }
+                ui.post(() -> sys("image could not be decoded"));
+                return;
+            }
+            synchronized (imageCache) { imageCache.put(r.key, bm); }
+            ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) requestPaint(rr); });
+        });
+    }
+
+    /** The image bubble — rounded frame, caption, tap for the big view. */
+    private View buildImageView(Row r) {
+        boolean user = "user".equals(r.tool);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        wlp.gravity = user ? Gravity.END : Gravity.START;
+        wlp.topMargin = dp(8);
+        wrap.setLayoutParams(wlp);
+
+        ImageView iv = new ImageView(this);
+        iv.setAdjustViewBounds(true);
+        iv.setMaxWidth(dp(240));
+        iv.setBackgroundResource(R.drawable.bg_code);
+        int ip = dp(4);
+        iv.setPadding(ip, ip, ip, ip);
+        Bitmap bm;
+        synchronized (imageCache) { bm = imageCache.get(r.key); }
+        if (bm != null && !bm.isRecycled()) {
+            iv.setImageBitmap(bm);
+        } else {
+            iv.setMinimumHeight(dp(80));
+            iv.setScaleType(ImageView.ScaleType.CENTER);
+            iv.setImageResource(android.R.drawable.ic_menu_report_image);
+            if (r.title != null) {
+                synchronized (failedImgs) {
+                    if (!failedImgs.contains(r.key)) decodeLocalImage(r, r.title);
+                }
+            }
+        }
+        final Row fr = r;
+        iv.setOnClickListener(v -> showImage(fr));
+        wrap.addView(iv);
+
+        if (r.text.length() > 0) {
+            TextView cap = text(11, R.color.text_secondary, false);
+            cap.setText(r.text.toString());
+            cap.setPadding(dp(2), dp(4), dp(2), 0);
+            cap.setMaxWidth(dp(240));
+            wrap.addView(cap);
+        }
+        return wrap;
+    }
+
+    /** Full-screen viewer for a chat image. */
+    private void showImage(Row r) {
+        Bitmap bm;
+        synchronized (imageCache) { bm = imageCache.get(r.key); }
+        if (bm == null || bm.isRecycled()) return;
+        ImageView big = new ImageView(this);
+        big.setImageBitmap(bm);
+        big.setAdjustViewBounds(true);
+        big.setPadding(0, dp(12), 0, 0);
+        new AlertDialog.Builder(this)
+                .setView(big)
+                .setPositiveButton("Close", null)
+                .show();
     }
 
     /** SSE sends full part state; adopt the growth, ignore truncations. */
@@ -1513,7 +2216,7 @@ public class ChatActivity extends Activity
         if (idx < list.getChildCount()) {
             list.removeViewAt(idx);
             list.addView(nv, idx);   // streaming update — instant, no animation
-            if (toggled && (r.kind == K_TOOL || r.kind == K_REASON)) {
+            if (toggled && (r.kind == K_TOOL || r.kind == K_REASON || r.kind == K_LIVE)) {
                 lastToggled = null;
                 Theme.unfold(nv);    // P12: expand/collapse feels physical
             }
@@ -1785,6 +2488,10 @@ public class ChatActivity extends Activity
                 c.setOnClickListener(v -> { r.open = !r.open; lastToggled = r.key; touchView(r); });
                 return c;
             }
+            case K_LIVE:
+                return buildLiveView();
+            case K_IMAGE:
+                return buildImageView(r);
             case K_ERR: {
                 LinearLayout c = new LinearLayout(this);
                 c.setOrientation(LinearLayout.VERTICAL);

@@ -51,6 +51,33 @@ public class ServerService extends Service {
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static PowerManager.WakeLock wakeLock;
 
+    // ---- P17: eco idle — the wake lock exists ONLY while the agent works
+    // The P16 code held a PARTIAL_WAKE_LOCK for the ENTIRE server lifetime
+    // (Termux pattern, but Termux users accept the drain). The user felt
+    // it: "my phone feels hot when it's running while doing nothing". With
+    // eco idle ON (the default), the lock is acquired when agent activity
+    // events arrive (message parts, permission asks) and RELEASED on
+    // session.idle — so a healthy-but-idle server no longer pins the CPU
+    // out of deep sleep with the screen off. Settings → keep alive →
+    // "Cool idle" restores the always-held behavior when flipped off.
+    private static volatile boolean ecoIdle = true;
+    private static volatile boolean agentActive;
+    /** App context captured in onCreate — the wake lock is static now. */
+    private static volatile Context appCtx;
+
+    /** True while agent events are flowing (runs, permission asks). */
+    public static boolean agentActive() { return agentActive; }
+
+    private void noteActivity() {
+        agentActive = true;
+        if (ecoIdle && wakeLock == null) acquireWakeLock();
+    }
+
+    private static void noteIdle() {
+        agentActive = false;
+        if (ecoIdle) releaseWakeLock();
+    }
+
     public interface Evt { void on(int newState, String detail); }
     public interface EventListener { void onEvent(Map<String, Object> ev); }
 
@@ -150,6 +177,7 @@ public class ServerService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        appCtx = getApplicationContext();
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         nm.createNotificationChannel(new NotificationChannel(
                 CH, "OpenCode server", NotificationManager.IMPORTANCE_LOW));
@@ -194,7 +222,14 @@ public class ServerService extends Service {
             return;
         }
 
-        acquireWakeLock();
+        // P17: eco idle reads the pref at spawn; the lock is taken here
+        // only when eco idle is OFF (legacy always-on behavior).
+        try {
+            ecoIdle = getSharedPreferences("oc", MODE_PRIVATE)
+                    .getBoolean("eco_idle", true);
+        } catch (Exception ignored) {}
+        agentActive = false;
+        if (!ecoIdle) acquireWakeLock();
 
         // P8: the project card decides the sandbox root. Everything the
         // agent touches (sessions, file tools, shell cwd) is scoped to it.
@@ -348,9 +383,18 @@ public class ServerService extends Service {
         t.start();
     }
 
-    /** Global event processing: permissions + rebroadcast. */
+    /** Global event processing: permissions + activity gating + rebroadcast. */
     private void ingest(Map<String, Object> ev) {
         String type = Json.str(ev, "type");
+
+        // P17 eco idle: agent activity holds the wake lock; idle releases it.
+        if ("session.idle".equals(type)) {
+            noteIdle();
+        } else if (type != null && (type.startsWith("message.")
+                || type.startsWith("permission.")
+                || "session.error".equals(type))) {
+            noteActivity();
+        }
 
         if ("permission.asked".equals(type) || "permission.updated".equals(type)
                 || "permission.v2.asked".equals(type)
@@ -428,14 +472,23 @@ public class ServerService extends Service {
 
     // ------------------------------------------------------------- lifecycle
 
-    private void acquireWakeLock() {
+    private static void acquireWakeLock() {
         if (wakeLock != null) return;
+        Context c = appCtx;
+        if (c == null) return;
         try {
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
             wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "opencode:server");
             wakeLock.setReferenceCounted(false);
             wakeLock.acquire();
         } catch (Exception ignored) {}
+    }
+
+    private static void releaseWakeLock() {
+        if (wakeLock != null) {
+            try { wakeLock.release(); } catch (Exception ignored) {}
+            wakeLock = null;
+        }
     }
 
     private void stopServer() {
@@ -448,10 +501,8 @@ public class ServerService extends Service {
         if (p != null) p.destroy();
         Thread r = runner;
         if (r != null) r.interrupt();
-        if (wakeLock != null) {
-            try { wakeLock.release(); } catch (Exception ignored) {}
-            wakeLock = null;
-        }
+        releaseWakeLock();
+        agentActive = false;
     }
 
     @Override

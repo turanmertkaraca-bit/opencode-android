@@ -18,7 +18,7 @@
     <color name="ok">#E3E3E3</color>
     <color name="err">#C9A2A2</color>
     <color name="warn">#BFBFBF</color>
-    <color name="ic_bg">#E6E6E6</color>
+    <color name="ic_bg">#0D1117</color>
     <!-- P8 extras (kept for compatibility) -->
     <color name="bg_glow">#101010</color>
     <color name="dot_ready">#E3E3E3</color>

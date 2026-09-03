@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P17 launcher background: the user said the old flat #E6E6E6 was
+     "too white". This is the dark, subtle blue-gray base — near-black
+     navy with a faint diagonal lift toward the top-left so the glyph
+     reads on every launcher mask. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr xmlns:aapt="http://schemas.android.com/aapt" name="android:fillColor">
+            <gradient
+                android:startX="14" android:startY="6"
+                android:endX="94" android:endY="102"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF18202E"/>
+                <item android:offset="1.0" android:color="#FF090C12"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

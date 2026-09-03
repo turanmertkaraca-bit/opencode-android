@@ -1,23 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- P5 launcher foreground: terminal prompt glyph ">_"
-     (adaptive-icon safe zone: keep content within the middle ~66%). -->
+<!-- P17 launcher foreground: the ">_" terminal prompt keeps the brand
+     lineage (since P5), restyled per the user's brief — "dark, subtle
+     blue and gray symbol":
+       · soft blue glow underlay beneath the chevron (depth, not neon)
+       · chevron in a restrained indigo-blue
+       · underscore in quiet slate gray
+     Adaptive safe zone: content stays within the middle ~66%. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
+    <!-- glow underlay: same chevron path, wider + translucent blue -->
     <path
         android:pathData="M38,42 L55,54 L38,66"
-        android:strokeColor="#FFFFFF"
+        android:strokeColor="#336D8CFF"
+        android:strokeWidth="10"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:fillColor="#00000000"/>
+
+    <!-- chevron: subtle blue -->
+    <path
+        android:pathData="M38,42 L55,54 L38,66"
+        android:strokeColor="#7C97F2"
         android:strokeWidth="6.5"
         android:strokeLineCap="round"
         android:strokeLineJoin="round"
         android:fillColor="#00000000"/>
 
+    <!-- underscore: slate gray -->
     <path
         android:pathData="M61,68 L74,68"
-        android:strokeColor="#FFFFFF"
+        android:strokeColor="#9AA5B5"
         android:strokeWidth="6.5"
         android:strokeLineCap="round"
         android:fillColor="#00000000"/>

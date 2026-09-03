@@ -171,6 +171,11 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         ka.addView(switchRow("Start on boot", "boot_start",
                 "launch the sandbox server after a reboot"));
         ka.addView(divider());
+        // P17: the wake lock only exists while the agent works — the fix
+        // for "my phone feels hot when it's running while doing nothing".
+        ka.addView(switchRow("Cool idle", "eco_idle",
+                "wake lock ONLY while the agent works — phone stays cool when idle (off = old always-on behavior)"));
+        ka.addView(divider());
         ka.addView(rowLink("Notifications",
                 "the persistent “OpenCode server” notice keeps the agent alive",
                 "◍", v -> openNotifSettings()));
@@ -197,7 +202,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.15.0-p15 · picker restored to P12 semantics + dirs/env/files", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.17.0-p17 · live edit shower in chat + screenshot vision (free model) + cool idle + new icon", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
