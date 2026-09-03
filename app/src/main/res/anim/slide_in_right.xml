@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- new screen slides in from the right (or rises from the bottom for the
+     home → chat transition), old screen fades under it. -->
+<set xmlns:android="http://schemas.android.com/apk/res/android"
+    android:interpolator="@android:anim/decelerate_interpolator"
+    android:duration="200">
+    <translate android:fromXDelta="12%" android:toXDelta="0"
+        android:fromYDelta="4%" android:toYDelta="0"/>
+    <alpha android:fromAlpha="0.35" android:toAlpha="1.0"/>
+</set>
