@@ -244,6 +244,20 @@
                 android:layout_height="1dp"
                 android:layout_weight="1"/>
 
+            <!-- P17: vision — share a screenshot with the agent (free
+                 vision model describes it when the server can't take
+                 image parts natively) -->
+            <TextView
+                android:id="@+id/btnVision"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/bg_chip"
+                android:gravity="center"
+                android:text="◉"
+                android:textColor="@color/accent_light"
+                android:textSize="16sp"/>
+
             <TextView
                 android:id="@+id/btnPalette"
                 android:layout_width="34dp"

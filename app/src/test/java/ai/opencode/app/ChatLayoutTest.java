@@ -34,6 +34,9 @@ public class ChatLayoutTest {
             TextView sub = a.findViewById(R.id.tvSub);
             assertNotNull(sub);
             assertTrue(sub.getText().length() > 0);
+            // P17: the vision chip must exist in the composer
+            assertNotNull("btnVision must exist in activity_chat.xml",
+                    a.findViewById(R.id.btnVision));
         }
     }
 }
