@@ -183,6 +183,13 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         ka.addView(rowLink("Samsung battery setup",
                 "on Galaxy: allow the app in “Never sleeping apps”",
                 "◈", v -> samsungGuide()));
+        ka.addView(divider());
+        // P18: every auto-recovered (or given-up) server death lands in
+        // files/sandbox-diag.log — exit code, last output, memory pressure.
+        // One tap surfaces the ground truth that “no crash file” hid before.
+        ka.addView(rowLink("Sandbox incident log",
+                "why the sandbox last died · auto-restarts · memory",
+                "▤", v -> showIncidentLog()));
         root.addView(ka);
 
         // ---- projects
@@ -202,7 +209,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.17.0-p17 · live edit shower in chat + screenshot vision (free model) + cool idle + new icon", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.18.0-p18 · unstoppable sandbox (auto-restart + incident log) + graceful send timeouts + Σ pill that explains itself", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -533,6 +540,27 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                         Toast.LENGTH_LONG).show();
             }
         }
+    }
+
+    /** P18: the sandbox's own black box — files/sandbox-diag.log. */
+    private void showIncidentLog() {
+        String body;
+        try {
+            java.io.File f = new java.io.File(getFilesDir(), "sandbox-diag.log");
+            body = f.exists()
+                    ? ai.opencode.app.Api.readAll(new java.io.FileInputStream(f))
+                    : "";
+        } catch (Exception e) { body = ""; }
+        if (body.trim().isEmpty()) {
+            body = "No incidents recorded — the sandbox has not died since "
+                    + "this build was installed. \u2713";
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Sandbox incident log")
+                .setMessage("each line: timestamp \u00b7 event \u00b7 detail \u00b7 free memory\n\n"
+                        + body)
+                .setPositiveButton("Close", null)
+                .show();
     }
 
     private void openNotifSettings() {

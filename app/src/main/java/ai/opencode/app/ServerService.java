@@ -62,6 +62,22 @@ public class ServerService extends Service {
     // "Cool idle" restores the always-held behavior when flipped off.
     private static volatile boolean ecoIdle = true;
     private static volatile boolean agentActive;
+
+    // ---- P18: unstoppable sandbox ----
+    /** True only for explicit user stops (notification Stop / Settings
+     *  restart) — auto-restart must never fight a deliberate stop. */
+    private static volatile boolean userStop;
+    /** One-shot note for the UI: set when an AUTO-restart becomes healthy,
+     *  consumed by ChatActivity so it can say “sandbox recovered — this
+     *  chat is still attached” instead of the user discovering it. */
+    private static volatile String recoveryNote;
+
+    /** Consume the pending recovery note (null when none). One-shot. */
+    public static String consumeRecoveryNote() {
+        String n = recoveryNote;
+        recoveryNote = null;
+        return n;
+    }
     /** App context captured in onCreate — the wake lock is static now. */
     private static volatile Context appCtx;
 
@@ -126,6 +142,8 @@ public class ServerService extends Service {
      */
     public static void restart(Context c) {
         pendingRestart = true;
+        userStop = false;               // a manual restart re-arms the supervisor
+        recoveryNote = null;
         Intent stop = new Intent(c, ServerService.class).setAction(ACTION_STOP);
         try { c.startService(stop); } catch (Exception ignored) {}
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
@@ -186,6 +204,7 @@ public class ServerService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            userStop = true;
             stopServer();
             setState(ST_STOPPED, "stopped");
             stopSelf();
@@ -204,6 +223,11 @@ public class ServerService extends Service {
             return START_NOT_STICKY;
         }
         RUNNING = true;
+        // P18: a plain start (boot, screen open, restart()'s delayed relaunch)
+        // always re-arms the supervisor — the ACTION_STOP intent that
+        // restart() queues first would otherwise leave userStop=true here
+        // and the server would never spawn.
+        userStop = false;
         pendingRestart = false;
         setState(ST_STARTING, "spawning opencode serve");
         runner = new Thread(() -> runServer(bin), "oc-server");
@@ -212,6 +236,15 @@ public class ServerService extends Service {
         return START_STICKY;
     }
 
+    /**
+     * P18 supervisor: the P16 watcher treated any server death as final —
+     * setState(ST_EXITED) + stopSelf() — so a blipped server left the chat
+     * dead until the user cold-booted the app (the field report). Now the
+     * supervisor loop OWNS the whole lifecycle: spawn → wait healthy →
+     * watch → on death log diagnostics, check the crash-streak guard, and
+     * respawn with backoff. Sessions live on disk, so after an auto-restart
+     * the same chat continues (the UI gets a recovery note).
+     */
     private void runServer(File bin) {
         try {
             Binaries.makeExec(bin); // idempotent; P0-verified pattern
@@ -236,7 +269,6 @@ public class ServerService extends Service {
         File cwd = (startDir != null && startDir.isDirectory())
                 ? startDir : Binaries.homeDir(this);
         servingDir = cwd;
-        setState(ST_STARTING, "sandbox: " + cwd.getName());
 
         ProcessBuilder pb = new ProcessBuilder(
                 bin.getAbsolutePath(), "serve",
@@ -246,73 +278,201 @@ public class ServerService extends Service {
         pb.redirectErrorStream(true);
         Binaries.applyEnv(this, pb);
 
-        try {
-            proc = pb.start();
-        } catch (Exception e) {
-            setState(ST_EXITED, "spawn failed: " + e.getMessage());
-            updateNotif("spawn failed");
-            stopSelf();
-            return;
-        }
+        long[] deaths = new long[8];        // recent death timestamps (ring)
+        int deathIdx = 0;
+        int attempts = 0;                   // consecutive auto-restarts
 
-        Thread drain = new Thread(() -> {
-            try (BufferedReader r = new BufferedReader(
-                    new InputStreamReader(proc.getInputStream()), 16 * 1024)) {
-                String line;
-                while ((line = r.readLine()) != null) addTail(line);
-            } catch (Exception ignored) {}
-        }, "oc-drain");
-        drain.setDaemon(true);
-        drain.start();
+        startSse();   // ONE SSE owner thread for every spawn of this service
 
-        setState(ST_STARTING, "opencode serve pid=" + proc.hashCode());
+        while (RUNNING && !userStop) {
+            if (attempts > 0) {
+                long back = Resilience.restartBackoffMs(attempts - 1);
+                setState(ST_STARTING, "auto-restart in " + back / 1000 + "s");
+                updateNotif("recovering sandbox…");
+                try { Thread.sleep(back); } catch (InterruptedException e) { return; }
+                if (!RUNNING || userStop) return;
+            }
 
-        long t0 = System.currentTimeMillis();
-        for (int i = 0; i < 240; i++) { // up to 120 s
+            // A previous server (or an orphan from a killed app process) can
+            // still hold the port — the respawn would die with EADDRINUSE
+            // and the user's only fix was a cold boot. Kill it first.
+            int stale = killStalePortOwner();
+            if (stale > 0) appendDiag("stale-port", "killed pid " + stale);
+
+            setState(ST_STARTING, "sandbox: " + cwd.getName());
+            final Process p;
             try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                return;
+                p = pb.start();
+            } catch (Exception e) {
+                appendDiag("spawn-fail", String.valueOf(e.getMessage()));
+                setState(ST_EXITED, "spawn failed: " + e.getMessage());
+                updateNotif("spawn failed");
+                return;                     // spawn errors are not transient
             }
-            Process p = proc;
-            if (p == null || !p.isAlive()) {
-                setState(ST_EXITED, "server exited early · " + lastTailLine());
-                updateNotif("server exited");
-                stopSelf();
-                return;
-            }
-            try {
-                if (serverUp()) {
-                    long ms = System.currentTimeMillis() - t0;
-                    setState(ST_HEALTHY, "http 200 in " + ms + " ms");
-                    updateNotif("running · " + cwd.getName());
-                    break;
-                }
-            } catch (Exception ignored) {}
-        }
+            proc = p;
 
-        if (state == ST_HEALTHY) startSse();
+            final int thisAttempt = attempts;
+            Thread drain = new Thread(() -> {
+                try (BufferedReader r = new BufferedReader(
+                        new InputStreamReader(p.getInputStream()), 16 * 1024)) {
+                    String line;
+                    while ((line = r.readLine()) != null) addTail(line);
+                } catch (Exception ignored) {}
+            }, "oc-drain");
+            drain.setDaemon(true);
+            drain.start();
 
-        // watcher: crash detection + late health
-        while (RUNNING) {
-            try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
-            Process p = proc;
-            if (p == null || !p.isAlive()) {
-                setState(ST_EXITED, "server exited · " + lastTailLine());
-                updateNotif("server exited");
-                stopSelf();
-                return;
-            }
-            if (state != ST_HEALTHY) {
+            setState(ST_STARTING, "opencode serve pid=" + p.hashCode());
+
+            // wait healthy (up to 120 s)
+            long t0 = System.currentTimeMillis();
+            boolean healthy = false;
+            for (int i = 0; i < 240 && RUNNING && !userStop; i++) {
+                try { Thread.sleep(500); } catch (InterruptedException e) { return; }
+                if (!p.isAlive()) break;
                 try {
                     if (serverUp()) {
-                        setState(ST_HEALTHY, "http 200 (late)");
+                        healthy = true;
+                        long ms = System.currentTimeMillis() - t0;
+                        setState(ST_HEALTHY, "http 200 in " + ms + " ms"
+                                + (attempts > 0 ? " (auto-recovered)" : ""));
                         updateNotif("running · " + cwd.getName());
-                        startSse();
+                        if (attempts > 0) {
+                            recoveryNote = "sandbox auto-recovered — the previous "
+                                    + "server process died (" + nz(lastTailLine(), "unknown")
+                                    + "). This chat is still attached; resend if the "
+                                    + "last message didn't finish";
+                            appendDiag("recovered", "attempt " + thisAttempt);
+                        }
+                        break;
                     }
                 } catch (Exception ignored) {}
             }
+
+            if (healthy) {
+                // SSE: started ONCE for the whole service lifetime (its own
+                // loop waits for ST_HEALTHY and reconnects across respawns
+                // — calling it per-spawn would double-deliver events).
+            }
+
+            // watcher: death detection + late health (inner, per-spawn)
+            boolean died = false;
+            while (RUNNING && !userStop) {
+                try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+                if (!p.isAlive()) { died = true; break; }
+                if (state != ST_HEALTHY) {
+                    try {
+                        if (serverUp()) {
+                            setState(ST_HEALTHY, "http 200 (late)");
+                            updateNotif("running · " + cwd.getName());
+                            // no startSse() here — the one SSE thread picks
+                            // the healthy state up on its next loop pass
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+
+            if (!died) return;          // user stop / service teardown
+
+            // ---- death path (P18): diagnose, guard, respawn ----
+            String why = nz(lastTailLine(), "no output");
+            int exit = -1;
+            try { exit = p.exitValue(); } catch (Exception ignored) {}
+            attempts++;
+            deaths[deathIdx++ % deaths.length] = System.currentTimeMillis();
+            appendDiag("died", "exit=" + exit + " · " + why);
+
+            int streak = Resilience.deathsInWindow(deaths, System.currentTimeMillis(), 10 * 60_000);
+            if (streak >= 3) {
+                appendDiag("give-up", streak + " deaths in 10 min");
+                setState(ST_EXITED, "sandbox keeps dying (" + streak
+                        + "× in 10 min) — ⌘ → Restart server");
+                updateNotif("⚠ sandbox keeps dying — open OpenCode");
+                return;                 // supervisor surrenders; manual restart re-arms
+            }
+            setState(ST_STARTING, "server died (exit " + exit + ") — auto-restarting");
         }
+    }
+
+    private static String nz(String s, String fb) {
+        return (s == null || s.isEmpty()) ? fb : s;
+    }
+
+    /** Append one line to files/sandbox-diag.log (head-truncated at 24 kB).
+     *  P18: “no Java crash file is written” was the field blocker — now
+     *  every server death leaves exit code + last output + memory pressure
+     *  on disk, so the NEXT report has ground truth. */
+    private void appendDiag(String event, String detail) {
+        try {
+            long mem = -1;
+            try {
+                String mi = Api.readAll(new java.io.FileInputStream("/proc/meminfo"));
+                mem = Resilience.parseMemAvailableKb(mi);
+            } catch (Exception ignored) {}
+            File f = new File(getFilesDir(), "sandbox-diag.log");
+            String line = Resilience.diagLine(System.currentTimeMillis(), event, detail, mem) + "\n";
+            if (f.length() > 24 * 1024) {
+                String old = Api.readAll(new java.io.FileInputStream(f));
+                int cut = Math.max(0, old.length() - 12 * 1024);
+                cut = old.indexOf('\n', cut);
+                if (cut > 0) line = old.substring(cut + 1) + line;
+            }
+            java.io.FileOutputStream fo = new java.io.FileOutputStream(f, f.length() <= 24 * 1024);
+            fo.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            fo.close();
+        } catch (Exception ignored) {}
+    }
+
+    /** Kill a leftover process listening on Api.PORT (best effort). The
+     *  zombie is our own uid's child, so the kill is permitted. Returns
+     *  the pid killed, or 0. */
+    private static int killStalePortOwner() {
+        try {
+            String hexPort = String.format("%04X", Api.PORT);
+            String inode = null;
+            for (String tbl : new String[]{"/proc/net/tcp", "/proc/net/tcp6"}) {
+                String t;
+                try { t = Api.readAll(new java.io.FileInputStream(tbl)); } catch (Exception e) { continue; }
+                for (String line : t.split("\n")) {
+                    String[] parts = line.trim().split("\\s+");
+                    // sl local_address state ... inode
+                    if (parts.length < 10) continue;
+                    if (!parts[3].equalsIgnoreCase("0A")) continue;   // LISTEN
+                    String local = parts[1];                           // ADDR:PORT
+                    int c = local.lastIndexOf(':');
+                    if (c < 0 || !local.substring(c + 1).equalsIgnoreCase(hexPort)) continue;
+                    inode = parts[9];
+                    break;
+                }
+                if (inode != null) break;
+            }
+            if (inode == null) return 0;
+            File[] procDirs = new File("/proc").listFiles();
+            if (procDirs == null) return 0;
+            int myPid = android.os.Process.myPid();
+            String needle = "socket:[" + inode + "]";
+            for (File d : procDirs) {
+                int pid;
+                try { pid = Integer.parseInt(d.getName()); } catch (Exception e) { continue; }
+                if (pid == myPid) continue;
+                File fdDir = new File(d, "fd");
+                File[] fds = fdDir.listFiles();
+                if (fds == null) continue;
+                for (File fd : fds) {
+                    try {
+                        String lk = android.system.Os.readlink(fd.getAbsolutePath());
+                        if (needle.equals(lk)) {
+                            final int target = pid;
+                            try {
+                                new ProcessBuilder("kill", "-9", String.valueOf(target)).start().waitFor();
+                            } catch (Exception ignored) {}
+                            return target;
+                        }
+                    } catch (Exception ignored) {}
+                }
+            }
+        } catch (Exception ignored) {}
+        return 0;
     }
 
     /** Health = any known server endpoint answering. P7: /project is not
