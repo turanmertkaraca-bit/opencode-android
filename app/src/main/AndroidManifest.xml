@@ -75,6 +75,13 @@
             android:windowSoftInputMode="adjustResize"
             android:label="Diagnostics"/>
 
+        <!-- P15: the visual project file manager (project-scoped browser) -->
+        <activity
+            android:name=".FilesActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:label="Files"/>
+
         <service android:name=".ServerService" android:exported="false"/>
 
         <!-- P12 keep-alive: opt-in reboot relaunch (Settings → keep alive) -->

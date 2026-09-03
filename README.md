@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.14.0 — P14)
+## Install (v0.15.0 — P15)
 
-1. Grab `opencode-p14-v0.14.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p15-v0.15.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -18,8 +18,37 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
    console.opencode.ai) runs its 31 FREE models with no key at all.
 4. Leaving the agent alone? **⌘ → Turn ON unattended (auto-allow)** —
    tool approvals are answered automatically. Tap the green pill to stop.
+5. **⌘ → Project files →** — the visual file manager for this project.
 
-## What's in v0.14.0 (P14 — the field-report killer)
+## What's in v0.15.0 (P15 — the P12 picker restored + proot dirs/env + the UI rework)
+
+- **model picker = the first P12 again** — built from forensics on the
+  actual P12a release source: `Mdl.live` is back. Bright rows = the
+  running server serves them right now; dim "· catalog" rows are
+  discovery-only and a tap on them REFUSES with a plain-language toast
+  instead of a runtime "Model not found". available() requires live, so
+  the send-path self-heal clears stale picks before the request.
+  Usable providers first, live models first — the P12a feel, keeping
+  P14's ⟨free⟩ badges, $/Mtok, 88% sheet, search. Provider headers no
+  longer close the sheet.
+- **Debian dirs initialized before proot runs** (the agent's own field
+  report, 1:1): ensureDirs() creates files/debian/tmp (the PROOT_TMP_DIR
+  target proot mkdtemps inside), files/home and rootfs/tmp before
+  install/probe/every guest run/launcher write.
+- **environment detection + welcome message** — every chat opens with a
+  one-shot environment row (kernel · arch · user · cwd · OS · tools ·
+  Download reachability · project path), gathered inside Debian when
+  active; also written to files/debian/env.txt for the agent. ⌘ →
+  "Sandbox environment" re-runs it; Settings → Environment check audits
+  the dirs.
+- **Files — the visual project file manager** — breadcrumbs, gradient
+  discs, type glyphs, size/age, preview sheet with copy-all, rename /
+  delete / copy path, ＋ new folder / file. Project-scoped by design.
+- **chat fluidity** — merge-path repaints coalesced to one flush per
+  80 ms: a burst of N SSE events costs one relayout, not N. Sends,
+  expand/collapse and error rows stay instant.
+
+## What was in v0.14.0 (P14 — the field-report killer)
 
 - **bash shim fixed for real** — the Debian branch test was emitted as two
   lines; mksh cannot parse a newline before `&&` (a leading operator is a

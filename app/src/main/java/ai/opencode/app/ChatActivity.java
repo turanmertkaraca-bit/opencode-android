@@ -231,6 +231,11 @@ public class ChatActivity extends Activity
     protected void onPause() {
         ServerService.unsubscribe(this);
         ServerService.unsubscribeEvents(this);
+        // P15: drop pending paint work with the subscription — the flush
+        // would fire into a detached view tree on return (harmless but wasteful).
+        ui.removeCallbacks(flushPaints);
+        paintScheduled = false;
+        dirtyRows.clear();
         super.onPause();
     }
 
@@ -256,6 +261,47 @@ public class ChatActivity extends Activity
         if (smootherRunning) return;
         smootherRunning = true;
         smoother.postDelayed(tick, 24);
+    }
+
+    // --------------------------------------------- P15 paint coalescing
+
+    /**
+     * The "not snappy" killer, caught red-handed: one busy agent turn
+     * fires dozens of SSE merges per second, and each merge called
+     * touchView → removeViewAt+addView → a FULL LinearLayout relayout of
+     * every row — including the huge tool blocks. Long commands made the
+     * chat visibly fight the user.
+     *
+     * Fix: merge-path repaints are COALESCED. requestPaint() marks the row
+     * dirty and schedules ONE flush 80 ms out; the flush paints each dirty
+     * row once. Bursts of N events now cost one relayout, not N. Direct
+     * touchView stays for what the user does (send, expand/collapse, sys/err
+     * rows) — those must feel instant, and they are rare.
+     */
+    private static final long PAINT_THROTTLE_MS = 80;
+    private final java.util.LinkedHashSet<Row> dirtyRows = new java.util.LinkedHashSet<>();
+    private boolean paintScheduled;
+
+    private final Runnable flushPaints = this::flushPaintsNow;
+
+    private void requestPaint(Row r) {
+        dirtyRows.add(r);
+        if (!paintScheduled) {
+            paintScheduled = true;
+            ui.postDelayed(flushPaints, PAINT_THROTTLE_MS);
+        }
+    }
+
+    private void flushPaintsNow() {
+        paintScheduled = false;
+        if (dirtyRows.isEmpty()) return;
+        java.util.ArrayList<Row> batch = new java.util.ArrayList<>(dirtyRows);
+        dirtyRows.clear();
+        for (Row r : batch) {
+            Integer i = r.key == null ? null : idxByKey.get(r.key);
+            if (i != null && i < rows.size() && rows.get(i) == r) touchView(r);
+        }
+        autoscroll();
     }
 
     private final Runnable tick = new Runnable() {
@@ -842,7 +888,22 @@ public class ChatActivity extends Activity
         ui.post(() -> refreshServerUi());
         if (newState == ServerService.ST_HEALTHY) {
             ui.post(this::checkPermissionQueue);
+            ui.post(this::showEnvWelcome);          // P15: one-shot env report
         }
+    }
+
+    /** P15 — the agent's own suggestion: "Show environment info when agent
+     *  starts, so it knows what it's working with." One welcome row per
+     *  chat lifetime (⌘ → Sandbox environment re-runs it on demand). */
+    private boolean envShown;
+
+    private void showEnvWelcome() {
+        if (envShown || isFinishing() || isDestroyed()) return;
+        envShown = true;
+        ex.execute(() -> {
+            final String rep = Debian.envReport(this);
+            ui.post(() -> sys(rep));
+        });
     }
 
     private void refreshServerUi() {
@@ -890,6 +951,7 @@ public class ChatActivity extends Activity
         ui.post(() -> {
             synchronized (lock) {
                 rows.clear(); idxByKey.clear(); typeCount.clear(); msgs.clear();
+                dirtyRows.clear(); paintScheduled = false;   // P15: no ghost paints
                 viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
             }
             list.removeAllViews();
@@ -1073,7 +1135,7 @@ public class ChatActivity extends Activity
                     MsgInfo mi = msgs.get(mid);
                     r.meta = mi == null ? null : mi.meta;
                     rows.add(r); idxByKey.put(key, rows.size() - 1);
-                    touchView(r);
+                    requestPaint(r);
                 } else {
                     String merged = mergeText(r.text.toString(), text);
                     boolean changed = !merged.contentEquals(r.text);
@@ -1082,7 +1144,7 @@ public class ChatActivity extends Activity
                     String meta = mi == null ? null : mi.meta;
                     boolean metaChanged = meta != null && !meta.equals(r.meta);
                     if (metaChanged) r.meta = meta;
-                    if (changed || metaChanged) touchView(r);
+                    if (changed || metaChanged) requestPaint(r);
                 }
             }
             autoscroll();
@@ -1098,12 +1160,12 @@ public class ChatActivity extends Activity
                     r.kind = K_REASON; r.key = key; r.ts = System.currentTimeMillis();
                     r.text.append(mergeText("", text));
                     rows.add(r); idxByKey.put(key, rows.size() - 1);
-                    touchView(r);
+                    requestPaint(r);
                 } else {
                     String merged = mergeText(r.text.toString(), text);
                     if (!merged.contentEquals(r.text)) {
                         r.text.setLength(0); r.text.append(merged);
-                        touchView(r);
+                        requestPaint(r);
                     }
                 }
             }
@@ -1131,7 +1193,7 @@ public class ChatActivity extends Activity
                     r.output.setLength(0); r.output.append(incoming.output);
                 }
                 if ("error".equals(r.status)) r.open = true; // never hide failures
-                if (changed) touchView(r);
+                if (changed) requestPaint(r);
             }
             autoscroll();
         });
@@ -1254,7 +1316,7 @@ public class ChatActivity extends Activity
                         Row r = rows.get(i);
                         if (r.kind == K_ASSISTANT && r.key != null
                                 && r.key.startsWith(fMid + "|")) {
-                            if (!fMeta.equals(r.meta)) { r.meta = fMeta; touchView(r); }
+                            if (!fMeta.equals(r.meta)) { r.meta = fMeta; requestPaint(r); }
                             break;
                         }
                     }
@@ -1999,6 +2061,7 @@ public class ChatActivity extends Activity
                 "New chat", "Sessions…", "Model…", "Toggle Build / Plan",
                 autoAllowOn() ? "Turn OFF unattended (auto-allow)"
                               : "Turn ON unattended (auto-allow)",
+                "Project files →", "Sandbox environment",
                 "Projects →", "Settings",
                 "API keys…", "Server logs & shell…", "Restart server",
                 "Expand all cards", "Collapse all cards",
@@ -2047,6 +2110,14 @@ public class ChatActivity extends Activity
             case "New chat": loadSession(null); break;
             case "Sessions…": sessionsSheet(); break;
             case "Model…": modelSheet(); break;
+            case "Project files →":
+                startActivity(new Intent(this, FilesActivity.class)); break;
+            case "Sandbox environment":
+                ex.execute(() -> {
+                    final String rep = Debian.envReport(this);
+                    ui.post(() -> sys(rep));
+                });
+                break;
             case "Toggle Build / Plan": toggleMode(); break;
             case "Turn ON unattended (auto-allow)":
             case "Turn OFF unattended (auto-allow)":
@@ -2189,6 +2260,23 @@ public class ChatActivity extends Activity
         });
     }
 
+    /**
+     * P15 — the model sheet, rebuilt TWICE over:
+     *
+     * BEHAVIOR = the FIRST P12 again (the user: "the working model picker
+     * is in the first p12 that was uploaded to github"). P14's rework
+     * dropped Mdl.live, so every discovery-catalog row SAVED silently and
+     * the server then answered "Model not found" — the picker "looked
+     * broken" a third time. Restored from the P12a source, byte-for-byte
+     * in spirit:
+     *   • live models (the running server serves them NOW) first, bright
+     *   • discovery rows dim + "· catalog" tag
+     *   • tapping a discovery row REFUSES with a plain-language toast
+     *   • validateSelectedModel() self-heals stale picks again (live gate)
+     * plus P13/P14 keepers: source line, ⟨free⟩ badges, $/Mtok, 88% sheet,
+     * row recycling — and one NEW rule: a provider header tap never steals
+     * the whole sheet anymore (P14 dismissed to Keys; felt like a bug).
+     */
     private void showModels(List<Models.Prov> provs) {
         if (isFinishing() || isDestroyed()) return;
         AlertDialog.Builder b = new AlertDialog.Builder(this);
@@ -2197,30 +2285,33 @@ public class ChatActivity extends Activity
         root.setOrientation(LinearLayout.VERTICAL);
         int p = dp(16);
         root.setPadding(p, dp(8), p, 0);
-        // P13: the picker now SHOWS what it sees — provider/model counts and
-        // the data source. "only 7 zen models" mysteries end here: if the
-        // line ever reads badly, we know exactly which leg failed.
+
+        // P15 header: live counts + data source, then the search well.
         TextView srcLine = text(11, R.color.text_secondary, false);
-        int freeN = 0;
-        for (Models.Prov pr : provs) for (Models.Mdl m : pr.models) if (m.free) freeN++;
-        srcLine.setText(provs.size() + " providers · " + countModels(provs)
-                + " models · " + freeN + " free · " + Models.lastSource);
+        int liveN = 0, freeN = 0;
+        for (Models.Prov pr : provs)
+            for (Models.Mdl m : pr.models) {
+                if (m.live) liveN++;
+                if (m.free) freeN++;
+            }
+        srcLine.setText(liveN + " runnable now · " + countModels(provs)
+                + " in catalog · " + freeN + " free · " + Models.lastSource);
         srcLine.setPadding(dp(4), 0, dp(4), dp(6));
         root.addView(srcLine);
+
         final EditText search = new EditText(this);
         search.setHint("search " + countModels(provs) + " models…");
         search.setTextSize(14);
         search.setSingleLine(true);
         root.addView(search);
+
         final ListView lv = new ListView(this);
-        // P14: weight-1 list + the dialog sized to 88% of the screen — the
-        // fixed 430dp box could get crushed (or crushed the hint below it)
-        // on taller/shorter screens and keyboard-open; weight always fits.
         root.addView(lv, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
         TextView hint = text(11, R.color.text_secondary, false);
-        hint.setText("configured first · tap a provider marked (add API key) "
-                + "to paste its key · free = runs keyless");
+        hint.setText("bright = runs now · dim = catalog (needs its key) · "
+                + "tap a dim row to see why · ⌘ → API keys to add one");
         hint.setPadding(dp(4), dp(8), dp(4), dp(10));
         root.addView(hint);
         b.setView(root);
@@ -2231,11 +2322,16 @@ public class ChatActivity extends Activity
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 (int) (getResources().getDisplayMetrics().heightPixels * 0.88));
 
-        final List<Object[]> items = new ArrayList<>(); // [kind, Prov, Mdl]
+        final List<Object[]> items = new ArrayList<>(); // [kind, Prov, Mdl-or-tag]
         Runnable refill = () -> {
             String q = search.getText().toString().toLowerCase(Locale.US).trim();
             items.clear();
             String[] cur = Models.selected(this);
+            // P12a restored: within a provider, live models first.
+            java.util.Comparator<Models.Mdl> liveFirst = (a, b2) -> {
+                if (a.live != b2.live) return a.live ? -1 : 1;
+                return a.name.compareToIgnoreCase(b2.name);
+            };
             for (Models.Prov pr : provs) {
                 boolean provHit = q.isEmpty()
                         || pr.id.toLowerCase(Locale.US).contains(q)
@@ -2247,6 +2343,7 @@ public class ChatActivity extends Activity
                             || m.name.toLowerCase(Locale.US).contains(q)) shown.add(m);
                 }
                 if (shown.isEmpty() && !provHit) continue;
+                shown.sort(liveFirst);
                 items.add(new Object[]{"h", pr, null});
                 int cap = Math.min(shown.size(), 400);
                 for (int i = 0; i < cap; i++) items.add(new Object[]{"m", pr, shown.get(i)});
@@ -2259,9 +2356,6 @@ public class ChatActivity extends Activity
                 public long getItemId(int i) { return i; }
                 public View getView(int i, View cv, ViewGroup parent) {
                     Object[] it = items.get(i);
-                    // P14: reuse the row container when recycled — the sheet
-                    // can hold thousands of rows; fresh views per scroll frame
-                    // were part of the "not snappy" report.
                     LinearLayout box = (cv instanceof LinearLayout)
                             ? (LinearLayout) cv : new LinearLayout(ChatActivity.this);
                     box.setOrientation(LinearLayout.VERTICAL);
@@ -2269,22 +2363,35 @@ public class ChatActivity extends Activity
                     int pad = dp(14);
                     box.setPadding(pad, dp(8), pad, dp(8));
                     if ("h".equals(it[0])) {
+                        // P15 provider header: pill tag state, mono id chip.
                         Models.Prov pr = (Models.Prov) it[1];
-                        TextView t = text(12, pr.configured ? R.color.ok : R.color.accent_light, true);
+                        TextView t = text(13, pr.usable ? R.color.ok
+                                : pr.configured ? R.color.accent_light
+                                : R.color.text_secondary, true);
                         String mark;
-                        if ("opencode".equals(pr.id))
-                            mark = "  · free models keyless";   // P11 verified live
-                        else if (pr.configured) mark = "  · ✓ key saved";
-                        else mark = pr.usable ? "  · (no key)" : "  · (add API key) ▸";
+                        if (pr.usable && "opencode".equals(pr.id))
+                            mark = "  ·  free · no key needed";   // P11 verified
+                        else if (pr.usable) mark = "  ·  ready";
+                        else if (pr.configured) mark = "  ·  key saved · restarting picks it up";
+                        else mark = "  ·  discovery — add API key first";
                         t.setText(pr.name + mark);
+                        t.setSingleLine(true);
+                        t.setEllipsize(android.text.TextUtils.TruncateAt.END);
                         box.addView(t);
                     } else if ("m".equals(it[0])) {
                         Models.Mdl m = (Models.Mdl) it[2];
                         Models.Prov pr = (Models.Prov) it[1];
                         boolean isCur = cur != null && cur[0].equals(pr.id)
                                 && cur[1].equals(m.id);
-                        TextView t1 = text(14, isCur ? R.color.ok : R.color.text_primary, isCur);
-                        t1.setText((isCur ? "✓ " : "") + m.name + (m.free ? "   ⟨free⟩" : ""));
+                        // P12a rendering: live rows bright, catalog rows dim
+                        // and tagged — the state that told the user, at a
+                        // glance, exactly what would work.
+                        int col = isCur ? R.color.ok
+                                : m.live ? R.color.text_primary : R.color.text_secondary;
+                        TextView t1 = text(14, col, isCur || m.live);
+                        t1.setText((isCur ? "✓ " : "") + m.name
+                                + (m.live ? "" : "   ·  catalog")
+                                + (m.free ? "   ⟨free⟩" : ""));
                         t1.setSingleLine(true);
                         t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
                         TextView t2 = text(11, R.color.text_secondary, false);
@@ -2312,22 +2419,33 @@ public class ChatActivity extends Activity
             public void afterTextChanged(Editable s) { refill.run(); }
         });
         refill.run();
-        // P14: a provider WITHOUT a key now opens API keys on a SINGLE tap of
-        // its header — "(add API key)" is an instruction, and the instruction
-        // is one tap away (the P13 long-press-only path was undiscoverable).
         lv.setOnItemClickListener((parent, v, pos, id4) -> {
             Object[] it = items.get(pos);
             if ("h".equals(it[0])) {
+                // P15: headers never steal the sheet. Unconfigured provider →
+                // point at the keys screen in place (P14 closed the whole
+                // picker here, which read as "tapping the picker breaks it").
                 Models.Prov pr = (Models.Prov) it[1];
-                if (!pr.configured) {
-                    dlg.dismiss();
-                    startActivity(new Intent(this, KeysActivity.class));
-                }
+                if (!pr.usable && !pr.configured)
+                    Toast.makeText(this, pr.name + " needs its API key — "
+                            + "⌘ → API keys, paste, then reopen this sheet",
+                            Toast.LENGTH_SHORT).show();
                 return;
             }
             if (!"m".equals(it[0])) return;
             Models.Prov pr = (Models.Prov) it[1];
             Models.Mdl m = (Models.Mdl) it[2];
+            // P12a restored: discovery-catalog entries are NOT selectable —
+            // the server would answer "Model not found". Say why instead.
+            if (!m.live) {
+                Toast.makeText(this, pr.usable
+                        ? m.name + " is in the discovery catalog but not offered by "
+                          + "your server right now (free list rotates) — pick a "
+                          + "non-tagged model"
+                        : "no key for " + pr.name + " yet — ⌘ → API keys first",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
             Models.save(this, pr.id, m.id);
             // P11: chat picks are PER-CHAT only — writing them into
             // opencode.json made every future session (and every fallback

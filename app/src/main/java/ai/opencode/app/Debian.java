@@ -132,6 +132,84 @@ public final class Debian {
         return Sandbox.sizeOf(dir(c));
     }
 
+    /**
+     * P15 — create EVERY directory the proot layer needs BEFORE anything
+     * runs. The field report (via the agent itself) was exact:
+     *
+     *   "App needs to initialize its directories on first launch — create
+     *    these paths before starting proot: files/debian/tmp, files/home …"
+     *
+     * The killer was files/debian/tmp: PROOT_TMP_DIR pointed there but
+     * nothing ever mkdir'd it, so proot's mkdtemp failed on a fresh install
+     * and the probe/install died with a temp-dir error that looked like
+     * "proot broken". files/home is Binaries.homeDir's job but we belt it
+     * here too; rootfs/tmp matters for guest TMPDIR. Never throws.
+     */
+    public static void ensureDirs(Context c) {
+        try {
+            if (!dir(c).exists()) dir(c).mkdirs();
+            File tmp = new File(dir(c), "tmp");          // PROOT_TMP_DIR target
+            if (!tmp.exists()) tmp.mkdirs();
+            Binaries.homeDir(c);                          // files/home (mkdirs)
+            if (extracted(c)) {                           // guest TMPDIR=/tmp
+                File rtmp = new File(rootfsDir(c), "tmp");
+                if (!rtmp.exists()) rtmp.mkdirs();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * P15 — the environment report the agent asked for: "auto-detect proot,
+     * Android, and display a clean summary (/proc/version, uname, pwd,
+     * whoami)". Runs INSIDE Debian when active; falls back to a host-side
+     * summary otherwise. Also written to files/debian/env.txt so the agent
+     * itself can read exactly what it's standing in. Never throws.
+     */
+    public static String envReport(Context c) {
+        ensureDirs(c);
+        StringBuilder s = new StringBuilder();
+        if (active(c)) {
+            StringBuilder out = new StringBuilder();
+            runGuest(c,
+                    "echo \"kernel : $(uname -r)\"; "
+                  + "echo \"arch   : $(uname -m)\"; "
+                  + "echo \"user   : $(whoami)\"; "
+                  + "echo \"cwd    : $(pwd)\"; "
+                  + "echo \"os     : $(cat /etc/os-release 2>/dev/null "
+                  + "| grep PRETTY_NAME | cut -d\\\" -f2)\"; "
+                  + "echo \"tools  : $(command -v apt >/dev/null && echo apt)"
+                  + " $(command -v git >/dev/null && echo git)"
+                  + " $(command -v python3 >/dev/null && echo python3)\"",
+                    out, 20);
+            String body = out.toString().trim();
+            if (body.contains("kernel")) {
+                s.append("sandbox environment\n").append(body);
+            } else {
+                s.append("sandbox: Debian present but the probe answer was "
+                        + "empty — see Sandbox doctor");
+            }
+        } else {
+            s.append("sandbox: Lite shell (Debian ")
+             .append(extracted(c) ? "probe failed" : "not installed").append(")\n")
+             .append("host   : Android \u2014 /system/bin/sh\n")
+             .append("tip    : Settings \u2192 Sandbox \u2192 Install Debian for apt + git");
+        }
+        try {   // storage visibility — the other half of the field report
+            java.io.File dl = new java.io.File("/storage/emulated/0/Download");
+            boolean dlOk = dl.isDirectory();
+            File proj = ServerService.servingDir();
+            s.append("\nstorage: Download ").append(dlOk ? "reachable" : "NOT visible")
+             .append(dlOk ? "" : " — grant \u201cAll files access\u201d for "
+                        + "Android Settings \u2192 Apps \u2192 opencode")
+             .append("\nproject: ").append(proj == null ? "(none)"
+                        : proj.getAbsolutePath());
+        } catch (Exception ignored) {}
+        String rep = s.toString();
+        try { writeText(new File(dir(c), "env.txt"), rep + "\n"); }
+        catch (Exception ignored) {}
+        return rep;
+    }
+
     // ----------------------------------------------------------- install
 
     /** Progress sink for the installer UI. */
@@ -143,6 +221,7 @@ public final class Debian {
      * Idempotent: skips whatever is already done.
      */
     public static synchronized boolean install(Context c, Progress cb) {
+        ensureDirs(c);                          // P15: tmp dirs BEFORE anything
         if (extracted(c)) { probe(c, cb); return probeOk(c); }
         if (installing) return false;
         installing = true;
@@ -433,6 +512,7 @@ public final class Debian {
 
     /** ProcessBuilder env for a proot run (host side + guest exports). */
     public static ProcessBuilder guestProcess(Context c, String command) {
+        ensureDirs(c);                          // P15: belt before every run
         ArrayList<String> argv = prootArgv(c, command);
         ProcessBuilder pb = new ProcessBuilder(argv);
         pb.redirectErrorStream(true);
@@ -481,6 +561,8 @@ public final class Debian {
             // JVM regression tests) files/debian/ does not exist yet and
             // the FileOutputStream below would silently throw, leaving no
             // launcher at all (caught-and-ignored hid it until now).
+            // P15: ensureDirs also creates files/debian/tmp (PROOT_TMP_DIR).
+            ensureDirs(c);
             File d = dir(c);
             if (!d.exists()) d.mkdirs();
             File files = c.getFilesDir();
@@ -572,6 +654,7 @@ public final class Debian {
      * .probe on success so Debian shells activate. Never throws.
      */
     public static boolean probe(Context c, Progress cb) {
+        ensureDirs(c);                          // P15: PROOT_TMP_DIR must exist
         try {
             StringBuilder out = new StringBuilder();
             int rc = runGuest(c, "echo probe-ok", out, 30);
