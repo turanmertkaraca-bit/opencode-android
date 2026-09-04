@@ -836,9 +836,16 @@ public class ChatActivity extends Activity
         });
     }
 
+    /** P22: pre-busy latch. ensureSession() + validateSelectedModel() do
+     *  real network I/O BEFORE setBusy(true), so a fast double-tap on send
+     *  passed the `busy` gate twice and queued two identical runs (doubled
+     *  tokens, duplicate rows). Released in each worker's finally. */
+    private final java.util.concurrent.atomic.AtomicBoolean sending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
     private void send() {
         final String q = input.getText().toString().trim();
-        if (q.isEmpty() || busy) return;
+        if (q.isEmpty() || busy || !sending.compareAndSet(false, true)) return;
         input.setText("");
         Theme.pop(btnSend); // P8 micro-anim: the send button springs
         lastUserText = q;
@@ -922,6 +929,8 @@ public class ChatActivity extends Activity
                     sys("send failed · " + Resilience.prettyNetError(e));
                     setBusy(false);
                 }
+            } finally {
+                sending.set(false);
             }
         });
     }
@@ -2060,7 +2069,10 @@ public class ChatActivity extends Activity
 
     /** The full vision send: native attach first, free-model describer second. */
     private void attachImage(final File jpg, final String caption) {
-        if (busy) { sys("wait for the current run to finish, then resend"); return; }
+        if (busy || !sending.compareAndSet(false, true)) {
+            sys("wait for the current run to finish, then resend");
+            return;
+        }
         final String key = "img" + System.currentTimeMillis();
         final String cap2 = (caption == null || caption.isEmpty())
                 ? "what do you see here?" : caption;
@@ -2118,6 +2130,8 @@ public class ChatActivity extends Activity
             } catch (Exception e) {
                 sys("screenshot send failed: " + e);
                 setBusy(false);
+            } finally {
+                sending.set(false);
             }
         });
     }
