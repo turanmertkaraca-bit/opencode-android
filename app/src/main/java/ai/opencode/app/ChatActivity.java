@@ -31,7 +31,6 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -39,7 +38,6 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -63,77 +61,45 @@ import java.util.concurrent.Executors;
  * must degrade to a plain line, never crash (the P6 device crash lesson).
  */
 public class ChatActivity extends Activity
-        implements ServerService.Evt, ServerService.EventListener {
+        implements ServerService.Evt, RunHub.Ui {
 
-    // row kinds
-    static final int K_USER = 0, K_ASSISTANT = 1, K_REASON = 2, K_TOOL = 3, K_SYS = 4, K_ERR = 5;
+    // row kinds — owned by RunHub since P25; re-exported for the render switch
+    static final int K_USER = RunHub.K_USER, K_ASSISTANT = RunHub.K_ASSISTANT,
+            K_REASON = RunHub.K_REASON, K_TOOL = RunHub.K_TOOL, K_SYS = RunHub.K_SYS,
+            K_ERR = RunHub.K_ERR;
     // P17 row kinds
-    static final int K_LIVE = 6, K_IMAGE = 7;
+    static final int K_LIVE = RunHub.K_LIVE, K_IMAGE = RunHub.K_IMAGE;
     /** The one live-edit card's stable row key. */
-    private static final String LIVE_KEY = "live:edits";
+    private static final String LIVE_KEY = RunHub.LIVE_KEY;
     /** SAF image-picker request code. */
     private static final int REQ_IMAGE = 4210;
 
     // P8: which project sandbox this chat is attached to (from the deck)
     private String projectName;
 
-    static final class Row {
-        int kind;
-        String key;                 // stable identity for SSE upserts
-        StringBuffer text = new StringBuffer();
-        int shown;                  // P9: chars painted so far (streaming caret)
-        boolean livePreview;        // P20: collapsed thinking card showing the live ticker
-        String tool, status, title, meta;
-        StringBuffer input = new StringBuffer();
-        StringBuffer output = new StringBuffer();
-        boolean open;               // collapsed by default for tool/reason
-        long ts;
-    }
-
-    static final class MsgInfo {
-        String role;
-        String meta;                // "⇅ 12.3k tok · $0.0041"
-        double cost;                // P12 session-total accumulation
-        long tok;
-        boolean errorShown;
-    }
-
     private final Handler ui = new Handler(Looper.getMainLooper());
     /**
      * P10 — was a single-thread executor, which was a deadlock in disguise:
-     * POST /session/{id}/message holds its thread until the agent run
-     * finishes, and a permission ask arrives exactly MID-RUN — so the
-     * Allow/Always/Deny reply (and the abort call) queued behind it and
-     * never ran. Buttons "didn't work". A pool lets replies/abort/history
-     * run while a message POST is in flight.
+     * POST /session/{id}/message held its thread until the agent run
+     * finished, so a permission reply queued behind it and never ran.
+     * P25: the message POST itself moved to RunHub's pool — this pool now
+     * serves UI-adjacent async work only (sheets, exports, decodes).
      */
     private final ExecutorService ex = Executors.newCachedThreadPool();
-    /** Dedicated pool for permission replies — must NEVER wait on anything. */
-    private final ExecutorService permEx = Executors.newCachedThreadPool();
-    private final List<Row> rows = new ArrayList<>();
-    private final Map<String, MsgInfo> msgs = new HashMap<>();
-    private final Map<String, Integer> idxByKey = new HashMap<>();
-    private final Map<String, Integer> typeCount = new HashMap<>();
-    /** P20: keys of rows dropped by the 450-row trim (and purged empty
-     *  thoughts) — the resume replay must never re-append ancient parts
-     *  at the bottom of the chat. Bounded FIFO, oldest keys forgotten. */
-    private final java.util.ArrayDeque<String> trimmedKeys = new java.util.ArrayDeque<>();
-    private static final int TRIMMED_KEY_CAP = 4096;
 
-    private void forgetKey(String k) {
-        if (k == null) return;
-        trimmedKeys.addLast(k);
-        while (trimmedKeys.size() > TRIMMED_KEY_CAP) trimmedKeys.removeFirst();
-    }
+    // ---- P25: the view binds the hub's transcript — single source ------
+    // `rows` is a REFERENCE to the hub's live list for the displayed
+    // session; it is re-fetched whenever the hub swaps sessions
+    // (hubReset / onResume). Locking uses the hub's lock so cross-thread
+    // readers (export, copy) stay coherent with the model.
+    private static final Object lock = RunHub.lock();
+    private List<RunHub.Row> rows = RunHub.rows();
+    private boolean pinnedBottom = true;
 
-    /** True when a part's row once existed but was trimmed away — its
-     *  content is ancient history, NOT something the resume replay may
-     *  resurrect at the bottom of the list. */
-    private boolean partWasTrimmed(String key) {
-        synchronized (lock) {
-            return key != null && !idxByKey.containsKey(key)
-                    && trimmedKeys.contains(key);
-        }
+    private RunHub.Row rowByKey(String key) {
+        Integer i = key == null ? null : RunHub.idx().get(key);
+        List<RunHub.Row> rs = RunHub.rows();
+        return (i == null || i >= rs.size()) ? null : rs.get(i);
     }
 
     private LinearLayout list;
@@ -163,72 +129,17 @@ public class ChatActivity extends Activity
     private boolean pillShown;
     private final List<ObjectAnimator> typingAnims = new ArrayList<>();
 
-    // ---- P17: live edit feed (the chat's "edit shower" card) ----------
-    // Event-driven only: a DirWatcher runs WHILE THE AGENT WORKS (started
-    // by setBusy(true), stopped by setBusy(false)/onPause) — zero polling,
-    // zero steady-state CPU when idle. See EditPulse for the policy.
-    private DirWatcher editWatcher;
-    private final Map<String, EditPulse.Ev> editFeed = new HashMap<>();
-    /** edit-tool snippets keyed by abs path — the peek's line locator. */
-    private final Map<String, String> editFocus = new HashMap<>();
-    private final Map<String, String> peekCache = new HashMap<>();
-    private String editRoot;
-    private Boolean liveOpen;               // null = auto (hot → open)
-    private String liveSelPath;             // peek target
-    private boolean liveWaitingPeek;
+    // ---- P17/P25: live edit feed — STATE lives in RunHub, the VIEW here
+    // renders it. The DirWatcher runs while a run is active (hub-owned),
+    // so the shower keeps recording with the chat closed. The view keeps
+    // only its own bits: the pulse animator and the tree's dir states.
     private ObjectAnimator livePulseAnim;
-    private final Runnable liveCollapse = this::collapseLive;
+    /** P25 tree: user-decided dir expand/collapse (null = auto: follow
+     *  the newest event's branch). Bounded; cleared on session resets. */
+    private final java.util.Map<String, Boolean> dirState = new java.util.HashMap<>();
 
     // ---- P17: vision ---------------------------------------------------
     private TextView btnVision;
-    /** decoded chat bubbles, keyed by row key (bounded, eldest evicted).
-      Evicted bitmaps are NOT recycled — a visible row may still draw them;
-      the GC reclaims them once their views let go. */
-    private final LinkedHashMap<String, Bitmap> imageCache = new LinkedHashMap<String, Bitmap>(8, 0.75f, true) {
-        @Override protected boolean removeEldestEntry(Map.Entry<String, Bitmap> e) {
-            return size() > 6;
-        }
-    };
-    /** rows whose image decode failed — never retried (no repaint loops). */
-    private final java.util.Set<String> failedImgs = new java.util.HashSet<>();
-
-    private String sessionId, sessionTitle;
-    private String agent = "build";     // Tab parity: build <-> plan
-    private volatile boolean busy;
-    private volatile long lastPartTs;
-    // P11 self-heal state: the zen free-model lineup ROTATES server-side, so
-    // a saved pick can go stale ("Model not found" on EVERY send — the exact
-    // user report). These track the current run to clear + retry.
-    private volatile String lastUserText;
-    private volatile boolean runHadOutput;
-    private volatile boolean modelFixRetried;
-    private volatile boolean flakeRetried;
-    /** P18: tokens of the newest assistant message ≈ how much context each
-     *  new turn re-reads. Drives the Σ popover's heavy-context advice. */
-    private volatile long lastAssistantTok;
-    private boolean pinnedBottom = true;
-
-    private final Runnable watchdog = new Runnable() {
-        @Override public void run() {
-            guarded("watchdog", this::watchdogTick);
-        }
-
-        private void watchdogTick() {
-            // P19: the quiet threshold is 10 minutes (Resilience.quietEndMs),
-            // not 3.5 s. A working agent is SILENT on the feed while a bash
-            // tool runs (no part events for minutes) — the old threshold
-            // declared the run dead mid-command, tore down the live-edit
-            // watcher, reverted the stop button, and made every file edit
-            // after it invisible ("live file edits dont show in chat").
-            // A run's real end is session.idle / session.error; the quiet
-            // timer only catches a feed that died without either.
-            if (busy && System.currentTimeMillis() - lastPartTs > Resilience.quietEndMs()) {
-                setBusy(false);
-            } else if (busy) {
-                ui.postDelayed(watchdog, 5000);
-            }
-        }
-    };
 
     // ---------------------------------------------------------- lifecycle
 
@@ -281,7 +192,15 @@ public class ChatActivity extends Activity
         if (tvSpend != null) tvSpend.setOnClickListener(v -> spendPopover());   // P18
         btnSend.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            if (busy) abortRun(); else send();
+            if (RunHub.busy()) {
+                RunHub.abort();              // P25: the ONLY abort path
+            } else {
+                String q = input.getText().toString().trim();
+                if (q.isEmpty()) return;
+                input.setText("");
+                Theme.pop(btnSend);          // P8 micro-anim: the send button springs
+                RunHub.send(q);              // hub-owned: the run outlives this screen
+            }
         });
         scroll.getViewTreeObserver().addOnScrollChangedListener(() -> {
             pinnedBottom = atBottom();
@@ -302,7 +221,6 @@ public class ChatActivity extends Activity
     protected void onResume() {
         super.onResume();
         ServerService.subscribe(this);
-        ServerService.subscribeEvents(this);
         int st = ServerService.getState();
         if ((st == ServerService.ST_IDLE || st == ServerService.ST_STOPPED
                 || st == ServerService.ST_EXITED) && !ServerService.pendingRestart()) {
@@ -312,12 +230,27 @@ public class ChatActivity extends Activity
                 } catch (Exception ignored) {}
             }
         }
-        if (sessionId != null && rows.isEmpty()) loadSession(sessionId);
-        else if (sessionId != null) reconcileAfterPause();   // P20
+        // P25: bind to the live run state. The hub consumed every event
+        // while this screen was away; re-pull the session from the server
+        // API as the belt to that brace (never re-POSTs, never restarts
+        // a healthy stream), restore the interrupted-run note, render.
+        RunHub.bindUi(this);
+        rows = RunHub.rows();
+        String interrupted = RunHub.consumeInterruptedNote();
+        boolean emptyStart = RunHub.rows().isEmpty();
+        if (RunHub.sessionId() != null && emptyStart) {
+            // P25 process-kill recovery (or first open after boot): the
+            // run-state file restored the session — pull its transcript.
+            RunHub.loadSession(RunHub.sessionId());
+        } else if (RunHub.sessionId() != null) {
+            RunHub.reconcileOnBind();            // P20 replay, now hub-owned
+        }
+        // the note lands AFTER the (re)load — the transcript swap must
+        // never wipe it
+        if (interrupted != null) RunHub.sys(interrupted);
         checkPermissionQueue();
         refreshServerUi();
-        // P17: resume the live-edit watch if a run outlived the pause.
-        if (busy) startEditWatch();
+        refreshChips();
         // P16: returning from API keys with the model sheet open → refresh
         // the rows IN PLACE, so the provider whose key was just added goes
         // bright/ready without closing and reopening the picker.
@@ -361,20 +294,69 @@ public class ChatActivity extends Activity
 
     @Override
     protected void onPause() {
-        ServerService.unsubscribe(this);
-        ServerService.unsubscribeEvents(this);
-        // P15: drop pending paint work with the subscription — the flush
-        // would fire into a detached view tree on return (harmless but wasteful).
+        RunHub.unbindUi(this);
+        // P15: drop pending paint work with the unbind — the flush would
+        // fire into a detached view tree on return (harmless but wasteful).
         ui.removeCallbacks(flushPaints);
         paintScheduled = false;
         dirtyRows.clear();
-        // P17: no background work from this screen while it's away — the
-        // watcher is only meaningful while the agent edits anyway, and the
-        // collapse timer / pulse animators must never tick detached.
-        stopEditWatch();
-        ui.removeCallbacks(liveCollapse);
         if (livePulseAnim != null) { livePulseAnim.cancel(); livePulseAnim = null; }
+        // P25: that is ALL. The run, the SSE feed, the transcript, the
+        // edit watcher — all live in RunHub now. Leaving to the deck keeps
+        // the run streaming; nothing here can abort it (only ■ can).
         super.onPause();
+    }
+
+    // ------------------------------------------------ P25: RunHub.Ui
+    // The view contract: the hub mutates its model (any thread → main),
+ // the view paints. Every callback arrives on the main thread.
+
+    @Override public void hubRow(String key) {
+        RunHub.Row r = key == null ? null : rowByKey(key);
+        if (r != null) requestPaint(r);
+    }
+
+    @Override public void hubBusy(boolean b) {
+        applyBusyUi(b);
+    }
+
+    @Override public void hubSpend() {
+        ui.post(this::refreshServerUi);
+    }
+
+    @Override public void hubTitle() {
+        ui.post(() -> {
+            String t = RunHub.sessionTitle();
+            if (t != null && !t.isEmpty()) tvTitle.setText(t);
+            refreshChips();
+        });
+    }
+
+    @Override public void hubPerms() {
+        ui.post(this::checkPermissionQueue);
+    }
+
+    @Override public void hubLive() {
+        RunHub.Row r = rowByKey(LIVE_KEY);
+        if (r != null) requestPaint(r);
+    }
+
+    /** The transcript was replaced (session switch / model trim): rebuild
+     *  everything once. Also re-syncs the `rows` reference. */
+    @Override public void hubReset() {
+        ui.post(() -> {
+            rows = RunHub.rows();
+            dirtyRows.clear();
+            paintScheduled = false;
+            ui.removeCallbacks(flushPaints);
+            dirState.clear();
+            viewByKey.clear();
+            bodyByKey.clear();
+            metaByKey.clear();
+            pinnedBottom = true;
+            renderAll();
+            syncEmpty();
+        });
     }
 
     /** P17: SAF image pick for the vision flow (no permission needed). */
@@ -438,7 +420,7 @@ public class ChatActivity extends Activity
     // ------------------------------------------------- P9 stream smoother
 
     /**
-     * Token-by-token feel: SSE deltas land in Row.text (the target) and a
+     * Token-by-token feel: SSE deltas land in RunHub.Row.text (the target) and a
      * 24 ms ticker paints a few more chars into the row's TextView with a
      * caret — plain text while streaming (cheap), full markdown ONCE when
      * the part catches up. Adaptive step = remaining/8 + 3 chars, so short
@@ -471,12 +453,12 @@ public class ChatActivity extends Activity
      * rows) — those must feel instant, and they are rare.
      */
     private static final long PAINT_THROTTLE_MS = 80;
-    private final java.util.LinkedHashSet<Row> dirtyRows = new java.util.LinkedHashSet<>();
+    private final java.util.LinkedHashSet<RunHub.Row> dirtyRows = new java.util.LinkedHashSet<>();
     private boolean paintScheduled;
 
     private final Runnable flushPaints = this::flushPaintsNow;
 
-    void requestPaint(Row r) {           // package-private: P24 test seam
+    void requestPaint(RunHub.Row r) {           // package-private: P24 test seam
         dirtyRows.add(r);
         if (!paintScheduled) {
             paintScheduled = true;
@@ -487,7 +469,7 @@ public class ChatActivity extends Activity
     /** P24: paint exactly one row — the fault-isolation seam. Package-
      *  private so the Robolectric suite can poison it and prove the
      *  transcript survives a row that cannot paint. */
-    void paintRowOnce(Row r) { touchView(r); }
+    void paintRowOnce(RunHub.Row r) { touchView(r); }
 
     /** P24 field lesson ("doesn't crash but it still won't work"): P23's
      *  single guard around the WHOLE batch meant ONE poisoned row aborted
@@ -500,13 +482,15 @@ public class ChatActivity extends Activity
         guarded("paint flush", () -> {
             paintScheduled = false;
             if (dirtyRows.isEmpty()) return;
-            java.util.ArrayList<Row> batch = new java.util.ArrayList<>(dirtyRows);
+            java.util.ArrayList<RunHub.Row> batch = new java.util.ArrayList<>(dirtyRows);
             dirtyRows.clear();
-            for (Row r : batch) {
-                Integer i = r.key == null ? null : idxByKey.get(r.key);
-                if (i == null || i >= rows.size() || rows.get(i) != r) continue;
+            List<RunHub.Row> rs = RunHub.rows();
+            java.util.Map<String, Integer> idx = RunHub.idx();
+            for (RunHub.Row r : batch) {
+                Integer i = r.key == null ? null : idx.get(r.key);
+                if (i == null || i >= rs.size() || rs.get(i) != r) continue;
                 if (r.key != null && quarantined.contains(r.key)) continue;
-                final Row fr = r;
+                final RunHub.Row fr = r;
                 Throwable t = Resilience.guard(() -> paintRowOnce(fr));
                 if (t == null) {
                     if (r.key != null) paintFails.remove(r.key);  // second chance restored
@@ -523,7 +507,7 @@ public class ChatActivity extends Activity
      *  the row — content swapped for the bounded fallback line that
      *  cannot fail. The part degrades VISIBLY; the chat keeps flowing.
      *  Never throws (it runs inside containment contexts). */
-    private void noteRowPaintFail(Row r, Throwable t) {
+    private void noteRowPaintFail(RunHub.Row r, Throwable t) {
         try {
             if (r.key == null) return;      // unkeyed rows: trail only
             String k = r.key;
@@ -535,11 +519,10 @@ public class ChatActivity extends Activity
             paintFails.remove(k);
             quarantined.add(k);
             ui.post(() -> guarded("quarantine swap", () -> {
+                RunHub.Row qr = rowByKey(k);
+                if (qr == null) return;
+                if (qr.kind == K_LIVE) return;   // the live card manages itself
                 synchronized (lock) {
-                    Integer i = idxByKey.get(k);
-                    if (i == null || i >= rows.size()) return;
-                    Row qr = rows.get(i);
-                    if (qr.kind == K_LIVE) return;   // the live card manages itself
                     qr.kind = K_SYS;
                     qr.text.setLength(0);
                     qr.text.append(Resilience.quarantineLine());
@@ -547,8 +530,7 @@ public class ChatActivity extends Activity
                     qr.open = false; qr.livePreview = false;
                     qr.shown = qr.text.length();
                 }
-                Row qv = rowByKey(k);
-                if (qv != null) touchView(qv);
+                touchView(qr);
             }));
         } catch (Throwable ignored) {}
     }
@@ -561,7 +543,7 @@ public class ChatActivity extends Activity
                 boolean[] moreBox = {false};
                 synchronized (lock) {
                     for (int i = rows.size() - 1; i >= 0; i--) {
-                        Row r = rows.get(i);
+                        RunHub.Row r = rows.get(i);
                         int len = r.text.length();
                         if (r.shown > len) r.shown = len;
                         if ((r.kind != K_ASSISTANT && r.kind != K_REASON)
@@ -576,7 +558,7 @@ public class ChatActivity extends Activity
                         }
                         // P24: a row that can't paint must not kill the
                         // whole ticker — quarantine it like a flush failure.
-                        final Row fr = r;
+                        final RunHub.Row fr = r;
                         Throwable pt = Resilience.guard(() -> paintStreaming(fr));
                         if (pt != null) noteRowPaintFail(fr, pt);
                         if (r.shown < len) moreBox[0] = true;
@@ -594,7 +576,7 @@ public class ChatActivity extends Activity
     };
 
     /** In-place text paint while streaming (no view rebuilds). */
-    private void paintStreaming(Row r) {
+    private void paintStreaming(RunHub.Row r) {
         TextView body = bodyByKey.get(r.key);
         View root = viewByKey.get(r.key);
         if (body == null || root == null) { touchView(r); return; }
@@ -615,7 +597,7 @@ public class ChatActivity extends Activity
         }
     }
 
-    private boolean isStreamingTail(Row r) {
+    private boolean isStreamingTail(RunHub.Row r) {
         if (!Theme.motionOn(this)) return false;
         synchronized (lock) {
             boolean last = !rows.isEmpty() && rows.get(rows.size() - 1) == r;
@@ -642,7 +624,7 @@ public class ChatActivity extends Activity
             c.setTextColor(getColor(R.color.accent_light));
             c.setBackgroundResource(R.drawable.bg_suggest);
             int p = dp(14);
-            c.setPadding(p, dp(9), p, dp(9));
+            c.setPadding(p, dp(11), p, dp(11));   // P25: taller touch target
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             lp.topMargin = dp(8);
@@ -779,7 +761,7 @@ public class ChatActivity extends Activity
 
     private void syncTyping() {
         if (typing == null) return;
-        int vis = busy ? View.VISIBLE : View.GONE;
+        int vis = RunHub.busy() ? View.VISIBLE : View.GONE;
         if (typing.getVisibility() != vis) {
             typing.setVisibility(vis);
             if (vis == View.VISIBLE) {
@@ -859,62 +841,40 @@ public class ChatActivity extends Activity
     // ----------------------------------------------------------- composer
 
     private void toggleMode() {
-        agent = "build".equals(agent) ? "plan" : "build";
+        RunHub.setAgent("build".equals(RunHub.agent()) ? "plan" : "build");
         refreshChips();
         Theme.pop(chipMode);
-        Toast.makeText(this, "agent: " + agent, Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "agent: " + RunHub.agent(), Toast.LENGTH_SHORT).show();
     }
 
     private void refreshChips() {
-        boolean plan = "plan".equals(agent);
+        boolean plan = "plan".equals(RunHub.agent());
         chipMode.setText(plan ? "Plan" : "Build");
         chipMode.setTextColor(getColor(plan ? R.color.accent_light : R.color.ok));
         String[] sel = Models.selected(this);
         chipModel.setText(sel == null ? "model ▾" : sel[1]);
     }
 
-    private void setBusy(boolean b) {
-        busy = b;
-        // P17: the live-edit watch exists ONLY while the agent works.
-        // P19: the live card now EXISTS FROM RUN START ("watching project
-        // files…", pulsing) instead of waiting for the first fs event —
-        // the user must see that the shower is armed even before the
-        // agent's first write lands.
-        if (b) { startEditWatch(); ensureLiveRow(); }
-        else stopEditWatch();
-        ui.post(() -> guarded(b ? "busy on" : "busy off", () -> {
-            if (b) {
-                btnSend.setText("■");
-                btnSend.setTextSize(16);
-                btnSend.setBackgroundResource(R.drawable.bg_stop);
-                btnSend.setTextColor(getColor(R.color.err));
-                tvStatus.setVisibility(View.VISIBLE);
-                tvStatus.setText("working — tap ■ to stop");
-            } else {
-                btnSend.setText("↑");
-                btnSend.setTextSize(22);
-                btnSend.setBackgroundResource(R.drawable.bg_send);
-                btnSend.setTextColor(getColor(R.color.on_accent));
-                tvStatus.setVisibility(View.GONE);
-                // P17: settle the live card (no pulse, collapse timer off) —
-                // it stays as a quiet "N edits · M files" record row.
-                ui.removeCallbacks(liveCollapse);
-                Integer li = idxByKey.get(LIVE_KEY);
-                if (li != null && li < rows.size()) requestPaint(rows.get(li));
-                // P20: a run that died before any thinking arrived can leave
-                // an empty unopenable THINKING card — hide it at settle.
-                purgeEmptyThoughts();
-            }
-            syncTyping();
-        }));
+    /** P25: the BUSY UI only — button, status line, typing dots. The busy
+     *  STATE lives in RunHub (it flips from SSE events, sends, settles —
+     *  with or without this screen). Delivered on main by hubBusy. */
+    private void applyBusyUi(boolean b) {
+        if (b) {
+            btnSend.setText("■");
+            btnSend.setTextSize(16);
+            btnSend.setBackgroundResource(R.drawable.bg_stop);
+            btnSend.setTextColor(getColor(R.color.err));
+            tvStatus.setVisibility(View.VISIBLE);
+            tvStatus.setText("working — tap ■ to stop");
+        } else {
+            btnSend.setText("↑");
+            btnSend.setTextSize(22);
+            btnSend.setBackgroundResource(R.drawable.bg_send);
+            btnSend.setTextColor(getColor(R.color.on_accent));
+            tvStatus.setVisibility(View.GONE);
+        }
+        syncTyping();
     }
-
-    /** P22: pre-busy latch. ensureSession() + validateSelectedModel() do
-     *  real network I/O BEFORE setBusy(true), so a fast double-tap on send
-     *  passed the `busy` gate twice and queued two identical runs (doubled
-     *  tokens, duplicate rows). Released in each worker's finally. */
-    private final java.util.concurrent.atomic.AtomicBoolean sending =
-            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     // ---- P23: blast-radius zero ----------------------------------------
     // The field device died on send with an unhandled Java exception while
@@ -949,373 +909,14 @@ public class ChatActivity extends Activity
         containedCount.put(what, n);
         if (last != null && now - last < 2500) return;   // no note spam
         containedAt.put(what, now);
-        final Row nr = new Row();
-        nr.kind = K_SYS; nr.key = "guarded-" + System.nanoTime();
-        nr.ts = now;
-        nr.text.append("\u26a0 contained an internal error in ").append(what)
-               .append(" — the chat survived; \u2318 \u2192 Logs & shell has the trace");
-        if (n >= 2) nr.text.append('\n').append(Resilience.traceLine(t));
-        ui.post(() -> guarded("containment note", () -> {
-            synchronized (lock) {
-                rows.add(nr); idxByKey.put(nr.key, rows.size() - 1);
-                touchView(nr);
-            }
-            autoscroll();
-        }));
-    }
-
-    private void send() {
-        final String q = input.getText().toString().trim();
-        if (q.isEmpty() || busy || !sending.compareAndSet(false, true)) return;
-        input.setText("");
-        Theme.pop(btnSend); // P8 micro-anim: the send button springs
-        lastUserText = q;
-        runHadOutput = false;
-        ex.execute(() -> {
-            try {
-                String sid = ensureSession();
-                if (sid == null) {
-                    sys("server not healthy yet — try again in a moment (⌘ → Restart server if it persists)");
-                    return;
-                }
-                validateSelectedModel();          // P11: self-heal stale picks
-                lastPartTs = System.currentTimeMillis();
-                setBusy(true);
-                List<String> bodies = buildBodies(q);
-                Api.Resp r = null;
-                boolean modelDropped = false;
-                for (int i = 0; i < bodies.size(); i++) {
-                    // P18: 900s read budget — a long tool loop on a slow
-                    // free model can legitimately out-think the old 300s.
-                    r = Api.post("/session/" + sid + "/message", bodies.get(i), 900_000);
-                    if (r.ok()) {
-                        // P11: variant indices 0–1 still carry the model
-                        // (ma, m); later ones silently lost the pick.
-                        if (i >= 2 && Models.selected(this) != null) modelDropped = true;
-                        break;
-                    }
-                    String failTxt = r.body == null ? "" : r.body;
-                    if (isModelNotFound(failTxt)) break;   // handled below
-                    if (i < bodies.size() - 1
-                            && (r.status == 400 || r.status == 422 || r.status == 500)) {
-                        sys("server rejected the request shape (HTTP " + r.status
-                                + ") — retrying in a plainer form…");
-                        continue;
-                    }
-                    break;
-                }
-                if (r == null || !r.ok()) {
-                    int st = r == null ? 0 : r.status;
-                    String detail = r == null ? "" : Json.findErrorText(Json.parse(r.body), 0);
-                    String raw = r == null ? "" : r.body;
-                    if (isModelNotFound(raw + " " + detail) && !modelFixRetried) {
-                        // P11 self-heal: the saved pick is gone from the
-                        // server's catalog (the free-model lineup rotates).
-                        modelFixRetried = true;
-                        Models.clear(this);
-                        ui.post(this::refreshChips);
-                        sys("⚠ the saved model was rejected by the server "
-                                + "(the free-model lineup rotates) — cleared it; "
-                                + "retrying with the server default…");
-                        sendText(sid, q);
-                        return;
-                    }
-                    err("send failed · HTTP " + st, detail, raw);
-                    setBusy(false);
-                    return;
-                }
-                if (modelDropped)
-                    sys("note: the server ignored the picked model for this "
-                            + "message — it answered with its default model");
-                reconcile(Json.parse(r.body));
-                ui.removeCallbacks(watchdog);
-                ui.postDelayed(watchdog, 2000);
-            } catch (Throwable e) {
-                // P18: the POST timed out but the RUN may still be alive
-                // server-side — never kill it, never say "send failed".
-                // SSE events keep rendering; the watchdog ends busy only
-                // when the feed goes truly silent. NO auto-retry either:
-                // re-POSTing a message the server already accepted would
-                // run the agent twice (doubled tokens — field report #3).
-                // P23: catch(Throwable) — an Error here (OOM, linkage)
-                // used to kill the whole app on send (the field crash).
-                if (Resilience.isSendTimeout(e)) {
-                    sys("⏱ " + Resilience.prettyNetError(e)
-                            + " — still watching the run; tap ■ to stop if nothing moves");
-                    ui.removeCallbacks(watchdog);
-                    ui.postDelayed(watchdog, 1200);
-                } else if (Resilience.isBrokenPipe(e)) {
-                    sys("⚠ " + Resilience.prettyNetError(e)
-                            + " — the sandbox restarts itself; resend this message in a moment");
-                    setBusy(false);
-                } else {
-                    Trail.record(this, "send", e);
-                    sys("send failed · " + Resilience.prettyNetError(e));
-                    setBusy(false);
-                }
-            } finally {
-                sending.set(false);
-            }
-        });
-    }
-
-    /** Fire-and-track the same text again (self-heal / stream-flake retry). */
-    private void sendText(final String sid, final String q) {
-        ex.execute(() -> {
-            try {
-                lastPartTs = System.currentTimeMillis();
-                setBusy(true);
-                List<String> bodies = buildBodies(q);
-                Api.Resp r = null;
-                for (String body : bodies) {
-                    r = Api.post("/session/" + sid + "/message", body, 900_000);
-                    if (r.ok()) break;
-                }
-                if (r == null || !r.ok()) {
-                    err("retry failed · HTTP " + (r == null ? 0 : r.status),
-                            r == null ? "" : Json.findErrorText(Json.parse(r.body), 0),
-                            r == null ? "" : r.body);
-                    setBusy(false);
-                    return;
-                }
-                reconcile(Json.parse(r.body));
-                ui.removeCallbacks(watchdog);
-                ui.postDelayed(watchdog, 2000);
-            } catch (Throwable e) {
-                // P23: Throwable breadth — same rationale as send().
-                if (Resilience.isSendTimeout(e)) {
-                    // same soft landing as send(): the run outlives the HTTP read
-                    sys("⏱ " + Resilience.prettyNetError(e)
-                            + " — still watching the run; tap ■ to stop if nothing moves");
-                    ui.removeCallbacks(watchdog);
-                    ui.postDelayed(watchdog, 1200);
-                } else {
-                    Trail.record(this, "send retry", e);
-                    sys("retry failed · " + Resilience.prettyNetError(e));
-                    setBusy(false);
-                }
-            }
-        });
-    }
-
-    /** Server phrasing for a vanished model (verified P11 LIVE against
-     *  v1.18.25: ProviderModelNotFoundError → "Model not found:
-     *  provider/id. Did you mean: …"). Fires at RUN time (HTTP 200!), so
-     *  both the POST body and streamed errors must match it. */
-    private static boolean isModelNotFound(String s) {
-        if (s == null) return false;
-        String l = s.toLowerCase(Locale.US);
-        return l.contains("model not found") || l.contains("unknown model")
-                || l.contains("providedmodelnotfound");
-    }
-
-    /** True when the error is a transient provider/stream failure that a
-     *  single retry can survive (zen streams 504-idle on mobile networks —
-     *  reproduced live against v1.18.25). */
-    private static boolean isStreamFlake(String s) {
-        if (s == null) return false;
-        String l = s.toLowerCase(Locale.US);
-        return l.contains("upstream idle timeout")
-                || l.contains("streaming response failed")
-                || l.contains("cannot connect")
-                || l.contains("connection reset")
-                || l.contains("econnreset");
-    }
-
-    /** P16: auth-shaped failures — missing/wrong key or the plan wall.
-     *  Loose contains-matching on purpose, same as isModelNotFound; the
-     *  phrasings come from the AI-SDK family the providers use. */
-    private static boolean isKeyError(String s) {
-        if (s == null) return false;
-        String l = s.toLowerCase(Locale.US);
-        return l.contains("401") || l.contains("unauthorized")
-                || l.contains("api key") || l.contains("apikey")
-                || l.contains("402") || l.contains("payment required")
-                || l.contains("no auth credentials")
-                || l.contains("credit balance");
-    }
-
-    /** P11: if the saved model is not in the server's live catalog, drop it
-     *  BEFORE the request instead of failing the send. Empty fetch (server
-     *  hiccup) never clears anything. */
-    private void validateSelectedModel() {
-        String[] sel = Models.selected(this);
-        if (sel == null) return;
-        // P23: the send path must NEVER block on the models.dev HTTPS fetch
-        // (seconds on a cold process — and the catalog parse was the biggest
-        // allocation burst on every first send). Validate against what is
-        // already in memory; refresh in the background for the NEXT send.
-        // A stale pick that slips through still hits the P11 self-heal below
-        // ("Model not found" at run time clears + retries).
-        List<Models.Prov> provs = Models.lastFetch();
-        if (provs == null || provs.isEmpty()) {
-            ex.execute(() -> Resilience.guard(() -> Models.fetch(ChatActivity.this)));
-            return;                          // unknown state → keep the pick
-        }
-        if (!Models.available(provs, sel[0], sel[1])) {
-            Models.clear(this);
-            ui.post(this::refreshChips);
-            sys("⚠ saved model " + sel[0] + "/" + sel[1]
-                    + " is no longer offered by the server — cleared (⌘ → Model to pick another; the free list rotates)");
-        }
-    }
-
-    /**
-     * Candidates in decreasing explicitness, P11 ORDER FIX: model variants
-     * first (ma → m), THEN agent-less/bare. The old order (ma → a → m →
-     * bare) silently DROPPED the user's model on any 4xx — the chat kept
-     * working but the picked model was ignored without a word.
-     */
-    private List<String> buildBodies(String q) {
-        LinkedHashMap<String, String> variants = new LinkedHashMap<>();
-        String text = "{\"type\":\"text\",\"text\":" + Json.quote(q) + "}";
-        String[] sel = Models.selected(this);
-        String model = sel == null ? null
-                : "\"model\":{\"providerID\":" + Json.quote(sel[0])
-                + ",\"modelID\":" + Json.quote(sel[1]) + "}";
-        String ag = "\"agent\":" + Json.quote(agent);
-        String parts = "\"parts\":[" + text + "]";
-        if (model != null) variants.put("ma", "{" + model + "," + ag + "," + parts + "}");
-        if (model != null) variants.put("m", "{" + model + "," + parts + "}");
-        variants.put("a", "{" + ag + "," + parts + "}");
-        variants.put("bare", "{" + parts + "}");
-        return new ArrayList<>(variants.values());
-    }
-
-    private void abortRun() {
-        final String sid = sessionId;
-        sys("■ stop requested");
-        ex.execute(() -> {
-            try {
-                if (sid != null) {
-                    Api.Resp r = Api.call("POST", "/session/" + sid + "/abort", null, 10_000);
-                    if (!r.ok()) sys("abort returned HTTP " + r.status);
-                }
-            } catch (Exception e) {
-                sys("abort failed: " + e);
-            } catch (Throwable e) {
-                Trail.record(this, "abort", e);
-            }
-            setBusy(false);
-        });
-    }
-
-    private String ensureSession() {
-        if (sessionId != null) return sessionId;
-        if (!ServerService.healthy()) return null;
-        try {
-            Api.Resp r = Api.post("/session", "{}", 15_000);
-            if (!r.ok()) return null;
-            Map<String, Object> o = Json.obj(Json.parse(r.body));
-            if (o == null) return null;
-            Map<String, Object> info = Json.map(o, "info");
-            String id = info != null ? Json.str(info, "id") : null;
-            if (id == null) id = Json.str(o, "id");
-            if (id == null) return null;
-            sessionId = id;
-            String t = info != null ? Json.str(info, "title") : null;
-            sessionTitle = (t == null || t.isEmpty()) ? "New chat" : t;
-            ui.post(() -> tvTitle.setText(sessionTitle));
-            return id;
-        } catch (Exception e) {
-            return null;
-        }
+        StringBuilder b = new StringBuilder();
+        b.append("\u26a0 contained an internal error in ").append(what)
+         .append(" — the chat survived; \u2318 \u2192 Logs & shell has the trace");
+        if (n >= 2) b.append('\n').append(Resilience.traceLine(t));
+        RunHub.sys(b.toString());    // P25: a model row — survives screen changes
     }
 
     // ------------------------------------------------- service event feed
-
-    /** ServerService rebroadcasts every parsed /event frame here. */
-    @Override
-    public void onEvent(Map<String, Object> ev) {
-        try {
-            String type = Json.str(ev, "type");
-            Map<String, Object> props = Json.map(ev, "properties");
-            if (props == null) props = new HashMap<>();
-            if ("message.part.updated".equals(type)) {
-                Map<String, Object> part = Json.map(props, "part");
-                if (part != null) {
-                    String pt = Json.str(part, "type");
-                    if (busy && ("text".equals(pt) || "reasoning".equals(pt)))
-                        runHadOutput = true;   // P11: the run produced real output
-                    applyPart(part, null);
-                    // P19 self-heal: parts for OUR session mean a run is
-                    // alive even if we think otherwise — chat opened mid-run,
-                    // or the feed outlived a busy-flag mishap. Re-arm busy
-                    // (streaming render + stop button + the live-edit watch).
-                    String psid = Json.str(part, "sessionID");
-                    if (!busy && sessionId != null && sessionId.equals(psid)
-                            && !isFinishing()) {
-                        setBusy(true);
-                        ui.removeCallbacks(watchdog);
-                        ui.postDelayed(watchdog, 2000);
-                    }
-                }
-            } else if ("message.updated".equals(type)) {
-                applyMessageInfo(Json.map(props, "info"));
-            } else if ("session.updated".equals(type)) {
-                Map<String, Object> info = Json.map(props, "info");
-                if (info != null && sessionId != null
-                        && sessionId.equals(Json.str(info, "id"))) {
-                    String t = Json.str(info, "title");
-                    if (t != null && !t.isEmpty()) {
-                        sessionTitle = t;
-                        ui.post(() -> tvTitle.setText(t));
-                    }
-                }
-            } else if ("session.idle".equals(type)) {
-                String sid = Json.str(props, "sessionID");
-                if (sid == null || sid.equals(sessionId)) setBusy(false);
-            } else if ("session.error".equals(type)) {
-                Map<String, Object> e = Json.map(props, "error");
-                String m = e != null ? Json.str(e, "message") : null;
-                if (m == null) m = Json.findErrorText(props, 0);
-                String raw = String.valueOf(props);
-                if (isModelNotFound(raw + " " + m)) {
-                    // P11 self-heal: run-time Model not found (the POST itself
-                    // returned 200) — drop the stale pick so the NEXT send
-                    // uses the server default instead of failing forever.
-                    Models.clear(this);
-                    ui.post(this::refreshChips);
-                    err("model no longer available", "the picked model was "
-                            + "removed from the server's catalog — selection "
-                            + "cleared, send again (⌘ → Model to choose another)", raw);
-                } else if (busy && !runHadOutput && !flakeRetried
-                        && lastUserText != null && isStreamFlake(raw + " " + m)) {
-                    // P11: zen streams die with 504 idle-timeout on mobile
-                    // networks; retry ONCE when nothing was rendered yet.
-                    flakeRetried = true;
-                    sys("⚠ the model stream dropped (" + nz(m, "network")
-                            + ") — retrying once…");
-                    final String sid = sessionId;
-                    if (sid != null) sendText(sid, lastUserText);
-                    else setBusy(false);
-                } else {
-                    err("session error", m, raw);
-                    // P16: 401/402/api-key failures get the one line the
-                    // user actually needs — WHICH key, and that Zen ≠ Go.
-                    if (isKeyError(raw + " " + m)) {
-                        String[] sel = Models.selected(this);
-                        boolean go = sel != null && "opencode-go".equals(sel[0]);
-                        sys(go
-                                ? "⚠ key problem — this model needs the OpenCode GO "
-                                  + "key (SEPARATE from the Zen key). ⌘ → API keys → OpenCode Go"
-                                : "⚠ key problem — this provider needs its API key "
-                                  + "(⌘ → API keys). OpenCode Zen and Go keys are separate");
-                    }
-                    setBusy(false);
-                }
-            } else if ("permission.asked".equals(type)
-                    || "permission.updated".equals(type)
-                    || "permission.v2.asked".equals(type)
-                    || "permission.v2.updated".equals(type)) {
-                ui.post(() -> guarded("permissions", this::checkPermissionQueue));
-            }
-        } catch (Exception e) {
-            // never let a malformed frame kill the screen
-        } catch (Throwable e) {
-            Trail.record(this, "event", e);
-        }
-    }
 
     /** ServerService state changes → header subtitle. */
     @Override
@@ -1360,25 +961,17 @@ public class ChatActivity extends Activity
             default: s = "server idle";
         }
         if (projectName != null && !projectName.isEmpty()) s = projectName + " · " + s;
-        // P14: the spend line MOVED OUT of the subtitle — it was appended to
-        // a maxLines=1 ellipsized TextView, so the ⇅ tok AND the $ number
-        // (last thing in the string) were the first to be cut off. It now
-        // lives in its own header pill that always shows in full.
-        String spend = spendLine();
+        // P14: the pill lives in its own header slot so nothing is cut off.
+        // P25: the Σ pill now reads as CONTEXT DEPTH — current context vs
+        // the model's window ("48k / 200k · 24%") — computed from the last
+        // turn's token count; the session $ cost stays exactly as verified.
+        String spend = RunHub.ctxPillLine();
         if (tvSpend != null) {
             if (spend.isEmpty()) {
                 tvSpend.setVisibility(View.GONE);
             } else {
                 tvSpend.setVisibility(View.VISIBLE);
-                // spendLine starts with " · " for its subtitle role — strip
-                // it for the pill. P18: the pill now OPENS WITH Σ (it is a
-                // session-SUM, the field report read ⇅ as a live meter "going
-                // up way too much") and keeps the tok unit; tapping it
-                // explains the number and offers a fresh chat when context
-                // gets heavy (listener attached in onCreate).
-                String pill = spend.startsWith(" · ") ? spend.substring(3) : spend;
-                if (pill.startsWith("⇅")) pill = "Σ" + pill.substring(1);
-                tvSpend.setText(pill);
+                tvSpend.setText("Σ " + spend);
             }
         }
         if (!AuthStore.hasAnyKey(this) && st == ServerService.ST_HEALTHY) {
@@ -1388,570 +981,28 @@ public class ChatActivity extends Activity
         syncVeil(st);
     }
 
-    // ------------------------------------------------------------ history
+    // ================================================= P25: live edit tree
+    // The view half of the edit shower. STATE (feed, selection, peek
+    // cache, watcher) lives in RunHub; this renders a COMPACT LIVE TREE:
+    // touched files grouped under their (only-touched) directories, dirs
+    // collapsed unless they carry the freshest activity (or the user
+    // opened them), a hard height cap so huge directories scroll INSIDE
+    // the card instead of flooding the chat.
 
-    private void loadSession(String id) {
-        sessionId = id;
-        modelFixRetried = false;      // P11: fresh chat → fresh self-heal budget
-        flakeRetried = false;
-        runHadOutput = false;
-        lastUserText = null;
-        ui.post(() -> {
-            synchronized (lock) {
-                rows.clear(); idxByKey.clear(); typeCount.clear(); msgs.clear();
-                dirtyRows.clear(); paintScheduled = false;   // P15: no ghost paints
-                paintFails.clear(); quarantined.clear();     // P24: fresh session, fresh paint credit
-                viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
-            }
-            list.removeAllViews();
-            pinnedBottom = true;
-            syncEmpty();
-        });
-        if (id == null) {
-            sessionTitle = "New chat";
-            ui.post(() -> { tvTitle.setText(sessionTitle); refreshChips(); });
-            return;
-        }
-        ex.execute(() -> {
-            try {
-                Api.Resp sl = Api.get("/session");
-                if (sl.ok()) {
-                    List<Object> sarr = Json.arr(Json.parse(sl.body));
-                    if (sarr != null) for (Object o : sarr) {
-                        Map<String, Object> m = Json.obj(o);
-                        if (m != null && id.equals(Json.str(m, "id"))) {
-                            String t = Json.str(m, "title");
-                            if (t != null && !t.isEmpty()) {
-                                sessionTitle = t;
-                                ui.post(() -> tvTitle.setText(t));
-                            }
-                            break;
-                        }
-                    }
-                }
-                Api.Resp r = Api.get("/session/" + id + "/message");
-                if (!r.ok()) { sys("history unavailable · HTTP " + r.status); return; }
-                List<Object> arr = Json.arr(Json.parse(r.body));
-                if (arr == null) return;
-                int from = Math.max(0, arr.size() - 80);
-                for (int i = from; i < arr.size(); i++) {
-                    Map<String, Object> item = Json.obj(arr.get(i));
-                    if (item == null) continue;
-                    Map<String, Object> info = Json.map(item, "info");
-                    if (info == null) info = item;
-                    if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
-                    String role = Json.str(info, "role");
-                    applyMessageInfo(info);
-                    List<Object> parts = Json.list(item, "parts");
-                    if (parts == null) parts = Json.list(info, "parts");
-                    if (parts != null) for (Object p : parts) {
-                        Map<String, Object> pm = Json.obj(p);
-                        if (pm != null) applyPart(pm, role);
-                    }
-                }
-            } catch (Exception e) {
-                sys("history failed: " + e);
-            } catch (Throwable e) {
-                Trail.record(this, "history", e);
-            }
-        });
-    }
-
-    /**
-     * P20 — the "empty thought bubble" killer. The chat unsubscribes from
-     * the event feed in onPause (by design — no background work), but
-     * onResume used to refetch ONLY when the row list was empty, i.e. only
-     * after a full process death. Every part that fired while the screen
-     * was away was lost forever: a reasoning card born just before the
-     * pause stayed empty for good ("i let the app work in background when
-     * i came back i couldnt look into a tought buble it looked empty"),
-     * and whole run segments never rendered.
-     *
-     * Now EVERY resume replays the session from the server's own message
-     * store through the normal upsert pipeline: known parts update in
-     * place, missed parts append in order, and if the run FINISHED while
-     * we were away the chat settles instead of spinning "working" forever.
-     */
-    private void reconcileAfterPause() {
-        final String id = sessionId;
-        if (id == null) return;
-        ex.execute(() -> {
-            try {
-                Api.Resp r = Api.get("/session/" + id + "/message");
-                if (!r.ok()) return;                    // server blip: P18/P19 cover it
-                List<Object> arr = Json.arr(Json.parse(r.body));
-                if (arr == null || arr.isEmpty()) return;
-                // P21: the settle rule, extracted into Resilience so the
-                // REAL server payloads replay through it in the JVM tests.
-                final boolean lastAssistantDone =
-                        Resilience.lastAssistantDoneFrom(arr);
-                int from = Math.max(0, arr.size() - 80);
-                for (int i = from; i < arr.size(); i++) {
-                    if (!id.equals(sessionId)) return;  // user switched sessions mid-replay
-                    Map<String, Object> item = Json.obj(arr.get(i));
-                    if (item == null) continue;
-                    Map<String, Object> info = Json.map(item, "info");
-                    if (info == null) info = item;
-                    if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
-                    String role = Json.str(info, "role");
-                    String mid0 = Json.str(info, "id");
-                    boolean knownMsg = false;
-                    if (mid0 != null) {
-                        synchronized (lock) { knownMsg = msgs.containsKey(mid0); }
-                    }
-                    applyMessageInfo(info);
-                    List<Object> parts = Json.list(item, "parts");
-                    if (parts == null) parts = Json.list(info, "parts");
-                    if (parts == null) continue;
-                    for (Object p : parts) {
-                        Map<String, Object> pm = Json.obj(p);
-                        if (pm == null) continue;
-                        // P21: real v1.18.25 fetches carry messageID on every
-                        // part (rig-verified) — but if a future shape drops
-                        // it, the replay key must STILL match the live key.
-                        // Inject the parent message id before the key math.
-                        if (Json.str(pm, "messageID") == null && mid0 != null) {
-                            pm.put("messageID", mid0);
-                        }
-                        String pid = Json.str(pm, "id");
-                        if (Resilience.stablePartKey(pid)) {
-                            String mid = Json.str(pm, "messageID");
-                            if (mid == null) mid = mid0;
-                            if (mid != null && partWasTrimmed(mid + "|" + pid))
-                                continue;               // ancient, already trimmed
-                        } else if (knownMsg) {
-                            continue;   // pid-less replay can't rebuild the live key
-                        }
-                        applyPart(pm, role);
-                    }
-                }
-                final boolean settle = lastAssistantDone;
-                ui.post(() -> {
-                    if (!settle || !busy || isFinishing()
-                            || !id.equals(sessionId)) return;
-                    setBusy(false);
-                    purgeEmptyThoughts();               // dead empty THINKING cards out
-                    sys("↩ back — the run finished while you were away; "
-                            + "everything it said is right here");
-                });
-            } catch (Exception e) {
-                // offline / still starting: P19's feed self-heal + watchdog cover us
-            } catch (Throwable e) {
-                Trail.record(this, "resume replay", e);
-            }
-        });
-    }
-
-    /** P20: a reasoning part can be born empty (initial blank snapshot)
-     *  and STAY empty when the run dies before any thinking arrives —
-     *  leaving an unopenable "THINKING…" card forever. The TUI hides
-     *  empty thoughts; so do we, at every settle point. */
-    private void purgeEmptyThoughts() {
-        synchronized (lock) {
-            boolean removed = false;
-            for (int i = rows.size() - 1; i >= 0; i--) {
-                Row r = rows.get(i);
-                if (r.kind == K_REASON && r.text.length() == 0) {
-                    forgetKey(r.key);
-                    rows.remove(i);
-                    removed = true;
-                }
-            }
-            if (!removed) return;
-            idxByKey.clear();
-            for (int i = 0; i < rows.size(); i++) {
-                Row r = rows.get(i);
-                if (r.key != null) idxByKey.put(r.key, i);
-            }
-            needFullRender = true;
-            viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
-        }
-        renderAll();
-    }
-
-    /** POST /session/{id}/message response → same pipeline as SSE. */
-    private void reconcile(Object parsed) {
-        try {
-            Map<String, Object> o = Json.obj(parsed);
-            if (o != null) {
-                Map<String, Object> info = Json.map(o, "info");
-                if (info == null && Json.str(o, "role") != null) info = o;
-                if (info != null) {
-                    applyMessageInfo(info);
-                    List<Object> parts = Json.list(o, "parts");
-                    String role = Json.str(info, "role");
-                    if (parts != null) for (Object p : parts) {
-                        Map<String, Object> pm = Json.obj(p);
-                        if (pm != null) applyPart(pm, role);
-                    }
-                    return;
-                }
-            }
-            List<Object> arr = Json.arr(parsed);
-            if (arr == null) return;
-            for (Object it : arr) {
-                Map<String, Object> m = Json.obj(it);
-                if (m == null) continue;
-                Map<String, Object> inf = Json.map(m, "info");
-                if (inf == null) inf = m;
-                applyMessageInfo(inf);
-                List<Object> ps = Json.list(m, "parts");
-                String role = Json.str(inf, "role");
-                if (ps != null) for (Object p : ps) {
-                    Map<String, Object> pm = Json.obj(p);
-                    if (pm != null) applyPart(pm, role);
-                }
-            }
-        } catch (Exception e) {
-            // response shape drift must never break the send path
-        } catch (Throwable e) {
-            Trail.record(this, "reconcile", e);
-        }
-    }
-
-    // ------------------------------------------------------- part routing
-
-    private String roleOf(String mid) {
-        MsgInfo mi = msgs.get(mid);
-        return mi != null && mi.role != null ? mi.role : "assistant";
-    }
-
-    private void applyPart(Map<String, Object> part, String roleHint) {
-        try {
-            String type = Json.str(part, "type");
-            if (type == null) return;
-            String mid = Json.str(part, "messageID");
-            if (mid == null) mid = "m" + Integer.toHexString(System.identityHashCode(part));
-            String pid = Json.str(part, "id");
-            int n;
-            synchronized (lock) { n = mergeCount(mid + "|" + type); }
-            final String key = (pid != null && !pid.isEmpty())
-                    ? mid + "|" + pid : mid + "|" + type + "#" + n;
-            final String role = roleHint != null ? roleHint : roleOf(mid);
-            lastPartTs = System.currentTimeMillis();
-
-            switch (type) {
-                case "text": {
-                    final String t = nz(Json.str(part, "text"), "");
-                    if ("user".equals(role)) upsertUser(key, t);
-                    else upsertText(key, mid, t);
-                    break;
-                }
-                case "reasoning": {
-                    if ("user".equals(role)) break;
-                    upsertReason(key, mid, nz(Json.str(part, "text"), ""));
-                    break;
-                }
-                case "tool":
-                    upsertTool(toolRow(key, part));
-                    captureEditFocus(part);          // P17: peek locator
-                    break;
-                case "patch": upsertTool(patchRow(key, part)); break;
-                case "file": {                       // P17: image parts → bubbles
-                    String mime = Json.str(part, "mime");
-                    String url = Json.str(part, "url");
-                    if (mime != null && mime.startsWith("image/")
-                            && url != null && url.startsWith("data:")) {
-                        upsertImage(key, url, role);
-                    }
-                    break;
-                }
-                default: break; // step-start/-finish, agent, … hidden like the TUI
-            }
-        } catch (Exception e) {
-            // a malformed part must never take the chat down
-        } catch (Throwable e) {
-            Trail.record(this, "part", e);
-        }
-    }
-
-    private int mergeCount(String k) {
-        Integer c = typeCount.get(k);
-        n2 = c == null ? 1 : c + 1;
-        typeCount.put(k, n2);
-        return n2;
-    }
-    private int n2; // scratch for mergeCount (main-thread only)
-
-    // ---------------------------------------------------------- row model
-
-    private final Object lock = new Object();
-
-    private Row rowByKey(String key) {
-        Integer i = idxByKey.get(key);
-        return i == null ? null : rows.get(i);
-    }
-
-    private void upsertUser(String key, String text) {
-        ui.post(() -> guarded("user row", () -> {
-            synchronized (lock) {
-                Row r = rowByKey(key);
-                boolean changed;
-                if (r == null) {
-                    r = new Row();
-                    r.kind = K_USER; r.key = key; r.ts = System.currentTimeMillis();
-                    r.text.append(text);
-                    rows.add(r); idxByKey.put(key, rows.size() - 1);
-                    changed = true;
-                } else {
-                    changed = !text.contentEquals(r.text);
-                    if (changed) { r.text.setLength(0); r.text.append(text); }
-                }
-                if (changed) touchView(r);
-            }
-            autoscroll();
-        }));
-    }
-
-    private void upsertText(String key, String mid, String text) {
-        ui.post(() -> guarded("assistant row", () -> {
-            synchronized (lock) {
-                Row r = rowByKey(key);
-                if (r == null) {
-                    r = new Row();
-                    r.kind = K_ASSISTANT; r.key = key; r.ts = System.currentTimeMillis();
-                    r.text.append(mergeText("", text));
-                    MsgInfo mi = msgs.get(mid);
-                    r.meta = mi == null ? null : mi.meta;
-                    rows.add(r); idxByKey.put(key, rows.size() - 1);
-                    requestPaint(r);
-                } else {
-                    String merged = mergeText(r.text.toString(), text);
-                    boolean changed = !merged.contentEquals(r.text);
-                    if (changed) { r.text.setLength(0); r.text.append(merged); }
-                    MsgInfo mi = msgs.get(mid);
-                    String meta = mi == null ? null : mi.meta;
-                    boolean metaChanged = meta != null && !meta.equals(r.meta);
-                    if (metaChanged) r.meta = meta;
-                    if (changed || metaChanged) requestPaint(r);
-                }
-            }
-            autoscroll();
-        }));
-    }
-
-    private void upsertReason(String key, String mid, String text) {
-        ui.post(() -> guarded("thinking row", () -> {
-            synchronized (lock) {
-                Row r = rowByKey(key);
-                if (r == null) {
-                    r = new Row();
-                    r.kind = K_REASON; r.key = key; r.ts = System.currentTimeMillis();
-                    r.text.append(mergeText("", text));
-                    rows.add(r); idxByKey.put(key, rows.size() - 1);
-                    requestPaint(r);
-                } else {
-                    String merged = mergeText(r.text.toString(), text);
-                    if (!merged.contentEquals(r.text)) {
-                        r.text.setLength(0); r.text.append(merged);
-                        requestPaint(r);
-                    }
-                }
-            }
-            autoscroll();
-        }));
-    }
-
-    private void upsertTool(Row incoming) {
-        ui.post(() -> guarded("tool row", () -> {
-            synchronized (lock) {
-                Row r = rowByKey(incoming.key);
-                boolean changed;
-                if (r == null) {
-                    r = incoming;
-                    rows.add(r); idxByKey.put(r.key, rows.size() - 1);
-                    changed = true;
-                } else {
-                    // P24: Objects.equals — a null status/title on either
-                    // side must count as "changed", never NPE the add path
-                    // (the exact crash class the field keeps finding).
-                    changed = !java.util.Objects.equals(r.status, incoming.status)
-                            || r.input.length() != incoming.input.length()
-                            || r.output.length() != incoming.output.length()
-                            || !java.util.Objects.equals(r.title, incoming.title);
-                    r.tool = incoming.tool; r.status = incoming.status;
-                    r.title = incoming.title;
-                    r.input.setLength(0); r.input.append(incoming.input);
-                    r.output.setLength(0); r.output.append(incoming.output);
-                }
-                if ("error".equals(r.status)) r.open = true; // never hide failures
-                if (changed) requestPaint(r);
-            }
-            autoscroll();
-        }));
-    }
-
-    private Row toolRow(String key, Map<String, Object> part) {
-        Row r = new Row();
-        r.kind = K_TOOL; r.key = key; r.ts = System.currentTimeMillis();
-        r.tool = nz(Json.str(part, "tool"), "call");
-        Map<String, Object> state = Json.map(part, "state");
-        if (state == null) state = part;
-        r.status = nz(Json.str(state, "status"), "");
-        r.title = nz(Json.str(state, "title"), "");
-        Map<String, Object> in = Json.map(state, "input");
-        if (in != null && !in.isEmpty()) {
-            StringBuilder b = new StringBuilder();
-            for (Map.Entry<String, Object> e : in.entrySet()) {
-                String v = String.valueOf(e.getValue());
-                if (v.length() > 2000) v = v.substring(0, 2000) + "…";
-                b.append(e.getKey()).append(": ").append(v).append('\n');
-            }
-            r.input.append(b.toString().trim());
-        }
-        String out = Json.str(state, "output");
-        if (out != null && !out.isEmpty()) r.output.append(out);
-        Map<String, Object> err = Json.map(state, "error");
-        if (err != null) {
-            String em = Json.str(err, "message");
-            if (em == null) em = Json.findErrorText(err, 0);
-            if (em != null && !em.isEmpty()) {
-                if (r.output.length() > 0) r.output.append('\n');
-                r.output.append("✕ ").append(em);
-            }
-        }
-        return r;
-    }
-
-    private Row patchRow(String key, Map<String, Object> part) {
-        Row r = new Row();
-        r.kind = K_TOOL; r.key = key; r.ts = System.currentTimeMillis();
-        r.tool = "patch"; r.status = "completed";
-        List<Object> files = Json.list(part, "files");
-        int n = files == null ? 0 : files.size();
-        r.title = n + " file" + (n == 1 ? "" : "s") + " changed";
-        if (files != null) for (Object f : files) r.output.append(f).append('\n');
-        return r;
-    }
-
-    /**
-     * P17: remember what the edit/write tools just wrote so the live
-     * card's PEEK can center on the exact edited line. The tool input
-     * key names drifted across opencode versions, so every plausible
-     * field is tried — worst case the peek falls back to the tail.
-     */
-    private void captureEditFocus(Map<String, Object> part) {
-        try {
-            String tool = Json.str(part, "tool");
-            if (tool == null || editRoot == null) return;
-            Map<String, Object> state = Json.map(part, "state");
-            if (state == null) state = part;
-            Map<String, Object> in = Json.map(state, "input");
-            if (in == null) return;
-            String path = firstStr(in, "path", "filePath", "file");
-            if (path == null || path.isEmpty()) return;
-            File f = new File(path);
-            String abs = f.isAbsolute() ? f.getAbsolutePath()
-                    : new File(editRoot, path).getAbsolutePath();
-            String snippet = null;
-            if ("edit".equals(tool)) snippet = firstStr(in, "newString", "new_string", "replacement");
-            else if ("write".equals(tool)) snippet = firstStr(in, "content", "text");
-            if (snippet == null || snippet.trim().isEmpty()) return;
-            if (snippet.length() > 400) snippet = snippet.substring(0, 400);
-            synchronized (editFocus) { editFocus.put(abs, snippet); }
-        } catch (Exception ignored) {
-            // a malformed tool part must never take the feed down
-        }
-    }
-
-    private static String firstStr(Map<String, Object> m, String... keys) {
-        for (String k : keys) {
-            String v = Json.str(m, k);
-            if (v != null && !v.isEmpty()) return v;
-        }
-        return null;
-    }
-
-    // ================================================= P17: live edit feed
-    // The user: "live directory changes on the chat app itself … animated
-    // and fluid, doesn't take too much space, only expands when it's
-    // currently being worked on." Event-driven only: DirWatcher runs while
-    // the agent works; the card is ONE row that auto-expands on fresh
-    // edits, self-collapses ~4 s after the last burst, and settles into a
-    // summary when the run ends. No polling anywhere.
-
-    private void startEditWatch() {
-        File dir = ServerService.servingDir();
-        if (dir == null || !dir.isDirectory()) return;
-        if (editWatcher != null && editWatcher.isRunning()
-                && dir.getAbsolutePath().equals(editRoot)) return;
-        editRoot = dir.getAbsolutePath();
-        synchronized (editFeed) { editFeed.clear(); }
-        synchronized (editFocus) { editFocus.clear(); }
-        peekCache.clear();
-        liveWaitingPeek = false;
-        if (editWatcher == null) {
-            editWatcher = new DirWatcher(getMainLooper(), this::onFsChange);
-        }
-        editWatcher.start(dir);
-    }
-
-    private void stopEditWatch() {
-        if (editWatcher != null) editWatcher.stop();
-    }
-
-    /** DirWatcher callback — already on the main looper, already debounced. */
-    private void onFsChange(String path, String action) {
-        if (!busy) return;                    // watcher is being stopped anyway
-        guarded("file watch", () -> {
-            long now = System.currentTimeMillis();
-            synchronized (editFeed) {
-                EditPulse.record(editFeed, editRoot, path, action, now);
-            }
-            peekCache.remove(path);           // stale peek invalidates
-            ensureLiveRow();
-            ui.removeCallbacks(liveCollapse);
-            ui.postDelayed(liveCollapse, EditPulse.ACTIVE_MS + 500);
-            Row r = liveRow();
-            if (r != null) requestPaint(r);
-        });
-    }
-
-    private void collapseLive() {
-        Row r = liveRow();
-        if (r != null) requestPaint(r);
-    }
-
-    private Row liveRow() {
-        synchronized (lock) {
-            Integer i = idxByKey.get(LIVE_KEY);
-            return (i == null || i >= rows.size()) ? null : rows.get(i);
-        }
-    }
-
-    /** Insert the ONE live card row (idempotent). P19: also callable from
-     *  background threads (send() → setBusy(true)) — hops to the main
-     *  looper first, because touchView mutates the view tree. */
-    private void ensureLiveRow() {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            ui.post(this::ensureLiveRow);
-            return;
-        }
-        guarded("live card", () -> {
-        boolean added;
-        synchronized (lock) {
-            if (idxByKey.containsKey(LIVE_KEY)) return;
-            Row r = new Row();
-            r.kind = K_LIVE; r.key = LIVE_KEY; r.ts = System.currentTimeMillis();
-            rows.add(r); idxByKey.put(LIVE_KEY, rows.size() - 1);
-            added = true;
-        }
-        if (added) {
-            Row r = liveRow();
-            if (r != null) touchView(r);      // entrance animation
-            autoscroll();
-        }
-        });
-    }
+    /** Max height of the tree box — beyond this it scrolls in place. */
+    private static final int TREE_MAX_DP = 200;
+    /** Estimated per-row height used to pre-size the scroll cap. */
+    private static final int TREE_ROW_DP = 27;
 
     /** The "edit shower" card — slim while idle, a brief shower while hot.
      *  P19: restyled onto the thought-card surface (the ✦ thinking card's
      *  family — a sibling, not a chat bubble), and when a run ends with
-     *  ZERO edits the row collapses to nothing (no empty records). */
+     *  ZERO edits the row collapses to nothing (no empty records).
+     *  P25: the shower is a COMPACT LIVE TREE — touched files grouped
+     *  under their directories, height-capped, scrolling inside the card. */
     private View buildLiveView() {
-        boolean settled = !busy;
-        boolean empty;
-        synchronized (editFeed) { empty = editFeed.isEmpty(); }
+        boolean settled = !RunHub.busy();
+        boolean empty = RunHub.liveCount() == 0;
         if (settled && empty) {
             View ghost = new View(this);
             ghost.setVisibility(View.GONE);
@@ -1961,9 +1012,8 @@ public class ChatActivity extends Activity
             ghost.setLayoutParams(glp);
             return ghost;
         }
-        boolean hot;
-        synchronized (editFeed) { hot = EditPulse.hot(editFeed, System.currentTimeMillis()); }
-        boolean expanded = liveOpen != null ? liveOpen : (hot && !settled);
+        boolean hot = RunHub.liveHot();
+        boolean expanded = RunHub.liveOpen != null ? RunHub.liveOpen : (hot && !settled);
 
         if (livePulseAnim != null) { livePulseAnim.cancel(); livePulseAnim = null; }
 
@@ -1995,15 +1045,7 @@ public class ChatActivity extends Activity
         sum.setPadding(dp(8), 0, 0, 0);
         sum.setSingleLine(true);
         sum.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-        java.util.List<EditPulse.Ev> top;
-        String sumText;
-        synchronized (editFeed) {
-            top = EditPulse.picks(editFeed, EditPulse.MAX_SHOWN);
-            sumText = editFeed.isEmpty() ? "watching project files…"
-                    : EditPulse.summary(editFeed)
-                            + (top.isEmpty() ? "" : "  ·  " + top.get(0).rel);
-        }
-        sum.setText(sumText);
+        sum.setText(RunHub.liveSummaryLine(settled));
         head.addView(sum, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
@@ -2013,50 +1055,52 @@ public class ChatActivity extends Activity
         head.addView(chev);
         c.addView(head);
 
-        // ---- shower: newest-first file rows, staggered entrance
+        // ---- the live tree: dirs collapsed, touched paths expanded,
+        //      hard height cap — huge directories scroll INSIDE the card
         if (expanded) {
+            List<EditPulse.TNode> tree = RunHub.liveTree();
+            String newest = RunHub.liveNewest();
+            java.util.Set<String> autoOpen = autoOpenDirs(tree, newest);
+
             LinearLayout box = new LinearLayout(this);
             box.setOrientation(LinearLayout.VERTICAL);
             box.setPadding(dp(2), dp(4), 0, 0);
-            int d = 0;
+            int[] stagger = {0};
             boolean motion = Theme.motionOn(this);
-            for (EditPulse.Ev e : top) {
-                View row = liveFileRow(e);
-                box.addView(row);
-                if (!e.seen && motion) {          // only NEW events animate —
-                    row.setAlpha(0f);             // repaints never replay
-                    row.setTranslationY(dp(8));
-                    row.animate().alpha(1f).translationY(0f)
-                            .setStartDelay(d).setDuration(170)
-                            .setInterpolator(Theme.DECEL).start();
-                    d += 45;
-                }
-                e.seen = true;
-            }
-            c.addView(box);
+            renderTreeNodes(box, tree, 0, newest, autoOpen, motion, stagger);
+
+            ScrollView sc = new ScrollView(this);
+            sc.setVerticalScrollBarEnabled(false);
+            sc.addView(box);
+            // cap: rows beyond ~TREE_MAX_DP scroll inside the card
+            int rows = countNodes(tree, autoOpen);
+            int capRows = Math.max(3, TREE_MAX_DP / TREE_ROW_DP);
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    rows > capRows ? dp(TREE_MAX_DP)
+                            : ViewGroup.LayoutParams.WRAP_CONTENT);
+            sc.setLayoutParams(tlp);
+            c.addView(sc);
 
             // ---- the peek: the exact edited region, never the full file
-            if (liveSelPath != null) {
+            String sel = RunHub.liveSel();
+            if (sel != null) {
                 TextView pv = mono(text(10, R.color.text_primary, false), 10);
                 pv.setBackgroundResource(R.drawable.bg_code);
                 int pp = dp(9);
                 pv.setPadding(pp, pp, pp, pp);
                 pv.setSingleLine(false);
-                String cached = peekCache.get(liveSelPath);
+                String cached = RunHub.peekFor(sel);
                 if (cached != null) {
                     pv.setText(cached);
-                    liveWaitingPeek = false;
                 } else {
                     pv.setText("…");
-                    if (!liveWaitingPeek) {
-                        liveWaitingPeek = true;
-                        loadPeek(liveSelPath);
-                    }
+                    RunHub.ensurePeek(sel);
                 }
                 LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT);
-                plp.topMargin = dp(6);
+                plp.topMargin = dp(8);
                 pv.setLayoutParams(plp);
                 c.addView(pv);
             }
@@ -2065,26 +1109,139 @@ public class ChatActivity extends Activity
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(6);
+        lp.topMargin = dp(8);
         c.setLayoutParams(lp);
         Theme.press(c);
         head.setOnClickListener(v -> {
-            liveOpen = expanded ? Boolean.FALSE : Boolean.TRUE;
+            RunHub.liveOpen = expanded ? Boolean.FALSE : Boolean.TRUE;
             lastToggled = LIVE_KEY;
-            Row r = liveRow();
+            RunHub.Row r = rowByKey(LIVE_KEY);
             if (r != null) touchView(r);
         });
         return c;
     }
 
-    /** One file row inside the shower — tap to peek around the edit. */
-    private View liveFileRow(final EditPulse.Ev e) {
+    /** Dirs the user has NOT explicitly toggled follow the freshest
+     *  activity: the newest event's ancestor chain is expanded, sibling
+     *  dirs stay collapsed ("directories collapsed, only touched paths
+     *  expanded"). Pure given the tree. */
+    private java.util.Set<String> autoOpenDirs(List<EditPulse.TNode> tree, String newest) {
+        java.util.Set<String> out = new java.util.HashSet<>();
+        if (newest == null) return out;
+        collectAutoOpen(tree, newest, out);
+        return out;
+    }
+
+    private void collectAutoOpen(List<EditPulse.TNode> nodes, String newest,
+                                 java.util.Set<String> out) {
+        for (EditPulse.TNode n : nodes) {
+            if (n.ev != null && newest.equals(n.ev.abs)) {
+                out.addAll(EditPulse.ancestors(n.ev.rel));
+            } else if (n.ev == null && !n.kids.isEmpty()) {
+                collectAutoOpen(n.kids, newest, out);
+            }
+        }
+    }
+
+    /** A dir is open when the user toggled it, else auto (newest branch). */
+    private boolean dirOpen(EditPulse.TNode d, java.util.Set<String> autoOpen) {
+        Boolean st = dirState.get(d.dir);
+        return st != null ? st : autoOpen.contains(d.dir);
+    }
+
+    private void renderTreeNodes(LinearLayout into, List<EditPulse.TNode> nodes,
+                                 int depth, String newest,
+                                 java.util.Set<String> autoOpen,
+                                 boolean motion, int[] stagger) {
+        for (EditPulse.TNode n : nodes) {
+            if (n.ev != null) {
+                View row = liveFileRow(n.ev, depth, newest);
+                into.addView(row);
+                if (!n.ev.seen && motion) {          // only NEW events animate
+                    row.setAlpha(0f);                // repaints never replay
+                    row.setTranslationY(dp(8));
+                    row.animate().alpha(1f).translationY(0f)
+                            .setStartDelay(stagger[0]).setDuration(170)
+                            .setInterpolator(Theme.DECEL).start();
+                    stagger[0] = Math.min(stagger[0] + 45, 270);
+                }
+                n.ev.seen = true;
+            } else {
+                into.addView(dirRowView(n, depth, autoOpen));
+                if (dirOpen(n, autoOpen)) {
+                    renderTreeNodes(into, n.kids, depth + 1, newest,
+                            autoOpen, motion, stagger);
+                }
+            }
+        }
+    }
+
+    private int countNodes(List<EditPulse.TNode> nodes, java.util.Set<String> autoOpen) {
+        int n = 0;
+        for (EditPulse.TNode t : nodes) {
+            n++;
+            if (t.ev == null && dirOpen(t, autoOpen)) n += countNodes(t.kids, autoOpen);
+        }
+        return n;
+    }
+
+    /** One directory row inside the tree — tap toggles expand/collapse. */
+    private View dirRowView(final EditPulse.TNode d, int depth,
+                            final java.util.Set<String> autoOpen) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        int rp = dp(6);
+        int rp = dp(6 + depth * 12);
         row.setPadding(rp, dp(3), rp, dp(3));
-        boolean sel = e.abs != null && e.abs.equals(liveSelPath);
+
+        TextView chev = text(10, R.color.text_secondary, false);
+        chev.setText(dirOpen(d, autoOpen) ? "▾" : "▸");
+        chev.setPadding(0, 0, dp(5), 0);
+        row.addView(chev);
+
+        TextView name = mono(text(11, R.color.text_secondary, false), 11);
+        String seg = d.dir;
+        int sl = seg.lastIndexOf('/');
+        if (sl >= 0) seg = seg.substring(sl + 1);
+        name.setText(seg + "/");
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        row.addView(name, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView n = text(10, R.color.text_secondary, false);
+        n.setPadding(dp(6), 0, 0, 0);
+        n.setText("· " + d.hits + (d.hits == 1 ? " edit" : " edits"));
+        row.addView(n);
+
+        Theme.press(row);
+        row.setOnClickListener(v -> {
+            dirState.put(d.dir, !dirOpen(d, autoOpen));
+            capDirState();
+            RunHub.Row r = rowByKey(LIVE_KEY);
+            if (r != null) touchView(r);
+        });
+        return row;
+    }
+
+    /** dirState is view-local preference memory — bounded like everything. */
+    private void capDirState() {
+        while (dirState.size() > 64) {
+            String first = dirState.keySet().iterator().next();
+            dirState.remove(first);
+        }
+    }
+
+    /** One file row inside the tree — tap to peek around the edit.
+     *  P25: the NEWEST event's row is auto-highlighted; depth indents. */
+    private View liveFileRow(final EditPulse.Ev e, int depth, String newest) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        int rp = dp(6 + depth * 12);
+        row.setPadding(rp, dp(3), rp, dp(3));
+        boolean sel = e.abs != null && e.abs.equals(RunHub.liveSel());
+        boolean isNewest = e.abs != null && e.abs.equals(newest);
         if (sel) row.setBackgroundResource(R.drawable.bg_code);
         else row.setBackground(null);
 
@@ -2110,54 +1267,20 @@ public class ChatActivity extends Activity
         age.setText(relTime((System.currentTimeMillis() - e.ts) / 1000.0));
         row.addView(age);
 
+        if (isNewest) {
+            TextView fresh = text(9, 0xFF9DB1FF, true);
+            fresh.setPadding(dp(5), 0, 0, 0);
+            fresh.setText("●");
+            row.addView(fresh);
+        }
+
         Theme.press(row);
         row.setOnClickListener(v -> {
-            liveSelPath = (liveSelPath != null && liveSelPath.equals(e.abs))
+            String next = (RunHub.liveSel() != null && RunHub.liveSel().equals(e.abs))
                     ? null : e.abs;
-            if (liveSelPath != null) liveOpen = Boolean.TRUE;
-            Row r = liveRow();
-            if (r != null) touchView(r);
+            RunHub.setLiveSel(next);
         });
         return row;
-    }
-
-    /** Load the peek window off-thread — a bounded, line-numbered slice. */
-    private void loadPeek(final String abs) {
-        final String focus;
-        synchronized (editFocus) { focus = editFocus.get(abs); }
-        String action;
-        synchronized (editFeed) {
-            EditPulse.Ev ev = editFeed.get(abs);
-            action = ev == null ? "mod" : ev.action;
-        }
-        final boolean deleted = "del".equals(action);
-        ex.execute(() -> {
-            String text;
-            if (deleted) {
-                text = "  (deleted)";
-            } else {
-                try {
-                    File f = new File(abs);
-                    if (f.length() > 2_000_000) {
-                        text = "  (file too large to peek — open it in Files)";
-                    } else {
-                        try (FileInputStream fin = new FileInputStream(f)) {
-                            String content = Api.readAll(fin);
-                            text = EditPulse.peek(content, focus, EditPulse.PEEK_LINES);
-                        }
-                    }
-                } catch (Exception e2) {
-                    text = "  (can't peek: " + e2.getMessage() + ")";
-                }
-            }
-            final String t = text;
-            ui.post(() -> guarded("peek paint", () -> {
-                peekCache.put(abs, t);
-                liveWaitingPeek = false;
-                Row r = liveRow();
-                if (r != null) requestPaint(r);
-            }));
-        });
     }
 
     // ================================================= P17: vision / images
@@ -2224,204 +1347,13 @@ public class ChatActivity extends Activity
         });
     }
 
-    /** The full vision send: native attach first, free-model describer second. */
+    /** The full vision send — P25: the network half lives in RunHub now,
+     *  so an in-flight screenshot send also outlives this screen. */
     private void attachImage(final File jpg, final String caption) {
-        if (busy || !sending.compareAndSet(false, true)) {
-            sys("wait for the current run to finish, then resend");
-            return;
-        }
-        final String key = "img" + System.currentTimeMillis();
-        final String cap2 = (caption == null || caption.isEmpty())
-                ? "what do you see here?" : caption;
-        // user-side image bubble FIRST — instant feedback
-        upsertImage(key, null, jpg.getAbsolutePath(), cap2, "user");
-        ex.execute(() -> {
-            try {
-                String sid = ensureSession();
-                if (sid == null) {
-                    sys("server not healthy yet — try again in a moment");
-                    return;
-                }
-                validateSelectedModel();
-                byte[] bytes = java.nio.file.Files.readAllBytes(jpg.toPath());
-                String dataUrl = Vision.dataUrl(bytes);
-                lastUserText = cap2;
-                runHadOutput = false;
-                lastPartTs = System.currentTimeMillis();
-                setBusy(true);
-
-                // ---- path 1: the server's own file part (raw pixels)
-                Api.Resp r = null;
-                for (String body : buildImageBodies(cap2, dataUrl)) {
-                    r = Api.post("/session/" + sid + "/message", body, 300_000);
-                    if (r.ok()) break;
-                }
-                if (r != null && r.ok()) {
-                    sys("◉ screenshot attached — the agent sees the pixels");
-                    reconcile(Json.parse(r.body));
-                    ui.removeCallbacks(watchdog);
-                    ui.postDelayed(watchdog, 2000);
-                    return;
-                }
-
-                // ---- path 2: a FREE vision model describes it (keyless ok)
-                sys("◉ asking a free vision model to look at it…");
-                String bearer = Vision.zenKey(this);
-                IOException last = null;
-                for (int i = 0; i < Vision.CANDIDATES.length; i++) {
-                    String[] m = Vision.modelAt(i);
-                    try {
-                        String desc = Vision.describe(m[1], Vision.prompt(cap2),
-                                bytes, bearer, 45_000);
-                        sys("◉ " + m[1] + " saw the screenshot — feeding the agent");
-                        sendText(sid, cap2 + "\n\n[screenshot shared by the user"
-                                + " · vision via " + m[0] + "/" + m[1] + "]\n" + desc);
-                        return;
-                    } catch (IOException e2) {
-                        last = e2;               // rotate to the next free model
-                    }
-                }
-                err("vision failed", last == null ? "no model answered" : last.getMessage(),
-                        last == null ? "" : String.valueOf(last));
-                setBusy(false);
-            } catch (Exception e) {
-                sys("screenshot send failed: " + e);
-                setBusy(false);
-            } catch (Throwable e) {
-                Trail.record(this, "screenshot send", e);
-                sys("screenshot send hit an internal error — contained");
-                setBusy(false);
-            } finally {
-                sending.set(false);
-            }
-        });
+        RunHub.sendImage(jpg, caption);
     }
-
-    /** buildBodies' sibling: text + image file part, same variant ladder. */
-    private List<String> buildImageBodies(String caption, String dataUrl) {
-        LinkedHashMap<String, String> variants = new LinkedHashMap<>();
-        String text = "{\"type\":\"text\",\"text\":" + Json.quote(caption) + "}";
-        String file = "{\"type\":\"file\",\"mime\":\"image/jpeg\",\"url\":"
-                + Json.quote(dataUrl) + "}";
-        String[] sel = Models.selected(this);
-        String model = sel == null ? null
-                : "\"model\":{\"providerID\":" + Json.quote(sel[0])
-                + ",\"modelID\":" + Json.quote(sel[1]) + "}";
-        String ag = "\"agent\":" + Json.quote(agent);
-        String parts = "\"parts\":[" + text + "," + file + "]";
-        if (model != null) variants.put("ma", "{" + model + "," + ag + "," + parts + "}");
-        if (model != null) variants.put("m", "{" + model + "," + parts + "}");
-        variants.put("a", "{" + ag + "," + parts + "}");
-        variants.put("bare", "{" + parts + "}");
-        return new ArrayList<>(variants.values());
-    }
-
-    /** Upsert an image row (SSE/history: dataUrl; local: pre-decoded path). */
-    private void upsertImage(String key, String dataUrl, String role) {
-        upsertImage(key, dataUrl, null, "", role);
-    }
-
-    private void upsertImage(String key, String dataUrl, String localPath,
-                             String caption, String role) {
-        ui.post(() -> {
-            Row r;
-            boolean added;
-            synchronized (lock) {
-                r = rowByKey(key);
-                if (r == null) {
-                    r = new Row();
-                    r.kind = K_IMAGE; r.key = key;
-                    r.ts = System.currentTimeMillis();
-                    r.tool = role;                        // alignment marker
-                    r.text.append(caption == null ? "" : caption);
-                    rows.add(r); idxByKey.put(key, rows.size() - 1);
-                    added = true;
-                } else {
-                    added = false;
-                    if (caption != null && !caption.isEmpty()
-                            && !caption.contentEquals(r.text)) {
-                        r.text.setLength(0);
-                        r.text.append(caption);
-                        requestPaint(r);
-                    }
-                }
-            }
-            if (added) {
-                if (dataUrl != null) decodeDataUrl(r, dataUrl);
-                else if (localPath != null) {
-                    r.title = localPath;
-                    decodeLocalImage(r, localPath);
-                    touchView(r);
-                    autoscroll();
-                }
-            }
-        });
-    }
-
-    /** data:<mime>;base64,<payload> → cache file → bubble bitmap. */
-    private void decodeDataUrl(Row r, String dataUrl) {
-        ex.execute(() -> {
-            try {
-                int comma = dataUrl.indexOf(',');
-                String header = comma > 0 ? dataUrl.substring(5, comma) : "image/jpeg";
-                String ext = header.contains("png") ? "png" : "jpg";
-                File dir = new File(getCacheDir(), "vision");
-                if (!dir.isDirectory()) dir.mkdirs();
-                File f = new File(dir, "msg-" + Integer.toHexString(r.key.hashCode())
-                        + "." + ext);
-                if (f.isFile() && f.length() > 0) {
-                    // P21: a resume replay re-delivers the SAME data: URL —
-                    // the cache file from the first decode is still good.
-                    // Skip the multi-MB base64 → byte[] → bitmap pipeline
-                    // (three copies of every image re-allocated on EVERY
-                    // return was an LMKD invitation).
-                    r.title = f.getAbsolutePath();
-                    decodeLocalImage(r, f.getAbsolutePath());
-                    ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) touchView(rr); });
-                    return;
-                }
-                String payload = comma > 0 ? dataUrl.substring(comma + 1) : "";
-                if (payload.length() > 12_000_000) throw new IOException("image too large");
-                byte[] bytes = java.util.Base64.getDecoder().decode(payload);
-                try (FileOutputStream fo = new FileOutputStream(f)) {
-                    fo.write(bytes);
-                }
-                r.title = f.getAbsolutePath();
-                decodeLocalImage(r, f.getAbsolutePath());
-                ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) touchView(rr); });
-            } catch (Exception e) {
-                ui.post(() -> sys("image part could not be decoded: " + e.getMessage()));
-            } catch (Throwable e) {
-                Trail.record(this, "image decode", e);
-            }
-        });
-    }
-
-    private void decodeLocalImage(final Row r, final String path) {
-        synchronized (failedImgs) {
-            if (failedImgs.contains(r.key)) return;
-        }
-        synchronized (imageCache) {
-            if (imageCache.get(r.key) != null) {
-                // P21: still in the LRU → no re-decode, just repaint.
-                ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) requestPaint(rr); });
-                return;
-            }
-        }
-        ex.execute(() -> guarded("image decode", () -> {
-            Bitmap bm = Vision.decodeBounded(path, 1024);
-            if (bm == null) {
-                synchronized (failedImgs) { failedImgs.add(r.key); }
-                ui.post(() -> sys("image could not be decoded"));
-                return;
-            }
-            synchronized (imageCache) { imageCache.put(r.key, bm); }
-            ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) requestPaint(rr); });
-        }));
-    }
-
     /** The image bubble — rounded frame, caption, tap for the big view. */
-    private View buildImageView(Row r) {
+    private View buildImageView(RunHub.Row r) {
         boolean user = "user".equals(r.tool);
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
@@ -2439,7 +1371,7 @@ public class ChatActivity extends Activity
         int ip = dp(4);
         iv.setPadding(ip, ip, ip, ip);
         Bitmap bm;
-        synchronized (imageCache) { bm = imageCache.get(r.key); }
+        synchronized (RunHub.imageCache) { bm = RunHub.imageCache.get(r.key); }
         if (bm != null && !bm.isRecycled()) {
             iv.setImageBitmap(bm);
         } else {
@@ -2447,12 +1379,10 @@ public class ChatActivity extends Activity
             iv.setScaleType(ImageView.ScaleType.CENTER);
             iv.setImageResource(android.R.drawable.ic_menu_report_image);
             if (r.title != null) {
-                synchronized (failedImgs) {
-                    if (!failedImgs.contains(r.key)) decodeLocalImage(r, r.title);
-                }
+                RunHub.retryDecode(r);
             }
         }
-        final Row fr = r;
+        final RunHub.Row fr = r;
         iv.setOnClickListener(v -> showImage(fr));
         wrap.addView(iv);
 
@@ -2467,9 +1397,9 @@ public class ChatActivity extends Activity
     }
 
     /** Full-screen viewer for a chat image. */
-    private void showImage(Row r) {
+    private void showImage(RunHub.Row r) {
         Bitmap bm;
-        synchronized (imageCache) { bm = imageCache.get(r.key); }
+        synchronized (RunHub.imageCache) { bm = RunHub.imageCache.get(r.key); }
         if (bm == null || bm.isRecycled()) return;
         ImageView big = new ImageView(this);
         big.setImageBitmap(bm);
@@ -2481,146 +1411,43 @@ public class ChatActivity extends Activity
                 .show();
     }
 
-    /** SSE sends full part state; adopt the growth, ignore truncations. */
-    private static String mergeText(String cur, String next) {
-        if (cur == null || cur.isEmpty()) return next;
-        if (next == null) return cur;
-        if (next.equals(cur)) return cur;
-        if (next.startsWith(cur)) return next;   // grew
-        if (cur.startsWith(next)) return cur;    // truncated echo
-        return next;                              // changed → replace
-    }
-
-    private void applyMessageInfo(Map<String, Object> info) {
-        if (info == null) return;
-        String mid = Json.str(info, "id");
-        if (mid == null) return;
-        String role = Json.str(info, "role");
-        synchronized (lock) {
-            MsgInfo mi = msgs.get(mid);
-            if (mi == null) { mi = new MsgInfo(); msgs.put(mid, mi); }
-            if (role != null) mi.role = role;
-        }
-        Map<String, Object> tk = Json.map(info, "tokens");
-        long total = 0;
-        if (tk != null) {
-            total += num(tk.get("input")) + num(tk.get("output"))
-                    + num(tk.get("reasoning"));
-            Map<String, Object> cache = Json.map(tk, "cache");
-            if (cache != null) total += num(cache.get("read")) + num(cache.get("write"));
-        }
-        Object costO = info.get("cost");
-        double cost = (costO instanceof Number) ? ((Number) costO).doubleValue() : 0;
-        String meta = null;
-        if (total > 0 || cost > 0) {
-            StringBuilder b = new StringBuilder("⇅ ");
-            b.append(total >= 1000
-                    ? String.format(Locale.US, "%.1fk", total / 1000.0)
-                    : String.valueOf(total)).append(" tok");
-            if (cost > 0) b.append(String.format(Locale.US, " · $%.4f", cost));
-            meta = b.toString();
-        }
-        // P12: session-wide spend line — “how much money it used” for the
-        // WHOLE conversation, not just one message (per-message cost stays
-        // on the row). The server sends cumulative per-message values, so
-        // store (not accumulate) and re-sum.
-        final double fCost = cost;
-        final long fTok = total;
-        final boolean hasSpend = total > 0 || cost > 0;
-        if (hasSpend && "assistant".equals(role)) lastAssistantTok = fTok;   // P18
-        Map<String, Object> e = Json.map(info, "error");
-        final String fErrName = e != null
-                ? nz(Json.str(e, "name"), "error") : null;
-        final String fErrMsg = e != null
-                ? nz(Json.str(e, "message"), Json.findErrorText(e, 0)) : null;
-        // P11: message-level Model-not-found also self-heals (this is the
-        // path ProviderModelNotFoundError usually arrives through). Clearing
-        // is idempotent, so repeats are harmless.
-        if (fErrMsg != null && isModelNotFound(fErrMsg)) {
-            Models.clear(this);
-            ui.post(this::refreshChips);
-        }
-
-        final String fMid = mid;
-        final String fMeta = meta;
-        if (meta != null || e != null) ui.post(() -> guarded("message info", () -> {
-            boolean showError;
-            synchronized (lock) {
-                MsgInfo mi = msgs.get(fMid);
-                if (mi != null && fMeta != null) mi.meta = fMeta;
-                if (mi != null && hasSpend) { mi.cost = fCost; mi.tok = fTok; }
-                showError = mi != null && !mi.errorShown && fErrName != null;
-                if (showError) mi.errorShown = true;
-                if (fMeta != null) {
-                    for (int i = rows.size() - 1; i >= 0; i--) {
-                        Row r = rows.get(i);
-                        if (r.kind == K_ASSISTANT && r.key != null
-                                && r.key.startsWith(fMid + "|")) {
-                            if (!fMeta.equals(r.meta)) { r.meta = fMeta; requestPaint(r); }
-                            break;
-                        }
-                    }
-                }
-            }
-            if (hasSpend) ui.post(this::refreshServerUi);
-            if (showError) {
-                err("✕ " + fErrName, fErrMsg == null ? "" : fErrMsg, String.valueOf(info));
-                setBusy(false);
-            }
-        }));
-    }
-
-    /** P12: ⇅ tokens + $ cost summed over the session's messages. */
-    private String spendLine() {
-        long tok = 0;
-        double cost = 0;
-        synchronized (lock) {
-            for (MsgInfo mi : msgs.values()) { tok += mi.tok; cost += mi.cost; }
-        }
-        if (tok <= 0 && cost <= 0) return "";
-        StringBuilder b = new StringBuilder(" · ⇅ ");
-        b.append(Resilience.fmtTok(tok)).append(" tok");
-        if (cost > 0) b.append(String.format(Locale.US, " · $%.4f", cost));
-        return b.toString();
-    }
-
-    /** P18: tap the Σ pill → what this number actually is. The field
-     *  report (“the counter at top.. what is it? its going up way too
-     *  much”) is really two things: an unlabeled cumulative meter, and
-     *  context that grows every turn — each turn re-sends the whole chat,
-     *  so late-session turns cost multiples of early ones. Explain both,
-     *  and when the context is heavy offer the one-button fix: a fresh
-     *  chat resets per-turn cost without touching history on disk. */
+    /** P18/P25: tap the Σ pill → what this number actually is. The pill
+     *  is CONTEXT DEPTH now — how full the model's window is — computed
+     *  from the last turn's token count; "$" stays the session's total
+     *  billed cost. When the window is heavy the one-button fix is here:
+     *  a fresh chat resets per-turn cost without touching history. */
     private void spendPopover() {
-        long sum; double sumCost; long lastTok;
-        synchronized (lock) {
-            long t = 0; double c = 0;
-            for (MsgInfo mi : msgs.values()) { t += mi.tok; c += mi.cost; }
-            sum = t; sumCost = c; lastTok = lastAssistantTok;
-        }
-        if (sum <= 0 && sumCost <= 0) return;
+        long sumTok = RunHub.sessionTok();
+        double sumCost = RunHub.sessionCost();
+        long lastTok;
+        synchronized (lock) { lastTok = RunHub.tx().lastAssistantTok; }
+        if (sumTok <= 0 && sumCost <= 0) return;
         StringBuilder m = new StringBuilder();
-        m.append("Σ is this chat's TOTAL token use — it only ever goes up. ")
-         .append("Every message you send re-reads the whole conversation, ")
-         .append("so the total climbs even when replies are short. “$” is ")
-         .append("what the provider billed for all of it.\n\n");
+        m.append("The meter is CONTEXT DEPTH: how much of the model's ")
+         .append("window this conversation already fills. Every new turn ")
+         .append("re-reads the whole chat, so depth is what each NEW turn ")
+         .append("costs before the model writes a single word. \"$\" is ")
+         .append("what the provider billed for the whole session so far.\n\n");
+        long limit = Models.contextLimitFor(Models.lastFetch(),
+                RunHub.selProviderPub(), RunHub.selModelPub());
         if (lastTok > 0) {
-            m.append("Depth: the conversation is now ~")
-             .append(Resilience.fmtTok(lastTok))
-             .append(" tokens deep — that's what every NEW turn costs ")
-             .append("before the model writes a single word.\n\n");
+            m.append("Now: ~").append(Resilience.fmtTok(lastTok));
+            if (limit > 0) m.append(" of ").append(Resilience.fmtTok(limit));
+            m.append(" tokens in the window.\n\n");
         }
         String verdict = Resilience.contextVerdict(lastTok);
-        boolean heavy = lastTok >= 50_000;
+        boolean heavy = limit > 0 ? lastTok * 100 / limit >= 50 : lastTok >= 50_000;
         if (!verdict.isEmpty()) m.append(verdict).append("\n");
         AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle("Σ " + Resilience.fmtTok(sum) + " tok · "
-                        + Resilience.fmtCost(sumCost))
+                .setTitle("Σ " + (Resilience.contextMeter(lastTok, limit).isEmpty()
+                        ? Resilience.fmtCost(sumCost)
+                        : Resilience.contextMeter(lastTok, limit)
+                          + (sumCost > 0 ? " · " + Resilience.fmtCost(sumCost) : "")))
                 .setMessage(m)
                 .setPositiveButton("Got it", null);
         if (heavy) {
             b.setNegativeButton("＋ Fresh chat", (d, w) -> {
-                loadSession(null);
+                RunHub.loadSession(null);
                 sys("＋ fresh chat — the context (and per-turn cost) just reset; "
                         + "the old chat is still in Sessions");
             });
@@ -2629,36 +1456,11 @@ public class ChatActivity extends Activity
     }
 
     private void sys(String s) {
-        Row r = new Row();
-        r.kind = K_SYS; r.key = "sys-" + System.nanoTime(); r.ts = System.currentTimeMillis();
-        r.text.append(s);
-        ui.post(() -> guarded("sys row", () -> {
-            synchronized (lock) {
-                rows.add(r); idxByKey.put(r.key, rows.size() - 1);
-                touchView(r);
-            }
-            autoscroll();
-        }));
+        RunHub.sys(s);     // P25: a model row — survives screen changes
     }
 
     private void err(String title, String detail, String raw) {
-        Row r = new Row();
-        r.kind = K_ERR; r.key = "err-" + System.nanoTime(); r.ts = System.currentTimeMillis();
-        r.text.append(title);
-        if (detail != null && !detail.isEmpty()) r.output.append(detail);
-        if (raw != null && !raw.isEmpty()) {
-            if (r.output.length() > 0) r.output.append("\n----\n");
-            String rawT = raw.length() > 3000 ? raw.substring(0, 3000) + "…" : raw;
-            r.output.append(rawT);
-        }
-        r.open = true;
-        ui.post(() -> guarded("err row", () -> {
-            synchronized (lock) {
-                rows.add(r); idxByKey.put(r.key, rows.size() - 1);
-                touchView(r);
-            }
-            autoscroll();
-        }));
+        RunHub.err(title, detail, raw);
     }
 
     // ------------------------------------------------------------ views
@@ -2671,7 +1473,7 @@ public class ChatActivity extends Activity
     /** Rebuild the view for one row (or append it) — main thread only.
      *  P9: text rows update their cached TextView in place; only the
      *  streaming tail animates char-by-char via the smoother. */
-    private void touchView(Row r) {
+    private void touchView(RunHub.Row r) {
         // P21 keyboard guard: a row swap must never detach the IME from
         // the chat box — if the input held focus before the mutation and
         // lost it during, take it straight back.
@@ -2683,10 +1485,11 @@ public class ChatActivity extends Activity
         }
     }
 
-    private void touchViewInner(Row r) {
+    private void touchViewInner(RunHub.Row r) {
         if (needFullRender) { renderAll(); return; }
-        Integer i = r.key == null ? null : idxByKey.get(r.key);
-        if (i == null || i >= rows.size() || rows.get(i) != r) { renderAll(); return; }
+        List<RunHub.Row> rs = RunHub.rows();
+        Integer i = r.key == null ? null : RunHub.idx().get(r.key);
+        if (i == null || i >= rs.size() || rs.get(i) != r) { renderAll(); return; }
         int idx = i;
         int len = r.text.length();
         if (r.shown > len) r.shown = len;
@@ -2709,7 +1512,6 @@ public class ChatActivity extends Activity
                 list.addView(nv, idx);
             } else if (idx == list.getChildCount()) {
                 list.addView(nv);
-                trimViews();
             } else {
                 renderAll();
                 return;
@@ -2736,29 +1538,14 @@ public class ChatActivity extends Activity
                 if (r.kind == K_USER) Theme.springIn(nv);  // P12: bubbly pop
                 else Theme.appear(nv);
             }
-            trimViews();
         } else {
             renderAll();
         }
         syncEmpty();
     }
 
-    private void trimViews() {
-        if (rows.size() <= 450) return;
-        synchronized (lock) {
-            int cut = rows.size() - 350;
-            idxByKey.clear();
-            for (int i = 0; i < cut; i++) forgetKey(rows.get(i).key);   // P20
-            rows.subList(0, cut).clear();
-            for (int i = 0; i < rows.size(); i++) {
-                Row r = rows.get(i);
-                if (r.key != null) idxByKey.put(r.key, i);
-            }
-            needFullRender = true;
-            viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
-        }
-        renderAll();
-    }
+    /** P25: model trim moved to RunHub (rows stay capped even with no
+     *  view bound). The view learns about trims through hubReset(). */
 
     private void renderAll() {
         boolean hadFocus = input != null && input.hasFocus();
@@ -2770,20 +1557,20 @@ public class ChatActivity extends Activity
     }
 
     private void renderAllInner() {
-        List<Row> snapshot;
+        List<RunHub.Row> snapshot;
         synchronized (lock) {
             snapshot = new ArrayList<>(rows);
             needFullRender = false;
             viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
-            for (Row r : snapshot) r.shown = r.text.length(); // history: no caret
+            for (RunHub.Row r : snapshot) r.shown = r.text.length(); // history: no caret
         }
         list.removeAllViews();
-        for (Row r : snapshot) {
+        for (RunHub.Row r : snapshot) {
             // P24: Throwable breadth (was catch(Exception)) — an Error row
             // becomes the fallback line instead of leaving the list
             // HALF-BUILT (removeAllViews already ran): the exact "chat
             // survived but won't work" field state.
-            final Row fr = r;
+            final RunHub.Row fr = r;
             Throwable rt = Resilience.guard(() -> list.addView(buildRowView(fr)));
             if (rt == null) continue;
             Trail.record(this, "row render", rt);
@@ -2797,7 +1584,7 @@ public class ChatActivity extends Activity
 
     private void setAllOpen(boolean open) {
         synchronized (lock) {
-            for (Row r : rows) {
+            for (RunHub.Row r : rows) {
                 if (r.kind == K_TOOL || r.kind == K_REASON) r.open = open;
             }
         }
@@ -2831,7 +1618,7 @@ public class ChatActivity extends Activity
         return (int) (v * getResources().getDisplayMetrics().density);
     }
 
-    private View buildRowView(Row r) {
+    private View buildRowView(RunHub.Row r) {
         switch (r.kind) {
             case K_USER: {
                 LinearLayout wrap = new LinearLayout(this);
@@ -2967,7 +1754,7 @@ public class ChatActivity extends Activity
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.topMargin = dp(6);
+                lp.topMargin = dp(8);
                 c.setLayoutParams(lp);
                 head.setOnClickListener(v -> { r.open = !r.open; lastToggled = r.key; touchView(r); });
                 return c;
@@ -3038,7 +1825,7 @@ public class ChatActivity extends Activity
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.topMargin = dp(6);
+                lp.topMargin = dp(8);
                 c.setLayoutParams(lp);
                 Theme.press(c);
                 head.setOnClickListener(v -> { r.open = !r.open; lastToggled = r.key; touchView(r); });
@@ -3075,7 +1862,7 @@ public class ChatActivity extends Activity
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.topMargin = dp(6);
+                lp.topMargin = dp(8);
                 c.setLayoutParams(lp);
                 return c;
             }
@@ -3224,22 +2011,20 @@ public class ChatActivity extends Activity
             permSlot.removeAllViews();
             return;
         }
-        // P14: AUTO-ALLOW (unattended mode). When the toggle is on, every
-        // incoming approval request is answered "always" immediately — the
-        // agent runs hands-free ("leave the agent unatended so it doesnt
-        // need permision gor every single comand"). The perm slot shows a
-        // slim status pill (tap = turn OFF) instead of the blocking card.
-        // If the reply fails, the id drops out of autoReplied and the normal
-        // card returns on the next tick — the agent can never hang silently.
+        // P14/P25: AUTO-ALLOW (unattended mode) — answering moved to
+        // RunHub, which reacts to permission EVENTS with no screen bound
+        // (the agent can never stall while the user is elsewhere). This
+        // path covers a permission already queued when the toggle flipped:
+        // the hub dedupes via its own autoReplied + tombstones.
         if (autoAllowOn()) {
             final String id = Json.str(perm, "id");
             String action = nz(Json.str(perm, "permission"),
                     nz(Json.str(perm, "type"), "tool"));
-            if (id != null && !autoReplied.contains(id)) {
+            if (id != null && !autoReplied.contains(id)
+                    && !RunHub.autoAlready(id)) {
                 if (autoReplied.size() > 400) autoReplied.clear();
                 autoReplied.add(id);
-                sys("⏵ auto-allowed " + action);
-                answerPermission(id, "always");
+                RunHub.answerPermission(id, "always", null);
             }
             permSlot.setVisibility(View.VISIBLE);
             permSlot.removeAllViews();
@@ -3362,50 +2147,19 @@ public class ChatActivity extends Activity
     }
 
     private void answerPermission(String id, String response) {
-        final String sid = sessionId;
-        // P10: dedicated pool — a message POST (or anything else) must never
-        // delay a permission reply. Verified against the shipped v1.18.25
-        // binary: POST /permission/{requestID}/reply  body {reply, message?}
-        // with reply ∈ {once, always, reject}; fallbacks cover older builds.
-        permEx.execute(() -> {
-            String errS = null;
-            boolean ok = false;
-            try {
-                // v1.18.x verified: the reply body key is "reply"
-                Api.Resp r = Api.post("/permission/" + id + "/reply",
-                        "{\"reply\":" + Json.quote(response) + "}", 15_000);
-                ok = r.ok();
-                if (!ok && sid != null) {
-                    // v2 surface (shipped binary also serves this)
-                    r = Api.post("/api/session/" + sid + "/permission/" + id + "/reply",
-                            "{\"reply\":" + Json.quote(response) + "}", 15_000);
-                    ok = r.ok();
-                }
-                if (!ok && sid != null) {
-                    // legacy respond shape, oldest builds
-                    r = Api.post("/session/" + sid + "/permissions/" + id,
-                            "{\"response\":" + Json.quote(response) + "}", 15_000);
-                    ok = r.ok();
-                }
-                if (!ok) errS = "HTTP " + (r == null ? "?" : r.status);
-            } catch (Exception e) {
-                errS = String.valueOf(e);
+        // P25: one reply ladder, in RunHub. The view adds the human bits:
+        // the toast and the immediate card refresh.
+        RunHub.answerPermission(id, response, (ok, errS) -> {
+            if (ok) {
+                Toast.makeText(this,
+                        "always".equals(response) ? "always allowed"
+                                : "reject".equals(response) ? "denied" : "allowed",
+                        Toast.LENGTH_SHORT).show();
+            } else {
+                sys("permission reply failed · " + errS);
+                Toast.makeText(this, "reply failed — try again", Toast.LENGTH_SHORT).show();
             }
-            final String f = errS;
-            final boolean done = ok;
-            ServerService.noteAnswered(id);
-            ui.post(() -> {
-                if (done) {
-                    Toast.makeText(this,
-                            "always".equals(response) ? "always allowed"
-                                    : "reject".equals(response) ? "denied" : "allowed",
-                            Toast.LENGTH_SHORT).show();
-                } else {
-                    sys("permission reply failed · " + f);
-                    Toast.makeText(this, "reply failed — try again", Toast.LENGTH_SHORT).show();
-                }
-                checkPermissionQueue();
-            });
+            checkPermissionQueue();
         });
     }
 
@@ -3462,7 +2216,7 @@ public class ChatActivity extends Activity
 
     private void runCommand(String cmd) {
         switch (cmd) {
-            case "New chat": loadSession(null); break;
+            case "New chat": RunHub.loadSession(null); break;
             case "Sessions…": sessionsSheet(); break;
             case "Model…": modelSheet(); break;
             case "Project files →":
@@ -3568,8 +2322,8 @@ public class ChatActivity extends Activity
         lv.setOnItemClickListener((parent, v, pos, id3) -> {
             dlg.dismiss();
             Object[] it = items.get(pos);
-            if (it[2] == null) loadSession(null);
-            else loadSession(((SessRow) it[2]).id);
+            if (it[2] == null) RunHub.loadSession(null);
+            else RunHub.loadSession(((SessRow) it[2]).id);
         });
         lv.setOnItemLongClickListener((parent, v, pos, id4) -> {
             Object[] it = items.get(pos);
@@ -3578,7 +2332,7 @@ public class ChatActivity extends Activity
             new AlertDialog.Builder(this)
                     .setTitle(s.title)
                     .setItems(new String[]{"Open", "Delete"}, (d, w) -> {
-                        if (w == 0) { dlg.dismiss(); loadSession(s.id); }
+                        if (w == 0) { dlg.dismiss(); RunHub.loadSession(s.id); }
                         else confirmDelete(s);
                     })
                     .setNegativeButton("Cancel", null)
@@ -3596,7 +2350,7 @@ public class ChatActivity extends Activity
                     try {
                         Api.Resp r = Api.call("DELETE", "/session/" + s.id, null, 10_000);
                         if (!r.ok()) sys("delete failed · HTTP " + r.status);
-                        else if (s.id.equals(sessionId)) loadSession(null);
+                        else if (s.id.equals(RunHub.sessionId())) RunHub.loadSession(null);
                     } catch (Exception e) {
                         sys("delete failed: " + e);
                     }
@@ -3927,7 +2681,7 @@ public class ChatActivity extends Activity
         String last = null;
         synchronized (lock) {
             for (int i = rows.size() - 1; i >= 0; i--) {
-                Row r = rows.get(i);
+                RunHub.Row r = rows.get(i);
                 if (r.kind == K_ASSISTANT && r.text.length() > 0) {
                     last = r.text.toString();
                     break;
@@ -3969,7 +2723,7 @@ public class ChatActivity extends Activity
         ex.execute(() -> {
             StringBuilder sb = new StringBuilder();
             synchronized (lock) {
-                for (Row r : rows) {
+                for (RunHub.Row r : rows) {
                     switch (r.kind) {
                         case K_USER:
                             sb.append("## you\n").append(r.text).append("\n\n");

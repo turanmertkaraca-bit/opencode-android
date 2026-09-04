@@ -50,6 +50,9 @@ public final class Models {
         public String id, name, desc;
         public boolean free;                // P14: zero input+output cost
         public double costIn, costOut;      // P14: $/Mtok, shown in the sheet
+        /** P25: context window (tokens) from the models.dev `limit.context`
+         *  shape — drives the chat's context-depth meter. 0 = unknown. */
+        public long ctx;
         /** P15 RESTORES the P12 flag the P14 rework dropped — the exact
          *  regression the user kept reporting ("the working model picker is
          *  in the first p12"). true when the RUNNING SERVER listed this
@@ -228,7 +231,40 @@ public final class Models {
                 mdl.free = mdl.costIn == 0 && mdl.costOut == 0;
             }
         } catch (Exception ignored) {}
+        mdl.ctx = parseCtx(mm);             // P25: context window
         prov.models.add(mdl);
+    }
+
+    /** P25: context window out of a model object. models.dev schema:
+     *  "limit":{"context":200000,"output":8192}; some server shapes
+     *  put context_window / context at top level. Defensive: whatever
+     *  parses, parses; 0 when nothing sane is there. Package-private
+     *  static so the JVM suite pins it. */
+    static long parseCtx(Map<String, Object> mm) {
+        if (mm == null) return 0;
+        long v = 0;
+        try {
+            Map<String, Object> limit = Json.obj(mm.get("limit"));
+            if (limit != null) v = (long) Json.num(limit, "context");
+            if (v <= 0) v = (long) Json.num(mm, "context_window");
+            if (v <= 0) v = (long) Json.num(mm, "context");
+        } catch (Exception ignored) {}
+        // sane bounds: a "context window" under 1k or over 100M is junk
+        return (v >= 1024 && v <= 100_000_000L) ? v : 0;
+    }
+
+    /** P25: the context window (tokens) of the picked model, or 0 when
+     *  unknown (no pick, not in the last fetch, or the catalog had no
+     *  limit for it). Reads the in-memory fetch only — never network. */
+    public static long contextLimitFor(List<Prov> provs, String provider, String id) {
+        if (provs == null || provider == null || id == null) return 0;
+        for (Prov p : provs) {
+            if (!provider.equals(p.id)) continue;
+            for (Mdl m : p.models) {
+                if (id.equals(m.id)) return m.ctx;
+            }
+        }
+        return 0;
     }
 
     // ------------------------------------------------------- catalog net

@@ -173,6 +173,36 @@ public final class Resilience {
         return String.format(java.util.Locale.US, "$%.4f", cost);
     }
 
+    /** P25: the token pill now reads as CONTEXT DEPTH, not a cumulative
+     *  sum — "how full is the model's window right now". Computed from
+     *  the last turn's reported token count (what every new turn re-reads)
+     *  against the model's context window. Pure; formats:
+     *    48000 tok + 200000 limit → "48k / 200k · 24%"
+     *    limit <= 0 (unknown)     → "48k"          (depth only, honest)
+     *    lastTurnTok <= 0         → ""            (nothing measured yet)
+     *  Percent rounds to nearest whole; >100% clamps to 99+% wording. */
+    public static String contextMeter(long lastTurnTok, long limit) {
+        if (lastTurnTok <= 0) return "";
+        // compact form: "48.0k" reads worse than "48k" in a ratio — strip
+        // whole-number tails only (48.7k stays 48.7k)
+        String depth = compact(fmtTok(lastTurnTok));
+        if (limit <= 0) return depth;
+        int pct = (int) Math.round(lastTurnTok * 100.0 / limit);
+        String pctTxt;
+        if (pct >= 100) {
+            // over the window: the provider truncates or errors — say so
+            pctTxt = "99%+";
+        } else {
+            pctTxt = pct + "%";
+        }
+        return depth + " / " + compact(fmtTok(limit)) + " · " + pctTxt;
+    }
+
+    /** "48.0k" → "48k", "2.0M" → "2M"; fractional tails untouched. */
+    private static String compact(String v) {
+        return v != null ? v.replace(".0k", "k").replace(".0M", "M") : null;
+    }
+
     /** Context-health verdict for the spend popover. Thresholds tuned to
      *  the P18 field report (86k/turn context → runaway cumulative cost):
      *  the model re-reads the WHOLE conversation every turn, so a heavy

@@ -134,8 +134,8 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         gear.setTextColor(Theme.ACCENT_LT);
         gear.setGravity(Gravity.CENTER);
         gear.setBackgroundResource(R.drawable.bg_chip);
-        gear.setPadding(Theme.dp(this, 14), Theme.dp(this, 8),
-                Theme.dp(this, 14), Theme.dp(this, 8));
+        gear.setPadding(Theme.dp(this, 14), Theme.dp(this, 10),
+                Theme.dp(this, 14), Theme.dp(this, 10));   // P25: ≥40dp target
         Theme.press(gear);
         gear.setOnClickListener(v -> {
             Theme.pop(gear);
