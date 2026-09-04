@@ -202,6 +202,10 @@ public class ServerService extends Service {
     public void onCreate() {
         super.onCreate();
         appCtx = getApplicationContext();
+        // P25: the run engine binds here too (defensive — App.onCreate
+        // already does it). From now on the SSE feed NEVER drops frames:
+        // RunHub listens for the whole process lifetime, screen or not.
+        RunHub.init(this);
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         nm.createNotificationChannel(new NotificationChannel(
                 CH, "OpenCode server", NotificationManager.IMPORTANCE_LOW));

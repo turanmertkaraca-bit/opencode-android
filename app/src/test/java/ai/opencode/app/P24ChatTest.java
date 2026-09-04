@@ -11,7 +11,6 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.android.controller.ActivityController;
 import org.robolectric.Shadows;
 
-import java.lang.reflect.Field;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -30,15 +29,35 @@ import static org.junit.Assert.assertTrue;
  * These tests pin the P24 contract against the actual activity: the
  * poison row fails ALONE, the siblings still paint, and the repeat
  * offender is quarantined into a can't-fail fallback line.
+ * <p>
+ * P25: the transcript model moved to RunHub — the activity's `rows`
+ * field IS the hub's live list now, and the idx map is RunHub.idx().
+ * The seams below were re-pointed; the pins are unchanged.
  */
 @RunWith(RobolectricTestRunner.class)
 public class P24ChatTest {
+
+    /** P25: the transcript is process-static now — reset before EVERY
+     *  test so a previous activity's rows can't leak into this one's
+     *  onCreate renderAll (the instance-model days are gone). */
+    @org.junit.Before
+    public void resetHubState() throws Exception {
+        RunHub.Tx t = RunHub.tx();
+        t.rows.clear();
+        t.idxByKey.clear();
+        t.msgs.clear();
+        t.typeCount.clear();
+        t.trimmedKeys.clear();
+        java.lang.reflect.Field sf = RunHub.class.getDeclaredField("sessionId");
+        sf.setAccessible(true);
+        sf.set(null, null);
+    }
 
     /** ChatActivity with one poisonable row key — the field's "bad part". */
     public static class PoisonChat extends ChatActivity {
         String poisonKey;
         int attempts;
-        @Override void paintRowOnce(Row r) {
+        @Override void paintRowOnce(RunHub.Row r) {
             if (poisonKey != null && poisonKey.equals(r.key)) {
                 attempts++;
                 throw new IllegalStateException("poison:" + poisonKey);
@@ -47,37 +66,31 @@ public class P24ChatTest {
         }
     }
 
-    // ---- reflection seams (private fields, same-package test) ----------
+    // ---- seams (P25: the model lives in RunHub) -------------------------
 
-    @SuppressWarnings("unchecked")
-    private static List<ChatActivity.Row> rows(ChatActivity a) throws Exception {
-        Field f = ChatActivity.class.getDeclaredField("rows");
-        f.setAccessible(true);
-        return (List<ChatActivity.Row>) f.get(a);
+    private static List<RunHub.Row> rows(ChatActivity a) {
+        return RunHub.rows();          // the activity's field IS this list
     }
 
-    @SuppressWarnings("unchecked")
-    private static Map<String, Integer> idx(ChatActivity a) throws Exception {
-        Field f = ChatActivity.class.getDeclaredField("idxByKey");
-        f.setAccessible(true);
-        return (Map<String, Integer>) f.get(a);
+    private static Map<String, Integer> idx(ChatActivity a) {
+        return RunHub.idx();
     }
 
     @SuppressWarnings("unchecked")
     private static Set<String> quarantined(ChatActivity a) throws Exception {
-        Field f = ChatActivity.class.getDeclaredField("quarantined");
+        java.lang.reflect.Field f = ChatActivity.class.getDeclaredField("quarantined");
         f.setAccessible(true);
         return (Set<String>) f.get(a);
     }
 
     private static LinearLayout list(ChatActivity a) throws Exception {
-        Field f = ChatActivity.class.getDeclaredField("list");
+        java.lang.reflect.Field f = ChatActivity.class.getDeclaredField("list");
         f.setAccessible(true);
         return (LinearLayout) f.get(a);
     }
 
-    private static ChatActivity.Row row(int kind, String key, String text) {
-        ChatActivity.Row r = new ChatActivity.Row();
+    private static RunHub.Row row(int kind, String key, String text) {
+        RunHub.Row r = new RunHub.Row();
         r.kind = kind;
         r.key = key;
         r.text.append(text);
@@ -94,7 +107,9 @@ public class P24ChatTest {
             PoisonChat a = ctl.setup().get();
             a.poisonKey = "msgA|bad";
 
-            List<ChatActivity.Row> rows = rows(a);
+            List<RunHub.Row> rows = rows(a);
+            rows.clear();
+            idx(a).clear();
             rows.add(row(ChatActivity.K_USER, "u1", "hello"));
             rows.add(row(ChatActivity.K_ASSISTANT, "msgA|bad", "poison"));
             rows.add(row(ChatActivity.K_ASSISTANT, "msgA|good", "world"));
@@ -128,7 +143,9 @@ public class P24ChatTest {
             PoisonChat a = ctl.setup().get();
             a.poisonKey = "msgB|bad";
 
-            List<ChatActivity.Row> rows = rows(a);
+            List<RunHub.Row> rows = rows(a);
+            rows.clear();
+            idx(a).clear();
             rows.add(row(ChatActivity.K_ASSISTANT, "msgB|bad", "poison"));
             rows.add(row(ChatActivity.K_ASSISTANT, "msgB|ok", "fine"));
             idx(a).put("msgB|bad", 0);

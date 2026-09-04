@@ -2,6 +2,7 @@ package ai.opencode.app;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -129,6 +130,107 @@ public final class EditPulse {
         if ("new".equals(action)) return "＋";
         if ("del".equals(action)) return "−";
         return "✎";
+    }
+
+    // ------------------------------------------------------------- tree
+
+    /** P25: one node of the compact live tree — either a DIRECTORY
+     *  (ev == null, kids = its sub-dirs + touched files) or a FILE leaf
+     *  (ev != null). Dirs only exist for paths that actually contain
+     *  touched files — untouched directories are pure noise and never
+     *  rendered. ts = newest descendant change (recency sort key). */
+    public static final class TNode {
+        /** Directory path relative to the project root ("" = root);
+         *  null for file leaves. */
+        public String dir;
+        public EditPulse.Ev ev;                 // null for dir nodes
+        public final List<TNode> kids = new ArrayList<>();
+        public long ts;                         // dir: newest descendant
+        public int hits;                        // dir: sum of descendant edits
+    }
+
+    /**
+     * P25: the edit shower's tree. Replaces the flat "newest 5 files"
+     * list: touched files group under their (only-touched) directories,
+     * every level sorted newest-first so the freshest activity floats to
+     * the top of its branch. Renders at most {@code fileCap} FILE leaves
+     * (the newest win — the same picks() semantics the flat list had);
+     * directories beyond that disappear with their (untouched) files.
+     * Pure; JVM-pinned in P25Test.
+     */
+    public static List<TNode> tree(Map<String, Ev> feed, int fileCap) {
+        List<Ev> top = picks(feed, fileCap > 0 ? fileCap : MAX_PATHS);
+        // dir path (rel, "" = root) → node
+        Map<String, TNode> dirs = new LinkedHashMap<>();
+        List<TNode> leaves = new ArrayList<>();
+        for (Ev e : top) {
+            TNode leaf = new TNode();
+            leaf.ev = e;
+            leaf.ts = e.ts;
+            leaves.add(leaf);
+            // materialize the ancestor dir chain: "a/b/c.tsx" → "a", "a/b"
+            String rel = e.rel == null ? "" : e.rel;
+            int slash = rel.lastIndexOf('/');
+            if (slash < 0) continue;                    // root file
+            String dir = rel.substring(0, slash);
+            while (true) {
+                TNode d = dirs.get(dir);
+                if (d == null) {
+                    d = new TNode();
+                    d.dir = dir;
+                    d.ts = e.ts;
+                    dirs.put(dir, d);
+                }
+                if (e.ts > d.ts) d.ts = e.ts;
+                d.hits += e.hits;
+                int up = dir.lastIndexOf('/');
+                if (up < 0) break;                      // reached root level
+                dir = dir.substring(0, up);
+            }
+        }
+        // hang leaves + dirs under their parents
+        List<TNode> root = new ArrayList<>();
+        for (TNode leaf : leaves) {
+            String rel = leaf.ev.rel == null ? "" : leaf.ev.rel;
+            int slash = rel.lastIndexOf('/');
+            if (slash < 0) {
+                root.add(leaf);
+                continue;
+            }
+            TNode parent = dirs.get(rel.substring(0, slash));
+            if (parent != null) parent.kids.add(leaf);
+            else root.add(leaf);                        // defensive: never lose a file
+        }
+        for (TNode d : dirs.values()) {
+            int slash = d.dir.lastIndexOf('/');
+            if (slash < 0) root.add(d);
+            else {
+                TNode parent = dirs.get(d.dir.substring(0, slash));
+                if (parent != null) parent.kids.add(d);
+                else root.add(d);
+            }
+        }
+        // every level sorts newest-first (dirs carry their newest child ts)
+        sortNodes(root);
+        for (TNode d : dirs.values()) sortNodes(d.kids);
+        return root;
+    }
+
+    private static void sortNodes(List<TNode> nodes) {
+        Collections.sort(nodes, (a, b) -> Long.compare(b.ts, a.ts));
+    }
+
+    /** P25: the ancestor dir chain of a rel path, outermost first:
+     *  "a/b/c.tsx" → ["a", "a/b"]. Root files → empty list. Pure. */
+    public static List<String> ancestors(String rel) {
+        List<String> out = new ArrayList<>();
+        if (rel == null) return out;
+        int i = rel.indexOf('/');
+        while (i > 0) {
+            out.add(rel.substring(0, i));
+            i = rel.indexOf('/', i + 1);
+        }
+        return out;
     }
 
     // ------------------------------------------------------------- peek

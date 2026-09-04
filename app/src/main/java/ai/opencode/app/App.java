@@ -24,6 +24,11 @@ public class App extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        // P25: the run engine exists for the WHOLE process lifetime — it
+        // owns the transcript, busy state, send orchestration and the
+        // live-edit feed, so a running agent turn never depends on any
+        // screen. Subscribes itself to the service's SSE feed here.
+        RunHub.init(this);
         registerActivityLifecycleCallbacks(new ActivityLifecycleCallbacks() {
             @Override public void onActivityResumed(android.app.Activity a) { TOP = a; }
             @Override public void onActivityPaused(android.app.Activity a) {
