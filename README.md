@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.18.0 — P18)
+## Install (v0.20.0 — P20)
 
-1. Grab `opencode-p18-v0.18.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p20-v0.20.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -18,6 +18,55 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
    console.opencode.ai) runs its 31 FREE models with no key at all.
 4. One-minute armor against Galaxy process kills: **Settings → keep alive →
    Battery optimization — exempt ✓**, plus Device care → Never sleeping apps.
+
+## What's in v0.20.0 (P20 — the background survivor)
+
+- **the empty thought bubble is dead** — the field report: leave the app
+  in background during a run, come back, tap the ✦ THINKING card → empty.
+  Root cause: the chat unsubscribes from the event feed while paused, and
+  onResume only refetched an EMPTY list — every part that fired while you
+  were away was lost forever. Now EVERY resume replays the session from
+  the server's own message store: known parts update in place, missed
+  parts append in order, and nothing the agent said while the screen was
+  away can disappear again (trim-safe: ancient trimmed rows are never
+  re-appended at the bottom).
+- **thinking streams token-by-token now** — the P9 smoothing ticker only
+  drove assistant text; reasoning cards painted in raw SSE bursts. The
+  ticker now drives thinking rows too: a collapsed card grows a live
+  one-line ticker of the FRESHEST thought (sliding window, caret), an
+  open card streams its body with the caret, and everything finalizes
+  into the calm collapsed card on catch-up.
+- **returning from background settles the truth** — if the run FINISHED
+  while you were away, the chat settles itself (no more "working — tap ■
+  to stop" spinning forever) and says so in one line. A run still going
+  re-arms the full busy UI (P19 self-heal).
+- **no more dead THINKING cards** — a reasoning part born empty that
+  never received text (run died early) is hidden at settle instead of
+  sitting there as an unopenable "THINKING…" card forever.
+- 9 new JVM regression tests (67 total): stable part keys, the live
+  think-window edges, and the settle-only-when-finished rule.
+
+## What's in v0.19.0 (P19 — the crash killer)
+
+- **the cold-boot crash is structurally dead** — the field crash (app
+  process killed by the device; the orphaned server child kept port 4096;
+  every respawn died EADDRINUSE until a phone reboot) cannot wedge the
+  sandbox anymore: the supervisor asks the kernel for a free port before
+  every spawn (4096 when free, kernel-assigned the moment it isn't),
+  sweeps orphaned opencode processes by exact-binary match, and gates
+  "healthy" on the child's own listen banner. Upstream opencode v1.18.25
+  was stress-tested standalone (write burst + storm + kill -9 respawn):
+  the server survived everything — the killer was device-level process
+  death, and the sandbox now survives that too.
+- **nothing dies silently anymore** — a 30 s heartbeat in
+  sandbox-diag.log means even a whole-process kill leaves "when it
+  stopped + what memory looked like" on disk. Settings → keep alive →
+  **Sandbox incident log**.
+- **the live-edit shower actually shows** — the P18 watchdog declared a
+  run dead after 3.5 s of feed silence (bash runs ARE silent for
+  minutes), tearing down the live-edit watcher mid-run. The quiet
+  threshold is now 10 minutes; the edit card lives on the ✦ thinking
+  surface from run start and vanishes when a run produced zero edits.
 
 ## What's in v0.18.0 (P18 — the unstoppable sandbox)
 

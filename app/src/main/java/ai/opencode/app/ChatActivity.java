@@ -82,6 +82,7 @@ public class ChatActivity extends Activity
         String key;                 // stable identity for SSE upserts
         StringBuffer text = new StringBuffer();
         int shown;                  // P9: chars painted so far (streaming caret)
+        boolean livePreview;        // P20: collapsed thinking card showing the live ticker
         String tool, status, title, meta;
         StringBuffer input = new StringBuffer();
         StringBuffer output = new StringBuffer();
@@ -113,6 +114,27 @@ public class ChatActivity extends Activity
     private final Map<String, MsgInfo> msgs = new HashMap<>();
     private final Map<String, Integer> idxByKey = new HashMap<>();
     private final Map<String, Integer> typeCount = new HashMap<>();
+    /** P20: keys of rows dropped by the 450-row trim (and purged empty
+     *  thoughts) — the resume replay must never re-append ancient parts
+     *  at the bottom of the chat. Bounded FIFO, oldest keys forgotten. */
+    private final java.util.ArrayDeque<String> trimmedKeys = new java.util.ArrayDeque<>();
+    private static final int TRIMMED_KEY_CAP = 4096;
+
+    private void forgetKey(String k) {
+        if (k == null) return;
+        trimmedKeys.addLast(k);
+        while (trimmedKeys.size() > TRIMMED_KEY_CAP) trimmedKeys.removeFirst();
+    }
+
+    /** True when a part's row once existed but was trimmed away — its
+     *  content is ancient history, NOT something the resume replay may
+     *  resurrect at the bottom of the list. */
+    private boolean partWasTrimmed(String key) {
+        synchronized (lock) {
+            return key != null && !idxByKey.containsKey(key)
+                    && trimmedKeys.contains(key);
+        }
+    }
 
     private LinearLayout list;
     private ScrollView scroll;
@@ -287,6 +309,7 @@ public class ChatActivity extends Activity
             }
         }
         if (sessionId != null && rows.isEmpty()) loadSession(sessionId);
+        else if (sessionId != null) reconcileAfterPause();   // P20
         checkPermissionQueue();
         refreshServerUi();
         // P17: resume the live-edit watch if a run outlived the pause.
@@ -401,6 +424,11 @@ public class ChatActivity extends Activity
      * caret — plain text while streaming (cheap), full markdown ONCE when
      * the part catches up. Adaptive step = remaining/8 + 3 chars, so short
      * replies land instantly and long ones glide.
+     *
+     * P20: the ticker now also drives THINKING rows — the assistant text
+     * already glided, but reasoning rows painted in raw SSE bursts; the
+     * collapsed card grows a live one-line ticker of the freshest
+     * thinking, and an open card streams its body with the caret.
      */
     private void startSmoother() {
         if (smootherRunning) return;
@@ -457,9 +485,12 @@ public class ChatActivity extends Activity
                     Row r = rows.get(i);
                     int len = r.text.length();
                     if (r.shown > len) r.shown = len;
-                    if (r.kind != K_ASSISTANT || r.shown >= len) continue;
+                    if ((r.kind != K_ASSISTANT && r.kind != K_REASON)
+                            || r.shown >= len) continue;
                     if (i != rows.size() - 1) {
+                        boolean wasBehind = r.shown < len;
                         r.shown = len;          // a newer row appeared: snap
+                        if (wasBehind) requestPaint(r);   // P20: drop the stale caret now
                     } else {
                         int step = 3 + (len - r.shown) / 8;
                         r.shown = Math.min(len, r.shown + step);
@@ -484,8 +515,15 @@ public class ChatActivity extends Activity
         if (body == null || root == null) { touchView(r); return; }
         int len = r.text.length();
         int upto = Math.min(r.shown, len);
-        String s = r.text.substring(0, upto);
-        body.setText(s.length() == 0 ? "…" : s + "▍");
+        if (r.kind == K_REASON && !r.open) {
+            // P20: collapsed thinking card → one live line of the FRESHEST
+            // thinking under the header (a sliding window, token-by-token)
+            String win = Resilience.thinkWindow(r.text.toString(), upto, 110);
+            body.setText(win.length() == 0 ? "…" : win + "▍");
+        } else {
+            String s = r.text.substring(0, upto);
+            body.setText(s.length() == 0 ? "…" : s + "▍");
+        }
         if (r.shown >= len) {
             // caught up → finalize with markdown (single rebuild)
             touchView(r);
@@ -496,7 +534,8 @@ public class ChatActivity extends Activity
         if (!Theme.motionOn(this)) return false;
         synchronized (lock) {
             boolean last = !rows.isEmpty() && rows.get(rows.size() - 1) == r;
-            return last && r.kind == K_ASSISTANT && r.shown < r.text.length()
+            boolean streamable = r.kind == K_ASSISTANT || r.kind == K_REASON;
+            return last && streamable && r.shown < r.text.length()
                     && r.text.length() <= 40000;
         }
     }
@@ -776,6 +815,9 @@ public class ChatActivity extends Activity
                 ui.removeCallbacks(liveCollapse);
                 Integer li = idxByKey.get(LIVE_KEY);
                 if (li != null && li < rows.size()) requestPaint(rows.get(li));
+                // P20: a run that died before any thinking arrived can leave
+                // an empty unopenable THINKING card — hide it at settle.
+                purgeEmptyThoughts();
             }
             syncTyping();
         });
@@ -1247,6 +1289,110 @@ public class ChatActivity extends Activity
                 sys("history failed: " + e);
             }
         });
+    }
+
+    /**
+     * P20 — the "empty thought bubble" killer. The chat unsubscribes from
+     * the event feed in onPause (by design — no background work), but
+     * onResume used to refetch ONLY when the row list was empty, i.e. only
+     * after a full process death. Every part that fired while the screen
+     * was away was lost forever: a reasoning card born just before the
+     * pause stayed empty for good ("i let the app work in background when
+     * i came back i couldnt look into a tought buble it looked empty"),
+     * and whole run segments never rendered.
+     *
+     * Now EVERY resume replays the session from the server's own message
+     * store through the normal upsert pipeline: known parts update in
+     * place, missed parts append in order, and if the run FINISHED while
+     * we were away the chat settles instead of spinning "working" forever.
+     */
+    private void reconcileAfterPause() {
+        final String id = sessionId;
+        if (id == null) return;
+        ex.execute(() -> {
+            try {
+                Api.Resp r = Api.get("/session/" + id + "/message");
+                if (!r.ok()) return;                    // server blip: P18/P19 cover it
+                List<Object> arr = Json.arr(Json.parse(r.body));
+                if (arr == null || arr.isEmpty()) return;
+                boolean lastAssistantDone = false;
+                int from = Math.max(0, arr.size() - 80);
+                for (int i = from; i < arr.size(); i++) {
+                    if (!id.equals(sessionId)) return;  // user switched sessions mid-replay
+                    Map<String, Object> item = Json.obj(arr.get(i));
+                    if (item == null) continue;
+                    Map<String, Object> info = Json.map(item, "info");
+                    if (info == null) info = item;
+                    if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
+                    String role = Json.str(info, "role");
+                    String mid0 = Json.str(info, "id");
+                    boolean knownMsg = false;
+                    if (mid0 != null) {
+                        synchronized (lock) { knownMsg = msgs.containsKey(mid0); }
+                    }
+                    if (i == arr.size() - 1 && "assistant".equals(role)) {
+                        Map<String, Object> tm = Json.map(info, "time");
+                        lastAssistantDone = tm != null && tm.get("completed") != null;
+                    }
+                    applyMessageInfo(info);
+                    List<Object> parts = Json.list(item, "parts");
+                    if (parts == null) parts = Json.list(info, "parts");
+                    if (parts == null) continue;
+                    for (Object p : parts) {
+                        Map<String, Object> pm = Json.obj(p);
+                        if (pm == null) continue;
+                        String pid = Json.str(pm, "id");
+                        if (Resilience.stablePartKey(pid)) {
+                            String mid = Json.str(pm, "messageID");
+                            if (mid == null) mid = mid0;
+                            if (mid != null && partWasTrimmed(mid + "|" + pid))
+                                continue;               // ancient, already trimmed
+                        } else if (knownMsg) {
+                            continue;   // pid-less replay can't rebuild the live key
+                        }
+                        applyPart(pm, role);
+                    }
+                }
+                final boolean settle = lastAssistantDone;
+                ui.post(() -> {
+                    if (!settle || !busy || isFinishing()
+                            || !id.equals(sessionId)) return;
+                    setBusy(false);
+                    purgeEmptyThoughts();               // dead empty THINKING cards out
+                    sys("↩ back — the run finished while you were away; "
+                            + "everything it said is right here");
+                });
+            } catch (Exception e) {
+                // offline / still starting: P19's feed self-heal + watchdog cover us
+            }
+        });
+    }
+
+    /** P20: a reasoning part can be born empty (initial blank snapshot)
+     *  and STAY empty when the run dies before any thinking arrives —
+     *  leaving an unopenable "THINKING…" card forever. The TUI hides
+     *  empty thoughts; so do we, at every settle point. */
+    private void purgeEmptyThoughts() {
+        synchronized (lock) {
+            boolean removed = false;
+            for (int i = rows.size() - 1; i >= 0; i--) {
+                Row r = rows.get(i);
+                if (r.kind == K_REASON && r.text.length() == 0) {
+                    forgetKey(r.key);
+                    rows.remove(i);
+                    removed = true;
+                }
+            }
+            if (!removed) return;
+            idxByKey.clear();
+            for (int i = 0; i < rows.size(); i++) {
+                Row r = rows.get(i);
+                if (r.key != null) idxByKey.put(r.key, i);
+            }
+            needFullRender = true;
+            viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
+        }
+        renderAll();
     }
 
     /** POST /session/{id}/message response → same pipeline as SSE. */
@@ -2319,7 +2465,17 @@ public class ChatActivity extends Activity
         int len = r.text.length();
         if (r.shown > len) r.shown = len;
 
-        if (r.kind == K_ASSISTANT && r.shown < len && isStreamingTail(r)) {
+        if ((r.kind == K_ASSISTANT || r.kind == K_REASON)
+                && r.shown < len && isStreamingTail(r)) {
+            // P20: collapsed thinking card whose live ticker is already on
+            // screen — skip the rebuild, the ticker paints the delta.
+            if (r.kind == K_REASON && !r.open && r.livePreview
+                    && bodyByKey.containsKey(r.key)
+                    && viewByKey.containsKey(r.key)) {
+                startSmoother();
+                autoscroll();
+                return;
+            }
             // hand the row to the smoother: first paint shows the tail view
             View nv = buildRowView(r);
             if (idx < list.getChildCount()) {
@@ -2366,6 +2522,7 @@ public class ChatActivity extends Activity
         synchronized (lock) {
             int cut = rows.size() - 350;
             idxByKey.clear();
+            for (int i = 0; i < cut; i++) forgetKey(rows.get(i).key);   // P20
             rows.subList(0, cut).clear();
             for (int i = 0; i < rows.size(); i++) {
                 Row r = rows.get(i);
@@ -2502,6 +2659,10 @@ public class ChatActivity extends Activity
             case K_REASON: {
                 // P10: "voice of mind" — violet-tinted panel, ✦ header,
                 // italic body when open. Distinct from tool cards at a glance.
+                // P20: while this row is the streaming tail the card is
+                // ALIVE — collapsed it grows a one-line ticker of the
+                // freshest thinking (token-by-token via the smoother);
+                // open, the body itself streams with the caret.
                 LinearLayout c = new LinearLayout(this);
                 c.setOrientation(LinearLayout.VERTICAL);
                 c.setBackgroundResource(R.drawable.bg_thought_card);
@@ -2524,16 +2685,45 @@ public class ChatActivity extends Activity
                 chev.setText(r.open ? "▾" : "▸");
                 head.addView(chev);
                 c.addView(head);
+                String key = r.key == null ? "" : r.key;
+                boolean streaming = r.shown < r.text.length();
+                r.livePreview = false;
                 if (r.open) {
                     TextView body = text(13, R.color.text_secondary, false);
                     body.setTypeface(Typeface.create("sans-serif", Typeface.ITALIC));
                     body.setTextIsSelectable(true);
                     body.setLineSpacing(dp(2), 1f);
-                    String t = r.text.toString();
-                    if (t.length() > 20000) t = t.substring(0, 20000) + "…";
-                    body.setText(t);
+                    String t;
+                    if (streaming) {
+                        int upto = Math.min(r.shown, r.text.length());
+                        t = r.text.substring(0, upto);
+                    } else {
+                        t = r.text.toString();
+                        if (t.length() > 20000) t = t.substring(0, 20000) + "…";
+                    }
+                    body.setText(t.length() == 0 ? "…"
+                            : streaming ? t + "▍" : t);
                     body.setPadding(dp(2), dp(8), 0, 0);
                     c.addView(body);
+                    viewByKey.put(key, c);
+                    bodyByKey.put(key, body);
+                } else if (streaming) {
+                    TextView live = text(12, R.color.text_secondary, false);
+                    live.setTypeface(Typeface.create("sans-serif", Typeface.ITALIC));
+                    live.setSingleLine(true);
+                    live.setEllipsize(android.text.TextUtils.TruncateAt.START);
+                    String win = Resilience.thinkWindow(r.text.toString(),
+                            Math.min(r.shown, r.text.length()), 110);
+                    live.setText(win.length() == 0 ? "…" : win + "▍");
+                    live.setPadding(dp(2), dp(6), 0, 0);
+                    live.setAlpha(0.85f);
+                    c.addView(live);
+                    viewByKey.put(key, c);
+                    bodyByKey.put(key, live);
+                    r.livePreview = true;
+                } else {
+                    viewByKey.remove(key);          // P20: never leave a ghost
+                    bodyByKey.remove(key);          // registration behind
                 }
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
