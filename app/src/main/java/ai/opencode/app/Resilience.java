@@ -2,6 +2,8 @@ package ai.opencode.app;
 
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
+import java.util.List;
+import java.util.Map;
 
 /**
  * P18 "unstoppable" — pure, JVM-testable helpers behind the three field
@@ -230,5 +232,118 @@ public final class Resilience {
     public static boolean shouldSettle(boolean busy, boolean lastIsAssistant,
                                        boolean hasCompletedTs) {
         return busy && lastIsAssistant && hasCompletedTs;
+    }
+
+    // ------------------------------------------------- P21 exit forensics
+
+    /** P21: human name for an ApplicationExitInfo reason code. Values
+     *  PINNED against the API-34 android.jar (javap -constants), not from
+     *  memory: 0 UNKNOWN, 1 EXIT_SELF, 2 SIGNALED, 3 LOW_MEMORY, 4 CRASH,
+     *  5 CRASH_NATIVE, 6 ANR, 7 INITIALIZATION_FAILURE, 8
+     *  PERMISSION_CHANGE, 9 EXCESSIVE_RESOURCE_USAGE, 10 USER_REQUESTED,
+     *  11 USER_STOPPED, 12 DEPENDENCY_DIED, 13 OTHER, 14 FREEZER, 15
+     *  PACKAGE_STATE_CHANGE, 16 PACKAGE_UPDATED. This is the instrument
+     *  that finally NAMES the field killer: the app process died on P19
+     *  AND P20 with no Java crash file — SIGKILL-class death — and the
+     *  exit history answers WHO did it (LOW_MEMORY = LMKD, ANR =
+     *  watchdog, CRASH_NATIVE = our own bug, FREEZER/SIGNALED = external),
+     *  from the device, with no adb. Pure, JVM-pinned. */
+    public static String exitReasonName(int reason) {
+        switch (reason) {
+            case 0:  return "unknown";
+            case 1:  return "exited by itself";
+            case 2:  return "killed by a signal";
+            case 3:  return "LOW MEMORY — the system killed it to free RAM";
+            case 4:  return "crash (unhandled Java exception)";
+            case 5:  return "NATIVE crash (SIGSEGV/SIGABRT…)";
+            case 6:  return "ANR — the UI froze and the system killed it";
+            case 7:  return "initialization failure";
+            case 8:  return "killed over a permission change";
+            case 9:  return "excessive resource usage";
+            case 10: return "stopped on user request";
+            case 11: return "stopped by the user (swipe away)";
+            case 12: return "a service it depended on died";
+            case 13: return "other";
+            case 14: return "released from the cached-app freezer";
+            case 15: return "package state change";
+            case 16: return "package updated";
+            default: return "unknown reason " + reason;
+        }
+    }
+
+    /** P21: one normalized diagnostics line for an exit record — fixed
+     *  field order (ts · reason · signal · detail) so the log is
+     *  greppable, same convention as diagLine. Pure. */
+    public static String formatExitLine(long tsMs, int reason, int status,
+                                        String desc) {
+        StringBuilder b = new StringBuilder();
+        if (tsMs > 0) {
+            b.append(String.format(java.util.Locale.US, "%tF %<tR",
+                    new java.util.Date(tsMs)));
+        } else {
+            b.append("time unknown");
+        }
+        b.append(" · ").append(exitReasonName(reason));
+        if (reason == 2 || reason == 5) {
+            b.append(" (signal ").append(status).append(")");
+        }
+        if (desc != null && !desc.isEmpty()) {
+            String d = desc.replace('\n', ' ').trim();
+            if (d.length() > 90) d = d.substring(0, 90) + "…";
+            b.append(" · ").append(d);
+        }
+        return b.toString();
+    }
+
+    // ------------------------------------------------- P21 replay parsing
+
+    /** P20/P21: did the LAST message of a /session/{id}/message array say
+     *  the assistant run FINISHED (role=assistant + time.completed set)?
+     *  Extracted from ChatActivity.reconcileAfterPause so the REAL server
+     *  payloads can be replayed through it on the host JVM — the settle
+     *  rule must be tested against reality, not against hope. Accepts
+     *  both {info:{…}} wrapped and inline message shapes. A synthetic
+     *  trailing message never settles (mirrors the replay loop, which
+     *  skips synthetic entries). Pure. */
+    public static boolean lastAssistantDoneFrom(List<?> messages) {
+        if (messages == null || messages.isEmpty()) return false;
+        Object lastObj = messages.get(messages.size() - 1);
+        if (!(lastObj instanceof Map)) return false;
+        Map<?, ?> item = (Map<?, ?>) lastObj;
+        Object infoO = item.get("info");
+        Map<?, ?> info = (infoO instanceof Map) ? (Map<?, ?>) infoO : item;
+        if (Boolean.TRUE.equals(info.get("synthetic"))) return false;
+        if (!"assistant".equals(info.get("role"))) return false;
+        Object timeO = info.get("time");
+        if (!(timeO instanceof Map)) return false;
+        return ((Map<?, ?>) timeO).get("completed") != null;
+    }
+
+    /** P21 replay-keying contract: how many parts in a fetched session
+     *  LACK a stable part id. The resume replay updates known messages by
+     *  the deterministic messageID|partID key; parts WITHOUT an id can
+     *  not be re-keyed and are skipped for already-known messages (they
+     *  would duplicate). If real payloads carry ids on every renderable
+     *  part, nothing can be missed; this counter is how the contract test
+     *  proves it against the actual v1.18.25 payloads. Pure. */
+    public static int partsWithoutId(List<?> messages) {
+        int n = 0;
+        if (messages == null) return 0;
+        for (Object o : messages) {
+            if (!(o instanceof Map)) continue;
+            Map<?, ?> item = (Map<?, ?>) o;
+            Object parts = item.get("parts");
+            if (parts == null) {
+                Object info = item.get("info");
+                parts = (info instanceof Map) ? ((Map<?, ?>) info).get("parts") : null;
+            }
+            if (!(parts instanceof List)) continue;
+            for (Object p : (List<?>) parts) {
+                if (!(p instanceof Map)) continue;
+                Object id = ((Map<?, ?>) p).get("id");
+                if (id == null || String.valueOf(id).isEmpty()) n++;
+            }
+        }
+        return n;
     }
 }

@@ -1,10 +1,13 @@
 package ai.opencode.app;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.app.AlertDialog;
+import android.app.ApplicationExitInfo;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -80,6 +83,17 @@ public class DiagnosticsActivity extends Activity {
         btns.addView(r1);
         btns.addView(r2);
         root.addView(btns);
+
+        root.addView(section("last exits — why Android stopped the app"));
+        TextView tvExits = monoText();
+        tvExits.setText(exitInfoText());
+        root.addView(tvExits);
+        root.addView(note("This is the system's own kill record for the app "
+                + "process — it names the killer even for deaths that left no "
+                + "crash file (LOW MEMORY = the system freed RAM, ANR = the UI "
+                + "froze, NATIVE crash = our bug, signal = external kill). If "
+                + "the sandbox or the whole app ever dies again, paste these "
+                + "lines + the sandbox incident log below."));
 
         root.addView(section("network (DNS)"));
         tvProxy = monoText();
@@ -317,6 +331,42 @@ public class DiagnosticsActivity extends Activity {
         t.setText(s.toUpperCase());
         t.setPadding(0, dp(18), 0, dp(6));
         return t;
+    }
+
+    /** P21: the system's own record of why OUR process exited, newest
+     *  first. This is the evidence that was missing all along: the field
+     *  deaths left no Java crash file because they were NOT Java crashes
+     *  — ApplicationExitInfo names the real killer (LMKD / ANR / native /
+     *  signal) from the device, with no adb, and it works RETROACTIVELY
+     *  for deaths that already happened. */
+    private String exitInfoText() {
+        StringBuilder b = new StringBuilder();
+        File lc = App.crashFile(this);
+        if (lc.exists()) {
+            b.append("java crash file: ").append(lc.getAbsolutePath())
+             .append(" (").append(Binaries.human(lc.length())).append(")\n\n");
+        }
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+                java.util.List<ApplicationExitInfo> xs =
+                        am.getHistoricalProcessExitReasons(getPackageName(), 0, 8);
+                if (xs.isEmpty()) {
+                    b.append("no exit records — the app process has not died");
+                }
+                for (ApplicationExitInfo x : xs) {
+                    b.append(Resilience.formatExitLine(x.getTimestamp(),
+                            x.getReason(), x.getStatus(), x.getDescription()));
+                    b.append('\n');
+                }
+            } catch (Exception e) {
+                b.append("exit records unavailable: ").append(e.getMessage());
+            }
+        } else {
+            b.append("exit records need Android 11+ — this device is older; "
+                    + "use the sandbox incident log instead");
+        }
+        return b.toString().trim();
     }
 
     private LinearLayout row(String title, String sub) {

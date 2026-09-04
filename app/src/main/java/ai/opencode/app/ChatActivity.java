@@ -413,7 +413,19 @@ public class ChatActivity extends Activity
     }
 
     private void autoscroll() {
-        if (pinnedBottom) scroll.post(() -> scroll.fullScroll(ScrollView.FOCUS_DOWN));
+        if (pinnedBottom) scroll.post(this::scrollToEnd);
+    }
+
+    /** P21: focus-free scroll to the end of the list. ScrollView's
+     *  fullScroll() runs the focus search and can MOVE focus into the
+     *  message list — selectable rows are focusable — so mid-run the
+     *  keyboard kept detaching from the chat box (P20 field report:
+     *  "keeps making the keyboard unfocus from the chatbox"). Identical
+     *  scroll position, zero focus side effects. */
+    private void scrollToEnd() {
+        View c = scroll.getChildAt(0);
+        int bottom = c == null ? scroll.getHeight() : c.getHeight();
+        scroll.scrollTo(0, Math.max(0, bottom - scroll.getHeight()));
     }
 
     // ------------------------------------------------- P9 stream smoother
@@ -499,7 +511,7 @@ public class ChatActivity extends Activity
                     if (r.shown < len) more = true;
                 }
             }
-            if (pinnedBottom) scroll.fullScroll(ScrollView.FOCUS_DOWN);
+            if (pinnedBottom) scrollToEnd();
             if (more) {
                 smoother.postDelayed(this, 24);
             } else {
@@ -749,7 +761,8 @@ public class ChatActivity extends Activity
         scrollPill.setVisibility(View.GONE);
         scrollPill.setOnClickListener(v -> {
             pinnedBottom = true;
-            scroll.fullScroll(ScrollView.FOCUS_DOWN);
+            scroll.smoothScrollTo(0,
+                    Math.max(0, list.getHeight() - scroll.getHeight()));
             syncPill();
         });
     }
@@ -1315,7 +1328,10 @@ public class ChatActivity extends Activity
                 if (!r.ok()) return;                    // server blip: P18/P19 cover it
                 List<Object> arr = Json.arr(Json.parse(r.body));
                 if (arr == null || arr.isEmpty()) return;
-                boolean lastAssistantDone = false;
+                // P21: the settle rule, extracted into Resilience so the
+                // REAL server payloads replay through it in the JVM tests.
+                final boolean lastAssistantDone =
+                        Resilience.lastAssistantDoneFrom(arr);
                 int from = Math.max(0, arr.size() - 80);
                 for (int i = from; i < arr.size(); i++) {
                     if (!id.equals(sessionId)) return;  // user switched sessions mid-replay
@@ -1330,10 +1346,6 @@ public class ChatActivity extends Activity
                     if (mid0 != null) {
                         synchronized (lock) { knownMsg = msgs.containsKey(mid0); }
                     }
-                    if (i == arr.size() - 1 && "assistant".equals(role)) {
-                        Map<String, Object> tm = Json.map(info, "time");
-                        lastAssistantDone = tm != null && tm.get("completed") != null;
-                    }
                     applyMessageInfo(info);
                     List<Object> parts = Json.list(item, "parts");
                     if (parts == null) parts = Json.list(info, "parts");
@@ -1341,6 +1353,13 @@ public class ChatActivity extends Activity
                     for (Object p : parts) {
                         Map<String, Object> pm = Json.obj(p);
                         if (pm == null) continue;
+                        // P21: real v1.18.25 fetches carry messageID on every
+                        // part (rig-verified) — but if a future shape drops
+                        // it, the replay key must STILL match the live key.
+                        // Inject the parent message id before the key math.
+                        if (Json.str(pm, "messageID") == null && mid0 != null) {
+                            pm.put("messageID", mid0);
+                        }
                         String pid = Json.str(pm, "id");
                         if (Resilience.stablePartKey(pid)) {
                             String mid = Json.str(pm, "messageID");
@@ -2170,14 +2189,25 @@ public class ChatActivity extends Activity
             try {
                 int comma = dataUrl.indexOf(',');
                 String header = comma > 0 ? dataUrl.substring(5, comma) : "image/jpeg";
-                String payload = comma > 0 ? dataUrl.substring(comma + 1) : "";
-                if (payload.length() > 12_000_000) throw new IOException("image too large");
-                byte[] bytes = java.util.Base64.getDecoder().decode(payload);
                 String ext = header.contains("png") ? "png" : "jpg";
                 File dir = new File(getCacheDir(), "vision");
                 if (!dir.isDirectory()) dir.mkdirs();
                 File f = new File(dir, "msg-" + Integer.toHexString(r.key.hashCode())
                         + "." + ext);
+                if (f.isFile() && f.length() > 0) {
+                    // P21: a resume replay re-delivers the SAME data: URL —
+                    // the cache file from the first decode is still good.
+                    // Skip the multi-MB base64 → byte[] → bitmap pipeline
+                    // (three copies of every image re-allocated on EVERY
+                    // return was an LMKD invitation).
+                    r.title = f.getAbsolutePath();
+                    decodeLocalImage(r, f.getAbsolutePath());
+                    ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) touchView(rr); });
+                    return;
+                }
+                String payload = comma > 0 ? dataUrl.substring(comma + 1) : "";
+                if (payload.length() > 12_000_000) throw new IOException("image too large");
+                byte[] bytes = java.util.Base64.getDecoder().decode(payload);
                 try (FileOutputStream fo = new FileOutputStream(f)) {
                     fo.write(bytes);
                 }
@@ -2193,6 +2223,13 @@ public class ChatActivity extends Activity
     private void decodeLocalImage(final Row r, final String path) {
         synchronized (failedImgs) {
             if (failedImgs.contains(r.key)) return;
+        }
+        synchronized (imageCache) {
+            if (imageCache.get(r.key) != null) {
+                // P21: still in the LRU → no re-decode, just repaint.
+                ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) requestPaint(rr); });
+                return;
+            }
         }
         ex.execute(() -> {
             Bitmap bm = Vision.decodeBounded(path, 1024);
@@ -2458,6 +2495,18 @@ public class ChatActivity extends Activity
      *  P9: text rows update their cached TextView in place; only the
      *  streaming tail animates char-by-char via the smoother. */
     private void touchView(Row r) {
+        // P21 keyboard guard: a row swap must never detach the IME from
+        // the chat box — if the input held focus before the mutation and
+        // lost it during, take it straight back.
+        boolean hadFocus = input != null && input.hasFocus();
+        touchViewInner(r);
+        if (hadFocus && input != null && !input.hasFocus()
+                && !isFinishing() && !isDestroyed()) {
+            input.requestFocus();
+        }
+    }
+
+    private void touchViewInner(Row r) {
         if (needFullRender) { renderAll(); return; }
         Integer i = r.key == null ? null : idxByKey.get(r.key);
         if (i == null || i >= rows.size() || rows.get(i) != r) { renderAll(); return; }
@@ -2535,6 +2584,15 @@ public class ChatActivity extends Activity
     }
 
     private void renderAll() {
+        boolean hadFocus = input != null && input.hasFocus();
+        renderAllInner();
+        if (hadFocus && input != null && !input.hasFocus()
+                && !isFinishing() && !isDestroyed()) {
+            input.requestFocus();
+        }
+    }
+
+    private void renderAllInner() {
         List<Row> snapshot;
         synchronized (lock) {
             snapshot = new ArrayList<>(rows);
