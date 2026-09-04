@@ -293,7 +293,12 @@ public class ServerService extends Service {
                 "--hostname", Api.HOST);
         pb.directory(cwd);
         pb.redirectErrorStream(true);
-        Binaries.applyEnv(this, pb);
+        try {
+            Binaries.applyEnv(this, pb);   // P23: was unguarded — a throw here
+        } catch (Throwable t) {            // killed the supervisor thread
+            Trail.record(this, "sandbox env", t);
+            appendDiag("env", "applyEnv failed: " + t);
+        }
 
         long[] deaths = new long[8];        // recent death timestamps (ring)
         int deathIdx = 0;
@@ -349,7 +354,7 @@ public class ServerService extends Service {
                             portKnown = true;
                         }
                     }
-                } catch (Exception ignored) {}
+                } catch (Throwable ignored) { }
             }, "oc-drain");
             drain.setDaemon(true);
             drain.start();
@@ -387,7 +392,7 @@ public class ServerService extends Service {
                             }
                             break;
                         }
-                    } catch (Exception ignored) {}
+                    } catch (Throwable ignored) { }
                 }
             }
 
@@ -419,7 +424,7 @@ public class ServerService extends Service {
                             // no startSse() here — the one SSE thread picks
                             // the healthy state up on its next loop pass
                         }
-                    } catch (Exception ignored) {}
+                    } catch (Throwable ignored) { }
                 }
             }
 
@@ -608,8 +613,10 @@ public class ServerService extends Service {
                             }
                         }
                     }
-                } catch (Exception e) {
-                    // reconnect below
+                } catch (Throwable e) {
+                    // P23: reconnect below — the SSE loop must survive
+                    // anything (Errors included); a dead feed was one of
+                    // the ways a run went silent on the field device.
                 } finally {
                     sseConn = null;
                     if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
@@ -660,7 +667,7 @@ public class ServerService extends Service {
         if (!evtListeners.isEmpty()) {
             main.post(() -> {
                 for (EventListener l : evtListeners) {
-                    try { l.onEvent(ev); } catch (Exception ignored) {}
+                    try { l.onEvent(ev); } catch (Throwable ignored) { }
                 }
             });
         }
@@ -777,7 +784,12 @@ public class ServerService extends Service {
     }
 
     private void updateNotif(String text) {
-        NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
-        nm.notify(NOTIF_ID, buildNotif(text));
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            nm.notify(NOTIF_ID, buildNotif(text));
+        } catch (Throwable t) {
+            // P23: a notification hiccup must never take the supervisor down
+            Trail.record(this, "notification", t);
+        }
     }
 }

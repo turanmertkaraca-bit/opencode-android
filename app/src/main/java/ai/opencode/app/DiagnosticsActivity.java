@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.ApplicationExitInfo;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -83,6 +85,21 @@ public class DiagnosticsActivity extends Activity {
         btns.addView(r1);
         btns.addView(r2);
         root.addView(btns);
+
+        root.addView(section("last Java crash — the actual trace"));
+        root.addView(crashSection());
+
+        root.addView(section("contained errors — caught so the app didn't crash"));
+        TextView tvTrail = monoText();
+        String trail = Trail.read(this);
+        if (trail.length() > 4000) trail = "…\n" + trail.substring(trail.length() - 4000);
+        tvTrail.setText(trail.isEmpty()
+                ? "· none yet — nothing has been contained"
+                : trail);
+        root.addView(tvTrail);
+        root.addView(note("P23: every failure the app CONTAINS instead of dying "
+                + "from lands here (and in a chat line). If anything ever misbehaves, "
+                + "paste these lines — they name the exact thrower."));
 
         root.addView(section("last exits — why Android stopped the app"));
         TextView tvExits = monoText();
@@ -333,6 +350,58 @@ public class DiagnosticsActivity extends Activity {
         return t;
     }
 
+    /** P23: the FULL last-crash.txt content + copy/clear — the boot screen
+     *  had this, but warm launches skip the boot screen, so the field
+     *  could only ever paste "crash file exists (1 KB)". One tap now. */
+    private LinearLayout crashSection() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        File cf = App.crashFile(this);
+        TextView tvCrash = monoText();
+        if (cf.exists() && cf.length() > 0) {
+            tvCrash.setText(readBounded(cf, 4000));
+        } else {
+            tvCrash.setText("· no Java crash file — good");
+        }
+        box.addView(tvCrash);
+        if (cf.exists() && cf.length() > 0) {
+            LinearLayout btns = new LinearLayout(this);
+            btns.setOrientation(LinearLayout.HORIZONTAL);
+            TextView copy = chip("Copy trace");
+            copy.setOnClickListener(v -> {
+                try {
+                    String body = readBounded(cf, 100_000);
+                    ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                    cm.setPrimaryClip(ClipData.newPlainText("opencode crash", body));
+                    Toast.makeText(this, "crash trace copied — paste it to the dev",
+                            Toast.LENGTH_LONG).show();
+                } catch (Exception e) {
+                    Toast.makeText(this, "copy failed: " + e, Toast.LENGTH_SHORT).show();
+                }
+            });
+            TextView clr = chip("Clear");
+            clr.setOnClickListener(v -> {
+                try { cf.delete(); } catch (Exception ignored) {}
+                tvCrash.setText("· cleared");
+            });
+            btns.addView(copy);
+            btns.addView(clr);
+            box.addView(btns);
+        }
+        return box;
+    }
+
+    /** Tail-bounded file read for display. Never throws. */
+    private static String readBounded(File f, int maxChars) {
+        try {
+            String s = Api.readAll(new java.io.FileInputStream(f));
+            if (s.length() <= maxChars) return s;
+            return "…" + s.substring(s.length() - maxChars);
+        } catch (Throwable t) {
+            return "(unreadable: " + t + ")";
+        }
+    }
+
     /** P21: the system's own record of why OUR process exited, newest
      *  first. This is the evidence that was missing all along: the field
      *  deaths left no Java crash file because they were NOT Java crashes
@@ -341,11 +410,6 @@ public class DiagnosticsActivity extends Activity {
      *  for deaths that already happened. */
     private String exitInfoText() {
         StringBuilder b = new StringBuilder();
-        File lc = App.crashFile(this);
-        if (lc.exists()) {
-            b.append("java crash file: ").append(lc.getAbsolutePath())
-             .append(" (").append(Binaries.human(lc.length())).append(")\n\n");
-        }
         if (Build.VERSION.SDK_INT >= 30) {
             try {
                 ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);

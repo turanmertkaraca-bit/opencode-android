@@ -47,6 +47,28 @@ public class App extends Application {
                             + new java.util.Date() + "\n\n" + sw)
                             .getBytes("UTF-8"));
                 }
+                // P23: name the crash IN the incident log the field reports
+                // paste. The exit-forensics row only ever said "crash" —
+                // now the sandbox log carries WHAT threw and WHERE, even
+                // if last-crash.txt itself never reaches us.
+                try {
+                    long mem = -1;
+                    try {
+                        mem = Resilience.parseMemAvailableKb(Api.readAll(
+                                new java.io.FileInputStream("/proc/meminfo")));
+                    } catch (Throwable ignored) {}
+                    File d = new File(getFilesDir(), "sandbox-diag.log");
+                    StringBuilder b = new StringBuilder();
+                    b.append(Resilience.diagLine(System.currentTimeMillis(),
+                            "app-crash",
+                            "thread " + t.getName() + " · "
+                                    + Resilience.guardLine(0, "uncaught", e)
+                                            .replaceFirst("^[0-9]+ · ", ""),
+                            mem)).append('\n');
+                    try (OutputStream o = new FileOutputStream(d, true)) {
+                        o.write(b.toString().getBytes("UTF-8"));
+                    }
+                } catch (Throwable ignored) {}
             } catch (Exception ignored) {}
             if (prev != null) prev.uncaughtException(t, e);
         });
