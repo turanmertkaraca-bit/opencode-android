@@ -11,18 +11,49 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * Minimal loopback HTTP client for the in-process opencode server.
- * Skeleton pins the endpoint to 127.0.0.1:4096 (the port the P0 probe
- * verified end-to-end on-device).
+ * The P0 probe verified 127.0.0.1:4096 end-to-end on-device, so 4096 stays
+ * the well-known default — but P19 no longer MARRIES the app to it: the
+ * server is spawned with an ephemeral port (—port 0) and the actual port
+ * is parsed from the child's stdout listen line. Reason: the field crash
+ * where the app process was killed, its orphaned server child kept holding
+ * 4096 (occasionally un-killable mid-IO), and every respawn then died with
+ * EADDRINUSE until the user cold-booted the PHONE. A server that can bind
+ * ANY free port cannot be dead-locked by a squatter.
  */
 public final class Api {
 
     private Api() {}
 
     public static final String HOST = "127.0.0.1";
-    public static final int PORT = 4096;
+    /** Preferred/default port; volatile: the supervisor rewrites it when the
+     *  spawned server binds an ephemeral port. All requests read it live. */
+    public static volatile int PORT = 4096;
+
+    /** Supervisor-only: adopt the port the running server actually bound. */
+    public static void setPort(int p) { if (p > 0 && p <= 65535) PORT = p; }
 
     public static String baseUrl() {
         return "http://" + HOST + ":" + PORT;
+    }
+
+    /** P19: the port the child announced, out of one stdout line. Returns
+     *  0 for any line that is not the listen banner. Pure + JVM-testable:
+     *  "opencode server listening on http://127.0.0.1:41234" → 41234. */
+    public static int parseListenPort(String line) {
+        if (line == null) return 0;
+        int banner = line.indexOf("listening on http://");
+        if (banner < 0) return 0;
+        int colon = line.lastIndexOf(':');
+        if (colon < banner) return 0;
+        int end = colon + 1;
+        while (end < line.length() && Character.isDigit(line.charAt(end))) end++;
+        if (end == colon + 1) return 0;          // no digits after the colon
+        try {
+            int p = Integer.parseInt(line.substring(colon + 1, end));
+            return (p > 0 && p <= 65535) ? p : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     /** Simple response holder: status + body. */

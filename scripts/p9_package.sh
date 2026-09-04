@@ -14,15 +14,13 @@ cp -r "$PROJ/app" "$STAGE/apk-gradle/app"
 rm -rf "$STAGE/apk-gradle/app/build" "$STAGE/apk-gradle/app/.gradle"
 rm -f  "$STAGE/apk-gradle/app/src/main/assets/oc_pkg.bin"
 cp -f "$PROJ/build.gradle" "$PROJ/settings.gradle" "$PROJ/gradle.properties" \
-      "$PROJ/README.md" "$PROJ/.gitignore" "$STAGE/apk-gradle/" 2>/dev/null || true
+      "$PROJ/README.md" "$PROJ/.gitignore" "$STAGE/apk-gradle/"
 mkdir -p "$STAGE/apk-gradle/scripts"
 for f in p0_setup_toolchain.sh p0_rehearse_x86.sh p4_scan_binary.py \
          p4_scan_binary2.py p5_scan_binary.py p5_scan2.py p6_scan_binary.py \
          p6_scan2.py p6_build.sh p6_package.sh p7_package.sh p8_package.sh \
-         p9_package.sh p9_gh_ship.sh \
-         ElfGateTest.java TestTarGz.java; do
-  cp -f "$PROJ/scripts/$f" "$STAGE/apk-gradle/scripts/" 2>/dev/null \
-    || cp -f "/home/z/my-project/scripts/$f" "$STAGE/apk-gradle/scripts/" 2>/dev/null || true
+         p9_package.sh TestSandbox.java ElfGateTest.java TestTarGz.java; do
+  cp -f "/home/z/my-project/scripts/$f" "$STAGE/apk-gradle/scripts/" 2>/dev/null || true
 done
 
 # --- kit README ---
@@ -30,48 +28,44 @@ cat > "$STAGE/README.md" <<'EOF'
 # opencode-android v0.9.0-p9
 
 Install `opencode-p9-v0.9.0-debug.apk` (sideload; allow unknown apps).
-Same signing key as v0.6.0–v0.8.0 → installs as an UPDATE, no uninstall.
+Same signing key as v0.6.0-v0.8.0 → installs as an UPDATE, no uninstall.
 
-## What P9 is — the "graphite" release (monochrome + fixes + pkg)
+## What P9 is — the "package manager + realtime chat" release
 
-- MONOCHROME "graphite" theme: hierarchy from brightness steps, no hue —
-  graphite credit-card gradients, dark-gray user bubble, hairline rules.
-  One desaturated clay red is reserved for errors only.
-- MODEL PICKER, FIXED: root cause found by scanning the shipped binary —
-  a provider WITHOUT credentials is never loaded, so /config/providers
-  lists its models but every send fails with "Model not found". The
-  picker now sorts keyed providers first, marks "(no key)" providers,
-  and offers an inline "paste key & use" dialog right from the picker.
-  OpenCode Zen ("opencode") is now the FIRST provider in API keys — the
-  requested opencode API key finally has a home. Saving a key restarts
-  the server so the provider actually loads.
-- ERROR GUIDANCE: model-not-found / 401 / 429 failures now explain the
-  fix ("provider X has NO API key — API keys → paste") instead of a raw
-  HTTP code. The send retry no longer silently drops the selected model.
-- PERMISSIONS + STOP, FIXED: Allow / Always / Deny and ■ stop used to
-  queue behind the in-flight send POST (single executor) and never fired
-  mid-turn — they now run on a dedicated control lane, always responsive.
-- SANDBOX DOCTOR, FIXED: results actually replace "checking…" (the old
-  dialog called setView() after show() — a no-op), now lists pkg too.
-- PACKAGE MANAGER: `pkg list` / `pkg install jq|fzf|yq|gh|shfmt|lazygit|glow`
-  inside the sandbox shell (busybox-wget powered shim) + one-tap
-  "Agent tools" installs in Diagnostics. Static aarch64 catalog, verified.
-- COST METER: per-message "model · ⇅ tokens · $cost" footer, live session
-  total "$X.XXXX · Nk tok" in the chat header (delta-accurate under SSE).
-- CHAT, GROUNDED & SMALLER: 14sp type, tighter bubbles, assistant blocks
-  anchored on a hairline left rule, tool cards with mono names + boxed
-  RUN/DONE/ERR badges (RUN breathes) and inset dark wells for input/
-  output, smooth follow-scroll, spring send button.
-- PROJECT DECK: cards sit together (no more one-card-per-screen voids),
-  a REAL fling always advances one card (fast swipes finally work), and
-  the misleading horizontal dots are now a vertical tick rail.
-- QA BRIDGE (Settings → developer): the "companion app" idea, in-app —
-  off by default; paste a fine-grained GitHub token + repo and the app
-  polls qa/commands.txt (shot / log / state / open <screen> / restart /
-  toast) and uploads screenshots of its own windows + diagnostics back
-  to the repo. Development with real eyes on a real device.
-- Watchdog silence window 3.5 s → 12 s (long tool runs no longer look
-  stalled). Same zero-dependency, framework-only codebase.
+- SANDBOX PACKAGE MANAGER (the big one): the app now ships the Alpine
+  minirootfs (aarch64, ~4 MB) and a real package manager — `pkg` — with
+  NO proot. Every Alpine binary runs through the musl dynamic loader
+  directly from app-private storage (Termux-style exec, targetSdk 28).
+  The agent can now do:  pkg update / pkg install python3 py3-pip git
+  nodejs npm gcc make ripgrep jq curl openssh-client …
+  Wrappers for every installed command are auto-linked onto PATH
+  (pkg rehash is automatic after install/remove).
+  Network for the Alpine world goes through the in-app CONNECT proxy
+  (bionic DNS) exported as http(s)_proxy — git/pip/curl/apk all work.
+  Package/index authenticity: apk RSA signatures (repo fetched over http,
+  no CA bundle in minirootfs — signatures are the security boundary).
+- REALTIME CHAT: token-by-token streaming feel — a 24 ms smoothing ticker
+  paints adaptive char-steps with a live caret while the part streams,
+  then finalizes with full markdown render ONCE. In-place TextView
+  updates (no full-list re-render per frame). Long-press any message to
+  copy.
+- CHAT REDESIGN: gradient user bubbles (asymmetric tail), cleaner
+  assistant blocks, THINKING cards, tool cards with status dots + friendly
+  names (shell, read file, edit file…), error cards, centered system
+  pills, hero empty state with tappable starter prompts, raised composer
+  bar with ⌘ / Build-Plan / model chips and a gradient send FAB, sessions
+  button in the header.
+- FULL MODEL CATALOG: /config/providers (what is usable NOW) merged with
+  the complete models.dev catalog (what EXISTS) — hundreds of models,
+  search over everything, "(no key)" / "(add API key)" markers, disk
+  cache so the sheet opens instantly.
+- SETTINGS FROM ZERO: gradient hero server card (live status, sandbox
+  root, restart), section cards with icon discs + chevrons, custom
+  animated switch (no more Android 4 Switch), SANDBOX section with pkg
+  status + install/repair + rehash + doctor.
+- PROJECT DECK: the page indicator is now a VERTICAL rail on the right
+  edge (the old horizontal dots read as left/right — fixed).
+- Diagnostics gained pkg presets: pkg version / pkg list / pkg rehash.
 
 ## Build from source
 

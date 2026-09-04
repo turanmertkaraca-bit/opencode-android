@@ -72,6 +72,12 @@ public class ServerService extends Service {
      *  chat is still attached” instead of the user discovering it. */
     private static volatile String recoveryNote;
 
+    /** P19: set by the drain thread the moment the child announces the port
+     *  it actually bound (—port 0). Health is gated on this so the app can
+     *  never mistake a WEDGED ORPHAN sitting on the old port for the new
+     *  server being healthy. */
+    private static volatile boolean portKnown;
+
     /** Consume the pending recovery note (null when none). One-shot. */
     public static String consumeRecoveryNote() {
         String n = recoveryNote;
@@ -270,9 +276,20 @@ public class ServerService extends Service {
                 ? startDir : Binaries.homeDir(this);
         servingDir = cwd;
 
+        // P19: pick a bindable port BEFORE spawning. Verified on the rig:
+        // opencode maps --port 0 to its own default (4096), so a true
+        // ephemeral spawn is impossible — the app asks the kernel instead.
+        // When the default is free we keep it; when a wedged orphan (the
+        // field crash) holds it, we serve on the next free port and the
+        // banner parse below confirms the child actually owns it.
+        int want = Resilience.pickFreePort(Api.PORT);
+        if (want != Api.PORT) {
+            appendDiag("port", "default " + Api.PORT + " busy — serving on " + want);
+            Api.setPort(want);
+        }
         ProcessBuilder pb = new ProcessBuilder(
                 bin.getAbsolutePath(), "serve",
-                "--port", String.valueOf(Api.PORT),
+                "--port", String.valueOf(want),
                 "--hostname", Api.HOST);
         pb.directory(cwd);
         pb.redirectErrorStream(true);
@@ -294,8 +311,12 @@ public class ServerService extends Service {
             }
 
             // A previous server (or an orphan from a killed app process) can
-            // still hold the port — the respawn would die with EADDRINUSE
-            // and the user's only fix was a cold boot. Kill it first.
+            // still hold the port — with --port 0 the respawn no longer NEEDS
+            // that port, but the orphan still burns RAM and may hold the
+            // session store, so sweep it: kill every process whose argv[0]
+            // is exactly our binary, then the old port-owner belt-and-braces.
+            int swept = sweepOrphans(bin.getAbsolutePath());
+            if (swept > 0) appendDiag("orphan-sweep", "killed " + swept + " leftover opencode process(es)");
             int stale = killStalePortOwner();
             if (stale > 0) appendDiag("stale-port", "killed pid " + stale);
 
@@ -310,13 +331,24 @@ public class ServerService extends Service {
                 return;                     // spawn errors are not transient
             }
             proc = p;
+            portKnown = false;              // re-armed: the new child announces
 
             final int thisAttempt = attempts;
             Thread drain = new Thread(() -> {
                 try (BufferedReader r = new BufferedReader(
                         new InputStreamReader(p.getInputStream()), 16 * 1024)) {
                     String line;
-                    while ((line = r.readLine()) != null) addTail(line);
+                    while ((line = r.readLine()) != null) {
+                        addTail(line);
+                        // P19: adopt the port the child actually bound.
+                        int pp = Api.parseListenPort(line);
+                        if (pp > 0) {
+                            if (pp != Api.PORT) appendDiag("port", "bound " + pp
+                                    + " (default " + 4096 + " was taken or ephemeral)");
+                            Api.setPort(pp);
+                            portKnown = true;
+                        }
+                    }
                 } catch (Exception ignored) {}
             }, "oc-drain");
             drain.setDaemon(true);
@@ -324,29 +356,39 @@ public class ServerService extends Service {
 
             setState(ST_STARTING, "opencode serve pid=" + p.hashCode());
 
-            // wait healthy (up to 120 s)
+            // wait healthy (up to 120 s) — but ONLY against the port this
+            // child announced (or, as a legacy fallback, after 20 s against
+            // whatever Api.PORT holds if the banner never appeared)
             long t0 = System.currentTimeMillis();
             boolean healthy = false;
+            boolean portFallbackLogged = false;
             for (int i = 0; i < 240 && RUNNING && !userStop; i++) {
                 try { Thread.sleep(500); } catch (InterruptedException e) { return; }
                 if (!p.isAlive()) break;
-                try {
-                    if (serverUp()) {
-                        healthy = true;
-                        long ms = System.currentTimeMillis() - t0;
-                        setState(ST_HEALTHY, "http 200 in " + ms + " ms"
-                                + (attempts > 0 ? " (auto-recovered)" : ""));
-                        updateNotif("running · " + cwd.getName());
-                        if (attempts > 0) {
-                            recoveryNote = "sandbox auto-recovered — the previous "
-                                    + "server process died (" + nz(lastTailLine(), "unknown")
-                                    + "). This chat is still attached; resend if the "
-                                    + "last message didn't finish";
-                            appendDiag("recovered", "attempt " + thisAttempt);
+                boolean gate = portKnown || (System.currentTimeMillis() - t0 > 20_000);
+                if (gate && !portFallbackLogged && !portKnown) {
+                    portFallbackLogged = true;
+                    appendDiag("port", "no listen banner in 20 s — probing default port");
+                }
+                if (gate) {
+                    try {
+                        if (serverUp()) {
+                            healthy = true;
+                            long ms = System.currentTimeMillis() - t0;
+                            setState(ST_HEALTHY, "http 200 in " + ms + " ms on :" + Api.PORT
+                                    + (attempts > 0 ? " (auto-recovered)" : ""));
+                            updateNotif("running · " + cwd.getName());
+                            if (attempts > 0) {
+                                recoveryNote = "sandbox auto-recovered — the previous "
+                                        + "server process died (" + nz(lastTailLine(), "unknown")
+                                        + "). This chat is still attached; resend if the "
+                                        + "last message didn't finish";
+                                appendDiag("recovered", "attempt " + thisAttempt);
+                            }
+                            break;
                         }
-                        break;
-                    }
-                } catch (Exception ignored) {}
+                    } catch (Exception ignored) {}
+                }
             }
 
             if (healthy) {
@@ -355,11 +397,20 @@ public class ServerService extends Service {
                 // — calling it per-spawn would double-deliver events).
             }
 
-            // watcher: death detection + late health (inner, per-spawn)
+            // watcher: death detection + late health (inner, per-spawn).
+            // P19: also the heartbeat — one diag line every 30 s so that a
+            // WHOLE-PROCESS death (the field crash: nothing recorded, nothing
+            // loggable from a dead JVM) still leaves “how long ago did the
+            // log stop, and what was memory then” on disk for the next report.
             boolean died = false;
+            int hbTick = 0;
             while (RUNNING && !userStop) {
                 try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
                 if (!p.isAlive()) { died = true; break; }
+                if (++hbTick >= 15) {
+                    hbTick = 0;
+                    appendDiag("hb", "server up · :" + Api.PORT);
+                }
                 if (state != ST_HEALTHY) {
                     try {
                         if (serverUp()) {
@@ -421,6 +472,35 @@ public class ServerService extends Service {
             fo.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             fo.close();
         } catch (Exception ignored) {}
+    }
+
+    /** P19: kill every live process whose argv[0] is EXACTLY our opencode
+     *  binary path — orphans from a killed app process (the field crash:
+     *  the child outlives the app, keeps its port and its session store,
+     *  and every fresh spawn then fights it). Exact-path match only, so
+     *  no other app's processes can ever be touched. Returns count killed. */
+    private static int sweepOrphans(String binPath) {
+        int killed = 0;
+        try {
+            File[] dirs = new File("/proc").listFiles();
+            if (dirs == null) return 0;
+            int myPid = android.os.Process.myPid();
+            for (File d : dirs) {
+                int pid;
+                try { pid = Integer.parseInt(d.getName()); } catch (Exception e) { continue; }
+                if (pid == myPid) continue;
+                String cl;
+                try {
+                    cl = Api.readAll(new java.io.FileInputStream(new File(d, "cmdline")));
+                } catch (Exception e) { continue; }
+                if (!Resilience.isOcCmdline(cl, binPath)) continue;
+                try {
+                    new ProcessBuilder("kill", "-9", String.valueOf(pid)).start().waitFor();
+                    killed++;
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+        return killed;
     }
 
     /** Kill a leftover process listening on Api.PORT (best effort). The

@@ -8,3 +8,10 @@ captures/
 .cxx/
 *.apk.idsig
 oc_pkg.bin
+.gh_token
+worklog.md
+download/
+gh-repo/
+tool-results/
+upload/
+skills/
