@@ -187,4 +187,48 @@ public final class Resilience {
             return "moderate — the conversation re-reads itself each turn";
         return "light — nothing to worry about";
     }
+
+    // ------------------------------------------------- P20 resume + settle
+
+    /** P20: the field bug — "i let the app work in background when i came
+     *  back i couldnt look into a tought buble it looked empty". The chat
+     *  unsubscribes from the event feed in onPause; every part that fired
+     *  while away was lost FOREVER (onResume only refetched an empty list),
+     *  so a thinking card born right before the pause never received a
+     *  single delta. P20 replays the session from the server's message
+     *  store on every resume. Parts with an id have a deterministic row
+     *  key (messageID|partID) and upsert safely; a part WITHOUT an id is
+     *  keyed with a session-local counter live, so a replay can NOT rebuild
+     *  that key — it must be skipped for messages already on screen or it
+     *  would duplicate the row. */
+    public static boolean stablePartKey(String partId) {
+        return partId != null && !partId.isEmpty();
+    }
+
+    /** P20: the collapsed thinking card's live preview — the FRESHEST
+     *  slice of the reasoning text so far (≤ max chars, cut to a clean
+     *  line start so the single-line ticker never shows a dangling
+     *  half-line, trailing newline stripped). Empty/immature input → "". */
+    public static String thinkWindow(String grown, int upto, int max) {
+        if (grown == null || grown.isEmpty()) return "";
+        if (max <= 0) return "";
+        int end = Math.min(upto, grown.length());
+        if (end <= 0) return "";
+        int from = Math.max(0, end - max);
+        String win = grown.substring(from, end);
+        int nl = win.indexOf('\n');
+        if (nl >= 0) win = win.substring(nl + 1);
+        while (win.endsWith("\n")) win = win.substring(0, win.length() - 1);
+        if (win.isEmpty()) return from > 0 ? "…" : "";
+        return win;
+    }
+
+    /** P20: settle the chat after a resume replay ONLY when the last
+     *  fetched message is an assistant message that FINISHED (time
+     *  completed) — a run still going, or a trailing user message, must
+     *  never stop the "working" state (P19's self-heal re-arms it). */
+    public static boolean shouldSettle(boolean busy, boolean lastIsAssistant,
+                                       boolean hasCompletedTs) {
+        return busy && lastIsAssistant && hasCompletedTs;
+    }
 }
