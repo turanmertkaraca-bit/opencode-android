@@ -67,6 +67,48 @@ public final class Resilience {
 
     // ------------------------------------------------------- crash streak
 
+    /** Chat-side quiet threshold: how long the SSE feed may stay silent
+     *  while "busy" before the chat gives up on the run. P18 used 3.5 s —
+     *  that murdered the live-edit shower (and the stop button) every time
+     *  the agent ran a quiet tool for a few seconds, because a running
+     *  bash/LLM tool emits NO part events while it works. A run's real end
+     *  is session.idle / session.error on the feed; the quiet timer is now
+     *  only a last resort for a feed that died without either (10 min,
+     *  matching the POST read budget). */
+    public static long quietEndMs() { return 600_000L; }
+
+    /** P19: does a /proc/<pid>/cmdline payload (NUL-separated argv) belong
+     *  to OUR opencode binary? Matches only when argv[0] equals the exact
+     *  path — never a prefix walk, never another app's file. Pure. */
+    public static boolean isOcCmdline(String cmdline, String binPath) {
+        if (cmdline == null || binPath == null) return false;
+        int cut = cmdline.indexOf('\0');
+        String argv0 = (cut >= 0) ? cmdline.substring(0, cut) : cmdline;
+        return argv0.equals(binPath);
+    }
+
+    /** P19: choose a bindable port for the server spawn. The child does
+     *  NOT support a true ephemeral port (—port 0 just becomes its default
+     *  4096 — verified against v1.18.25 on the rig), so the APP asks the
+     *  kernel instead: preferred when free, otherwise a kernel-assigned
+     *  free port. This is what turns the field crash (wedged orphan holds
+     *  4096 → every respawn dies EADDRINUSE → cold boot) into a non-event:
+     *  the supervisor simply serves on the next free port and the banner
+     *  parse + health gate confirm the child actually owns it. */
+    public static int pickFreePort(int preferred) {
+        try (java.net.ServerSocket s = new java.net.ServerSocket(preferred)) {
+            s.setReuseAddress(true);
+            return preferred;               // well-known port still free
+        } catch (Exception taken) {
+            try (java.net.ServerSocket s = new java.net.ServerSocket(0)) {
+                int p = s.getLocalPort();
+                return p > 0 ? p : preferred;
+            } catch (Exception e) {
+                return preferred;           // last resort: try as-is
+            }
+        }
+    }
+
     /** Number of server deaths inside the lookback window (ms). Used by
      *  the auto-restart supervisor: 3+ deaths in 10 min = a crash LOOP,
      *  stop burning battery on respawns and surface it to the user. */

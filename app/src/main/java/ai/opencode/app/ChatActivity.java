@@ -188,10 +188,18 @@ public class ChatActivity extends Activity
 
     private final Runnable watchdog = new Runnable() {
         @Override public void run() {
-            if (busy && System.currentTimeMillis() - lastPartTs > 3500) {
+            // P19: the quiet threshold is 10 minutes (Resilience.quietEndMs),
+            // not 3.5 s. A working agent is SILENT on the feed while a bash
+            // tool runs (no part events for minutes) — the old threshold
+            // declared the run dead mid-command, tore down the live-edit
+            // watcher, reverted the stop button, and made every file edit
+            // after it invisible ("live file edits dont show in chat").
+            // A run's real end is session.idle / session.error; the quiet
+            // timer only catches a feed that died without either.
+            if (busy && System.currentTimeMillis() - lastPartTs > Resilience.quietEndMs()) {
                 setBusy(false);
             } else if (busy) {
-                ui.postDelayed(this, 1200);
+                ui.postDelayed(this, 5000);
             }
         }
     };
@@ -743,7 +751,12 @@ public class ChatActivity extends Activity
     private void setBusy(boolean b) {
         busy = b;
         // P17: the live-edit watch exists ONLY while the agent works.
-        if (b) startEditWatch(); else stopEditWatch();
+        // P19: the live card now EXISTS FROM RUN START ("watching project
+        // files…", pulsing) instead of waiting for the first fs event —
+        // the user must see that the shower is armed even before the
+        // agent's first write lands.
+        if (b) { startEditWatch(); ensureLiveRow(); }
+        else stopEditWatch();
         ui.post(() -> {
             if (b) {
                 btnSend.setText("■");
@@ -1025,6 +1038,17 @@ public class ChatActivity extends Activity
                     if (busy && ("text".equals(pt) || "reasoning".equals(pt)))
                         runHadOutput = true;   // P11: the run produced real output
                     applyPart(part, null);
+                    // P19 self-heal: parts for OUR session mean a run is
+                    // alive even if we think otherwise — chat opened mid-run,
+                    // or the feed outlived a busy-flag mishap. Re-arm busy
+                    // (streaming render + stop button + the live-edit watch).
+                    String psid = Json.str(part, "sessionID");
+                    if (!busy && sessionId != null && sessionId.equals(psid)
+                            && !isFinishing()) {
+                        setBusy(true);
+                        ui.removeCallbacks(watchdog);
+                        ui.postDelayed(watchdog, 2000);
+                    }
                 }
             } else if ("message.updated".equals(type)) {
                 applyMessageInfo(Json.map(props, "info"));
@@ -1566,8 +1590,14 @@ public class ChatActivity extends Activity
         }
     }
 
-    /** Insert the ONE live card row (idempotent). */
+    /** Insert the ONE live card row (idempotent). P19: also callable from
+     *  background threads (send() → setBusy(true)) — hops to the main
+     *  looper first, because touchView mutates the view tree. */
     private void ensureLiveRow() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            ui.post(this::ensureLiveRow);
+            return;
+        }
         boolean added;
         synchronized (lock) {
             if (idxByKey.containsKey(LIVE_KEY)) return;
@@ -1583,9 +1613,23 @@ public class ChatActivity extends Activity
         }
     }
 
-    /** The "edit shower" card — slim while idle, a brief shower while hot. */
+    /** The "edit shower" card — slim while idle, a brief shower while hot.
+     *  P19: restyled onto the thought-card surface (the ✦ thinking card's
+     *  family — a sibling, not a chat bubble), and when a run ends with
+     *  ZERO edits the row collapses to nothing (no empty records). */
     private View buildLiveView() {
         boolean settled = !busy;
+        boolean empty;
+        synchronized (editFeed) { empty = editFeed.isEmpty(); }
+        if (settled && empty) {
+            View ghost = new View(this);
+            ghost.setVisibility(View.GONE);
+            LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0);
+            glp.topMargin = 0;
+            ghost.setLayoutParams(glp);
+            return ghost;
+        }
         boolean hot;
         synchronized (editFeed) { hot = EditPulse.hot(editFeed, System.currentTimeMillis()); }
         boolean expanded = liveOpen != null ? liveOpen : (hot && !settled);
@@ -1594,7 +1638,7 @@ public class ChatActivity extends Activity
 
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackgroundResource(R.drawable.bg_tool_card);
+        c.setBackgroundResource(R.drawable.bg_thought_card);
         int cp = dp(11);
         c.setPadding(cp, dp(8), cp, dp(9));
 
