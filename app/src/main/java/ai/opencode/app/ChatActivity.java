@@ -476,7 +476,7 @@ public class ChatActivity extends Activity
 
     private final Runnable flushPaints = this::flushPaintsNow;
 
-    private void requestPaint(Row r) {
+    void requestPaint(Row r) {           // package-private: P24 test seam
         dirtyRows.add(r);
         if (!paintScheduled) {
             paintScheduled = true;
@@ -484,7 +484,19 @@ public class ChatActivity extends Activity
         }
     }
 
-    private void flushPaintsNow() {
+    /** P24: paint exactly one row — the fault-isolation seam. Package-
+     *  private so the Robolectric suite can poison it and prove the
+     *  transcript survives a row that cannot paint. */
+    void paintRowOnce(Row r) { touchView(r); }
+
+    /** P24 field lesson ("doesn't crash but it still won't work"): P23's
+     *  single guard around the WHOLE batch meant ONE poisoned row aborted
+     *  every row painted after it — and the feed re-dirties that row on
+     *  every delta/file event, so every flush re-failed: a banner wall
+     *  plus a frozen transcript, with the run itself still healthy. From
+     *  P24 on each row fails ALONE: batch continues, repeat offenders are
+     *  quarantined into a can't-fail fallback line. */
+    void flushPaintsNow() {              // package-private: test seam
         guarded("paint flush", () -> {
             paintScheduled = false;
             if (dirtyRows.isEmpty()) return;
@@ -492,10 +504,53 @@ public class ChatActivity extends Activity
             dirtyRows.clear();
             for (Row r : batch) {
                 Integer i = r.key == null ? null : idxByKey.get(r.key);
-                if (i != null && i < rows.size() && rows.get(i) == r) touchView(r);
+                if (i == null || i >= rows.size() || rows.get(i) != r) continue;
+                if (r.key != null && quarantined.contains(r.key)) continue;
+                final Row fr = r;
+                Throwable t = Resilience.guard(() -> paintRowOnce(fr));
+                if (t == null) {
+                    if (r.key != null) paintFails.remove(r.key);  // second chance restored
+                } else {
+                    noteRowPaintFail(fr, t);
+                }
             }
             autoscroll();
         });
+    }
+
+    /** P24: one row's paint failed. Count it; after
+     *  {@link Resilience#paintFailQuarantineAfter()} failures quarantine
+     *  the row — content swapped for the bounded fallback line that
+     *  cannot fail. The part degrades VISIBLY; the chat keeps flowing.
+     *  Never throws (it runs inside containment contexts). */
+    private void noteRowPaintFail(Row r, Throwable t) {
+        try {
+            if (r.key == null) return;      // unkeyed rows: trail only
+            String k = r.key;
+            Trail.record(this, "paint row " + k, t);
+            Integer c = paintFails.get(k);
+            int n = c == null ? 1 : c + 1;
+            paintFails.put(k, n);
+            if (n < Resilience.paintFailQuarantineAfter()) return;
+            paintFails.remove(k);
+            quarantined.add(k);
+            ui.post(() -> guarded("quarantine swap", () -> {
+                synchronized (lock) {
+                    Integer i = idxByKey.get(k);
+                    if (i == null || i >= rows.size()) return;
+                    Row qr = rows.get(i);
+                    if (qr.kind == K_LIVE) return;   // the live card manages itself
+                    qr.kind = K_SYS;
+                    qr.text.setLength(0);
+                    qr.text.append(Resilience.quarantineLine());
+                    qr.input.setLength(0); qr.output.setLength(0);
+                    qr.open = false; qr.livePreview = false;
+                    qr.shown = qr.text.length();
+                }
+                Row qv = rowByKey(k);
+                if (qv != null) touchView(qv);
+            }));
+        } catch (Throwable ignored) {}
     }
 
     private final Runnable tick = new Runnable() {
@@ -519,7 +574,11 @@ public class ChatActivity extends Activity
                             int step = 3 + (len - r.shown) / 8;
                             r.shown = Math.min(len, r.shown + step);
                         }
-                        paintStreaming(r);
+                        // P24: a row that can't paint must not kill the
+                        // whole ticker — quarantine it like a flush failure.
+                        final Row fr = r;
+                        Throwable pt = Resilience.guard(() -> paintStreaming(fr));
+                        if (pt != null) noteRowPaintFail(fr, pt);
                         if (r.shown < len) moreBox[0] = true;
                     }
                 }
@@ -864,6 +923,12 @@ public class ChatActivity extends Activity
     // NOTHING on the send/chat/feed paths kills the process — a Throwable
     // is contained, recorded to the guard trail, and shown as one line.
     private final java.util.Map<String, Long> containedAt = new HashMap<>();
+    private final java.util.Map<String, Integer> containedCount = new HashMap<>();
+    // P24: per-row paint fault bookkeeping. paintFails counts attempts per
+    // row key; quarantined keys are skipped by every flush forever (their
+    // content was swapped for a can't-fail fallback line).
+    private final java.util.Map<String, Integer> paintFails = new HashMap<>();
+    private final java.util.Set<String> quarantined = new java.util.HashSet<>();
 
     /** Run {@code r} at Throwable breadth; contain + report on failure. */
     private void guarded(String what, Runnable r) {
@@ -871,11 +936,17 @@ public class ChatActivity extends Activity
         if (t != null) contained(what, t);
     }
 
-    /** Record + surface a contained failure (throttled per what). */
+    /** Record + surface a contained failure (throttled per what). P24:
+     *  a REPEATED failure carries its one-line identity (class: message
+     *  · top app frame) inside the note — a single screenshot from the
+     *  field is now a diagnosis, no Diagnostics trip needed. */
     private void contained(String what, Throwable t) {
         Trail.record(this, what, t);
         long now = System.currentTimeMillis();
         Long last = containedAt.get(what);
+        Integer prev = containedCount.get(what);
+        int n = (prev == null || last == null || now - last > 60_000) ? 1 : prev + 1;
+        containedCount.put(what, n);
         if (last != null && now - last < 2500) return;   // no note spam
         containedAt.put(what, now);
         final Row nr = new Row();
@@ -883,6 +954,7 @@ public class ChatActivity extends Activity
         nr.ts = now;
         nr.text.append("\u26a0 contained an internal error in ").append(what)
                .append(" — the chat survived; \u2318 \u2192 Logs & shell has the trace");
+        if (n >= 2) nr.text.append('\n').append(Resilience.traceLine(t));
         ui.post(() -> guarded("containment note", () -> {
             synchronized (lock) {
                 rows.add(nr); idxByKey.put(nr.key, rows.size() - 1);
@@ -1328,6 +1400,7 @@ public class ChatActivity extends Activity
             synchronized (lock) {
                 rows.clear(); idxByKey.clear(); typeCount.clear(); msgs.clear();
                 dirtyRows.clear(); paintScheduled = false;   // P15: no ghost paints
+                paintFails.clear(); quarantined.clear();     // P24: fresh session, fresh paint credit
                 viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
             }
             list.removeAllViews();
@@ -1689,10 +1762,13 @@ public class ChatActivity extends Activity
                     rows.add(r); idxByKey.put(r.key, rows.size() - 1);
                     changed = true;
                 } else {
-                    changed = !r.status.equals(incoming.status)
+                    // P24: Objects.equals — a null status/title on either
+                    // side must count as "changed", never NPE the add path
+                    // (the exact crash class the field keeps finding).
+                    changed = !java.util.Objects.equals(r.status, incoming.status)
                             || r.input.length() != incoming.input.length()
                             || r.output.length() != incoming.output.length()
-                            || !r.title.equals(incoming.title);
+                            || !java.util.Objects.equals(r.title, incoming.title);
                     r.tool = incoming.tool; r.status = incoming.status;
                     r.title = incoming.title;
                     r.input.setLength(0); r.input.append(incoming.input);
@@ -2703,13 +2779,17 @@ public class ChatActivity extends Activity
         }
         list.removeAllViews();
         for (Row r : snapshot) {
-            try {
-                list.addView(buildRowView(r));
-            } catch (Exception e) {
-                TextView tv = mono(new TextView(this), 12);
-                tv.setText("· (unrenderable message part) ·");
-                list.addView(tv);
-            }
+            // P24: Throwable breadth (was catch(Exception)) — an Error row
+            // becomes the fallback line instead of leaving the list
+            // HALF-BUILT (removeAllViews already ran): the exact "chat
+            // survived but won't work" field state.
+            final Row fr = r;
+            Throwable rt = Resilience.guard(() -> list.addView(buildRowView(fr)));
+            if (rt == null) continue;
+            Trail.record(this, "row render", rt);
+            TextView tv = mono(new TextView(this), 12);
+            tv.setText(Resilience.quarantineLine());
+            list.addView(tv);
         }
         syncEmpty();
         autoscroll();

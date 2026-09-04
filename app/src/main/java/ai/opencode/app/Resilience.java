@@ -378,6 +378,65 @@ public final class Resilience {
         return b.toString();
     }
 
+    // ------------------------------------------------- P24 flush surgeon
+
+    /**
+     * P24 — the field device ran a build where the transcript FROZE while
+     * the run stayed healthy ("doesn't crash but it still won't work"):
+     * P23's one guard around the whole paint batch meant a single row
+     * that could not paint aborted every row behind it, and the feed
+     * re-dirtied that row on every delta — so every flush re-failed.
+     * P24's contract: a row fails ALONE. After this many failed paint
+     * attempts the row is QUARANTINED — its content is swapped for the
+     * can't-fail {@link #quarantineLine()} — and the flush never touches
+     * it again. One transient failure still gets a second chance; a
+     * second failure means the row is poison. Pure.
+     */
+    public static int paintFailQuarantineAfter() { return 2; }
+
+    /**
+     * P24: the fallback line a quarantined row displays. Bounded, plain,
+     * points at the trail — the part degrades visibly, the chat flows.
+     * Pure.
+     */
+    public static String quarantineLine() {
+        return "· this part could not be displayed — ⌘ → Logs & shell has the trace ·";
+    }
+
+    /**
+     * P24: bounded one-line identity of a Throwable for IN-CHAT display —
+     * class: message · top ai.opencode.app frame (same convention as
+     * {@link #guardLine}, shorter cap). Repeated containment notes carry
+     * this, so one screenshot from the field is a diagnosis. Pure.
+     */
+    public static String traceLine(Throwable t) {
+        if (t == null) return "-";
+        StringBuilder b = new StringBuilder();
+        b.append(t.getClass().getName());
+        String m = t.getMessage();
+        if (m != null && !m.isEmpty()) {
+            m = m.replace('\n', ' ').replace('\r', ' ');
+            if (m.length() > 110) m = m.substring(0, 110) + "…";
+            b.append(": ").append(m);
+        }
+        StackTraceElement[] st = t.getStackTrace();
+        if (st != null) {
+            for (StackTraceElement e : st) {
+                String cn = e.getClassName();
+                if (cn != null && cn.startsWith("ai.opencode.app.")) {
+                    b.append(" · ")
+                     .append(cn.substring("ai.opencode.app.".length()))
+                     .append('.').append(e.getMethodName())
+                     .append(':').append(e.getLineNumber());
+                    break;
+                }
+            }
+        }
+        String s = b.toString();
+        if (s.length() > 200) s = s.substring(0, 200) + "…";
+        return s;
+    }
+
     /** P21 replay-keying contract: how many parts in a fetched session
      *  LACK a stable part id. The resume replay updates known messages by
      *  the deterministic messageID|partID key; parts WITHOUT an id can
