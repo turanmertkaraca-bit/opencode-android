@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.20.0 — P20)
+## Install (v0.21.0 — P21)
 
-1. Grab `opencode-p20-v0.20.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p21-v0.21.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -18,6 +18,33 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
    console.opencode.ai) runs its 31 FREE models with no key at all.
 4. One-minute armor against Galaxy process kills: **Settings → keep alive →
    Battery optimization — exempt ✓**, plus Device care → Never sleeping apps.
+5. If anything ever dies: **Diagnostics → "last exits"** names the killer
+   (system exit records, retroactive), and the sandbox incident log has
+   the server's side. Paste both.
+
+## What's in v0.21.0 (P21 — the stable one)
+
+- **the keyboard stays in the chat box** — the auto-scroll used
+  `ScrollView.fullScroll()`, which runs a FOCUS SEARCH and could move
+  keyboard focus into the selectable message rows while the agent
+  streamed (every 24 ms) — the IME kept detaching from the input.
+  Scrolling is now focus-free at all three call sites, and a guard
+  restores focus to the chat box if any row rebuild ever takes it.
+- **exit forensics** — Diagnostics → "last exits — why Android stopped
+  the app": the system's own ApplicationExitInfo records, naming the
+  process killer (LOW MEMORY / ANR / NATIVE crash / signal / freezer)
+  retroactively — the evidence that was missing for the P19/P20 field
+  deaths. Reason constants pinned against the API-34 android.jar.
+- **send-crash hardening** — resume replays no longer re-decode every
+  image (up to 12 MB of base64 → bytes → bitmap per image per return
+  was an LMKD invitation); vision images reuse the cached decode; a
+  synthetic trailing message can no longer settle the chat.
+- **tested before ship** — a REAL opencode v1.18.25 server ran on the
+  rig, a real free model completed a turn, and the captured
+  `/session/{id}/message` + 176 SSE events replay through the app's
+  settle/replay logic in the JVM suite: **73 tests green** (fixtures
+  shipped in the kit). Part-id keying + `time.completed` verified
+  against reality.
 
 ## What's in v0.20.0 (P20 — the background survivor)
 
