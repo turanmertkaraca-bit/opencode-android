@@ -30,7 +30,14 @@ public final class ProxyServer {
     private static volatile int port = -1;
     private static volatile ServerSocket acceptor;
     private static final AtomicInteger conns = new AtomicInteger();
+    private static final AtomicInteger live = new AtomicInteger();
     private static final StringBuilder errTail = new StringBuilder();
+
+    /** P22: bound concurrent proxy connections. The old accept loop spawned
+     *  an UNBOUNDED thread per client; a tool-loop that opens sockets faster
+     *  than peers close them piled up threads + fd pairs until LMKD noticed.
+     *  64 is far above any real sandbox workload (apt/git/pip + a run). */
+    private static final int MAX_CONNS = 64;
 
     /** Start once; returns the local port, or -1 if the proxy is unavailable. */
     public static int ensureStarted(Context c) {
@@ -57,6 +64,7 @@ public final class ProxyServer {
 
     public static int port() { return port; }
     public static int connections() { return conns.get(); }
+    public static int liveConnections() { return live.get(); }
     public static String errors() { synchronized (errTail) { return errTail.toString(); } }
 
     private static void note(String s) {
@@ -70,8 +78,17 @@ public final class ProxyServer {
         while (true) {
             try {
                 Socket client = ss.accept();
-                Thread t = new Thread(() -> handle(client), "oc-proxy");
+                if (live.get() >= MAX_CONNS) {
+                    note("conn cap " + MAX_CONNS + " hit — refusing client");
+                    try { client.close(); } catch (Exception ignored) {}
+                    continue;
+                }
+                Thread t = new Thread(() -> {
+                    try { handle(client); }
+                    finally { live.decrementAndGet(); }
+                }, "oc-proxy");
                 t.setDaemon(true);
+                live.incrementAndGet();
                 t.start();
             } catch (Exception e) {
                 if (ss.isClosed()) return;

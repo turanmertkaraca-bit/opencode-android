@@ -152,6 +152,17 @@ public final class TarGz {
                     String target = pendingLinkTarget != null
                             ? pendingLinkTarget : cstr(hdr, 157, 100);
                     pendingLinkTarget = null;
+                    // P22: hardlink targets are ARCHIVE-ROOT-relative (POSIX;
+                    // GNU tar writes them without a leading slash), while
+                    // symlink targets are LINK-DIR-relative. The real
+                    // debian:bookworm arm64 layer carries usr/bin/perl5.36.0
+                    // -> usr/bin/perl and usr/bin/uncompress -> usr/bin/gunzip;
+                    // without this normalization both landed as
+                    // <rootfs>/usr/bin/usr/bin/<name> — dangling — because
+                    // the handlers resolve relative targets against the
+                    // link's own directory. Absolute-in-rootfs goes through
+                    // the handlers' existing relFromRoot rewrite instead.
+                    if (!target.startsWith("/")) target = "/" + target;
                     handler.link(destDir, name, target, (mode & 0111) != 0);
                 } else if (type != 'x' && type != 'K' && type != 'L') {
                     pendingLinkTarget = null;               // stale guard
@@ -206,16 +217,28 @@ public final class TarGz {
         cb.on("extracted " + files + " files, " + links.size() + " links");
     }
 
-    /** Pull one "key=" record out of a pax extended-header block. */
+    /** Pull one "key=" record out of a pax extended-header block.
+     *  P22: record-EXACT parse — each "<len> <key>=<value>\n" record is
+     *  split and the key compared WHOLE. The old substring search for
+     *  "path=" also matched INSIDE "linkpath=", so a header ordered
+     *  <linkpath> before <path> returned the LINK TARGET as the member
+     *  path and extracted the file under the wrong name. Go's archive/tar
+     *  (what docker layers use) emits pax records in map-iteration order,
+     *  so both orderings are legal in the wild. */
     private static String paxField(byte[] rec, String key) {
         String s = new String(rec);
-        int at = s.indexOf(key + "=");
-        if (at < 0) return null;
-        // pax records are "<len> <key>=<value>\n" — value runs to the \n
-        int start = at + key.length() + 1;
-        int end = s.indexOf('\n', start);
-        if (end < 0) end = s.length();
-        return s.substring(start, end);
+        int pos = 0;
+        while (pos < s.length()) {
+            int nl = s.indexOf('\n', pos);
+            if (nl < 0) nl = s.length();
+            String r = s.substring(pos, nl);
+            pos = nl + 1;
+            int sp = r.indexOf(' ');
+            int eq = r.indexOf('=', sp + 1);
+            if (sp <= 0 || eq < 0) continue;
+            if (r.substring(sp + 1, eq).equals(key)) return r.substring(eq + 1);
+        }
+        return null;
     }
 
     // ------------------------------------------------------------- links
@@ -344,17 +367,6 @@ public final class TarGz {
         int stop = off + maxLen;
         while (end < stop && b[end] != 0) end++;
         return new String(b, off, end - off);
-    }
-
-    private static String paxPath(byte[] rec) {
-        String s = new String(rec);
-        int p = s.indexOf(" path=");
-        if (p < 0) p = s.indexOf("path=");
-        if (p < 0) return null;
-        int start = p + (s.charAt(p) == ' ' ? 6 : 5);
-        int end = s.indexOf('\n', start);
-        if (end < 0) end = s.length();
-        return s.substring(start, end);
     }
 
     private static void skipPad(InputStream in, long size) throws IOException {

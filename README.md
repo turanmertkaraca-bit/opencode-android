@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.21.0 — P21)
+## Install (v0.22.0 — P22)
 
-1. Grab `opencode-p21-v0.21.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p22-v0.22.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -21,6 +21,54 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 5. If anything ever dies: **Diagnostics → "last exits"** names the killer
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
+
+## What's in v0.22.0 (P22 — the native-layer audit)
+
+The ask was blunt: "are you sure the native code is tested? most problems
+are coming from there." Fair — so this release EXECUTED the native layer
+and fixed what the execution caught. Nothing here is reasoned about;
+every claim was run.
+
+- **the real binaries were executed for the first time** — the bundled
+  BusyBox v1.36.1 ran under ARM64 emulation on the build rig: all 305
+  applets listed, every shim-critical command pattern exercised (sed/awk
+  pipelines, tar/gzip round-trips, shell semantics the agent's bash tool
+  depends on) — 100% green. The full applet list now ships as a test
+  fixture, and the JVM suite pins the hardcoded fallback list against it.
+- **caught: a dead `patch` command** — the fallback applet list included
+  `patch`, which this busybox build does not have ("patch: applet not
+  found"). Removed, and one-time flag bumped so installs that ran the
+  fallback drop the dead symlink.
+- **caught: dangling hardlinks in every Debian install** — the real
+  debian:bookworm arm64 docker layer (the exact 48 MB blob the app
+  downloads, digest-verified) was extracted with the app's own extractor:
+  `usr/bin/perl5.36.0` and `usr/bin/uncompress` landed as DANGLING links
+  (hardlink targets are archive-root-relative; the extractor resolved
+  them against the link's directory). Fixed; re-extraction now matches
+  the ground truth byte-for-byte (5237 files, 639 links, 0 dangling,
+  0 escapes).
+- **caught: a latent pax-header parser bug** — the substring search for
+  `path=` also matched inside `linkpath=`, so a pax header ordered
+  linkpath-before-path (legal; docker layer writers use map iteration)
+  would extract the file under the LINK TARGET's name. Now record-exact.
+- **proot toolkit wiring verified** — ELF-level audit of db_proot/loader/
+  talloc/shmem: DT_NEEDED deps (libtalloc.so.2, libandroid-shmem.so,
+  bionic libc/liblog) all resolve from the app's lib dir via
+  LD_LIBRARY_PATH; SONAMEs match the install layout exactly.
+- **the sandbox proxy can no longer pile up threads** — the DNS-bridge
+  proxy spawned an unbounded thread per connection; now capped at 64
+  concurrent (far above any real apt/git/pip workload) with the surplus
+  refused, and a live-connection counter for Diagnostics.
+- **send double-tap latch** — session setup + model validation run real
+  network I/O before the busy flag sets, so a fast double-tap on send
+  could queue two identical runs (doubled tokens). A pre-busy latch now
+  collapses them; released on every exit path.
+- **the Debian launcher stops rewriting itself per spawn** — the comment
+  claimed write-if-different; the code always rewrote + spawned a chmod
+  process. Now it actually compares and skips.
+- **tested before ship, again** — 81 JVM tests green (8 new P22 pins:
+  hardlink normalization, pax both orders, exact-key matching, GNU
+  long-link regression, CORE_APPLETS vs the real 305-applet list).
 
 ## What's in v0.21.0 (P21 — the stable one)
 

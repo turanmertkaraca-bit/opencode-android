@@ -458,6 +458,23 @@ public final class Debian {
         writeText(f, s);
     }
 
+    /** P22: whole-file read for the launcher write-if-different compare. */
+    private static byte[] readAll(File f) throws IOException {
+        FileInputStream in = new FileInputStream(f);
+        try {
+            byte[] b = new byte[(int) f.length()];
+            int off = 0;
+            while (off < b.length) {
+                int n = in.read(b, off, b.length - off);
+                if (n < 0) break;
+                off += n;
+            }
+            return java.util.Arrays.copyOf(b, off);
+        } finally {
+            in.close();
+        }
+    }
+
     private static void writeText(File f, String s) throws IOException {
         File tmp = new File(f.getParentFile(), f.getName() + ".part");
         tmp.getParentFile().mkdirs();
@@ -621,8 +638,18 @@ public final class Debian {
 
             File f = new File(dir(c), "launch");
             File tmp = new File(dir(c), "launch.part");
+            // P22: REAL write-if-different — the old code rewrote the file
+            // and spawned a chmod process on EVERY call (the comment above
+            // claimed "~1 ms write-if-different" but never compared).
+            // writeLauncher runs from writeBashShim on every spawn path.
+            byte[] body = s.toString().getBytes(StandardCharsets.UTF_8);
+            if (f.exists() && f.isFile()) {
+                try {
+                    if (java.util.Arrays.equals(readAll(f), body)) return;
+                } catch (Exception ignored) {}
+            }
             try (OutputStream o = new FileOutputStream(tmp)) {
-                o.write(s.toString().getBytes(StandardCharsets.UTF_8));
+                o.write(body);
             }
             if (f.exists()) f.delete();
             if (tmp.renameTo(f)) Binaries.makeExec(f);

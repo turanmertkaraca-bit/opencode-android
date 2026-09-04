@@ -108,10 +108,14 @@ public final class Shims {
             "cut", "tr", "sort", "uniq", "date", "du", "df", "stat",
             "sleep", "basename", "dirname", "sha256sum", "md5sum", "wget",
             "od", "dd", "ps", "id", "whoami", "expr", "less", "more",
-            "diff", "patch", "vi", "clear", "free", "netstat", "pgrep",
+            "diff", "vi", "clear", "free", "netstat", "pgrep",
             "kill", "nice", "nohup", "seq", "yes", "true", "false",
             "xargs", "realpath", "readlink", "fold", "comm",
             "expand", "unexpand", "sum", "sync", "time", "timeout", "tty"};
+    // P22: "patch" was removed — verified against the bundled BusyBox v1.36.1
+    // (executed under qemu-aarch64, 305 applets): this build has NO patch
+    // applet, so the fallback symlink produced "patch: applet not found".
+    // Every name in CORE_APPLETS is now covered by the real --list output.
 
     /**
      * Symlink every applet the bundled busybox supports into bin/.
@@ -123,7 +127,18 @@ public final class Shims {
     private static void installApplets(Context c, File bb) {
         if (bb == null || !bb.isFile()) return;
         File bin = binDir(c);
-        File flag = new File(bin, ".applets-p12");
+        // P22: flag bumped from .applets-p12 so installs that ran the OLD
+        // fallback (busybox --list failed once) re-run and drop the dead
+        // `patch` symlink this list used to create. Only a SYMLINK named
+        // patch is removed — a user-imported real binary is never touched.
+        File flag = new File(bin, ".applets-p22");
+        if (!flag.exists()) {
+            File oldPatch = new File(bin, "patch");
+            try {
+                Os.readlink(oldPatch.getAbsolutePath());
+                oldPatch.delete();          // symlink → was ours, dead applet
+            } catch (Exception notLinkOrAbsent) { /* real file or absent: keep */ }
+        }
         if (flag.exists()) return;              // one-time per install
         java.util.List<String> supported = busyboxList(c, bb);
         int made = 0;
