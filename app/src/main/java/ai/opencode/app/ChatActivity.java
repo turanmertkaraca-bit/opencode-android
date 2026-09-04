@@ -210,6 +210,10 @@ public class ChatActivity extends Activity
 
     private final Runnable watchdog = new Runnable() {
         @Override public void run() {
+            guarded("watchdog", this::watchdogTick);
+        }
+
+        private void watchdogTick() {
             // P19: the quiet threshold is 10 minutes (Resilience.quietEndMs),
             // not 3.5 s. A working agent is SILENT on the feed while a bash
             // tool runs (no part events for minutes) — the old threshold
@@ -221,7 +225,7 @@ public class ChatActivity extends Activity
             if (busy && System.currentTimeMillis() - lastPartTs > Resilience.quietEndMs()) {
                 setBusy(false);
             } else if (busy) {
-                ui.postDelayed(this, 5000);
+                ui.postDelayed(watchdog, 5000);
             }
         }
     };
@@ -322,15 +326,18 @@ public class ChatActivity extends Activity
             if (modelDlg != null && modelDlg.isShowing() && !isFinishing()
                     && !isDestroyed()) {
                 ex.execute(() -> {
-                    List<Models.Prov> fresh = Models.fetch(ChatActivity.this);
-                    ui.post(() -> {
-                        if (modelDlg == null || !modelDlg.isShowing()) return;
-                        sheetProvs = fresh;
-                        if (sheetRefill != null) sheetRefill.run();
-                        Toast.makeText(ChatActivity.this,
-                                "providers refreshed — your key is in",
-                                Toast.LENGTH_SHORT).show();
+                    Throwable t = Resilience.guard(() -> {
+                        List<Models.Prov> fresh = Models.fetch(ChatActivity.this);
+                        ui.post(() -> {
+                            if (modelDlg == null || !modelDlg.isShowing()) return;
+                            sheetProvs = fresh;
+                            if (sheetRefill != null) sheetRefill.run();
+                            Toast.makeText(ChatActivity.this,
+                                    "providers refreshed — your key is in",
+                                    Toast.LENGTH_SHORT).show();
+                        });
                     });
+                    if (t != null) Trail.record(ChatActivity.this, "provider refresh", t);
                 });
             }
         }
@@ -478,44 +485,51 @@ public class ChatActivity extends Activity
     }
 
     private void flushPaintsNow() {
-        paintScheduled = false;
-        if (dirtyRows.isEmpty()) return;
-        java.util.ArrayList<Row> batch = new java.util.ArrayList<>(dirtyRows);
-        dirtyRows.clear();
-        for (Row r : batch) {
-            Integer i = r.key == null ? null : idxByKey.get(r.key);
-            if (i != null && i < rows.size() && rows.get(i) == r) touchView(r);
-        }
-        autoscroll();
+        guarded("paint flush", () -> {
+            paintScheduled = false;
+            if (dirtyRows.isEmpty()) return;
+            java.util.ArrayList<Row> batch = new java.util.ArrayList<>(dirtyRows);
+            dirtyRows.clear();
+            for (Row r : batch) {
+                Integer i = r.key == null ? null : idxByKey.get(r.key);
+                if (i != null && i < rows.size() && rows.get(i) == r) touchView(r);
+            }
+            autoscroll();
+        });
     }
 
     private final Runnable tick = new Runnable() {
         @Override public void run() {
-            boolean more = false;
-            synchronized (lock) {
-                for (int i = rows.size() - 1; i >= 0; i--) {
-                    Row r = rows.get(i);
-                    int len = r.text.length();
-                    if (r.shown > len) r.shown = len;
-                    if ((r.kind != K_ASSISTANT && r.kind != K_REASON)
-                            || r.shown >= len) continue;
-                    if (i != rows.size() - 1) {
-                        boolean wasBehind = r.shown < len;
-                        r.shown = len;          // a newer row appeared: snap
-                        if (wasBehind) requestPaint(r);   // P20: drop the stale caret now
-                    } else {
-                        int step = 3 + (len - r.shown) / 8;
-                        r.shown = Math.min(len, r.shown + step);
+            // P23: the ticker paints every streaming delta on the main
+            // thread — a throw here used to kill the process mid-stream.
+            Throwable t = Resilience.guard(() -> {
+                boolean[] moreBox = {false};
+                synchronized (lock) {
+                    for (int i = rows.size() - 1; i >= 0; i--) {
+                        Row r = rows.get(i);
+                        int len = r.text.length();
+                        if (r.shown > len) r.shown = len;
+                        if ((r.kind != K_ASSISTANT && r.kind != K_REASON)
+                                || r.shown >= len) continue;
+                        if (i != rows.size() - 1) {
+                            boolean wasBehind = r.shown < len;
+                            r.shown = len;      // a newer row appeared: snap
+                            if (wasBehind) requestPaint(r);
+                        } else {
+                            int step = 3 + (len - r.shown) / 8;
+                            r.shown = Math.min(len, r.shown + step);
+                        }
+                        paintStreaming(r);
+                        if (r.shown < len) moreBox[0] = true;
                     }
-                    paintStreaming(r);
-                    if (r.shown < len) more = true;
                 }
-            }
-            if (pinnedBottom) scrollToEnd();
-            if (more) {
-                smoother.postDelayed(this, 24);
-            } else {
+                if (pinnedBottom) scrollToEnd();
+                if (moreBox[0]) smoother.postDelayed(this, 24);
+                else smootherRunning = false;
+            });
+            if (t != null) {
                 smootherRunning = false;
+                contained("stream ticker", t);
             }
         }
     };
@@ -809,7 +823,7 @@ public class ChatActivity extends Activity
         // agent's first write lands.
         if (b) { startEditWatch(); ensureLiveRow(); }
         else stopEditWatch();
-        ui.post(() -> {
+        ui.post(() -> guarded(b ? "busy on" : "busy off", () -> {
             if (b) {
                 btnSend.setText("■");
                 btnSend.setTextSize(16);
@@ -833,7 +847,7 @@ public class ChatActivity extends Activity
                 purgeEmptyThoughts();
             }
             syncTyping();
-        });
+        }));
     }
 
     /** P22: pre-busy latch. ensureSession() + validateSelectedModel() do
@@ -842,6 +856,41 @@ public class ChatActivity extends Activity
      *  tokens, duplicate rows). Released in each worker's finally. */
     private final java.util.concurrent.atomic.AtomicBoolean sending =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    // ---- P23: blast-radius zero ----------------------------------------
+    // The field device died on send with an unhandled Java exception while
+    // every audited stage had catch(Exception): the hole was Errors (OOM,
+    // linkage) + the thread boundaries between them. Contract from P23 on:
+    // NOTHING on the send/chat/feed paths kills the process — a Throwable
+    // is contained, recorded to the guard trail, and shown as one line.
+    private final java.util.Map<String, Long> containedAt = new HashMap<>();
+
+    /** Run {@code r} at Throwable breadth; contain + report on failure. */
+    private void guarded(String what, Runnable r) {
+        Throwable t = Resilience.guard(r);
+        if (t != null) contained(what, t);
+    }
+
+    /** Record + surface a contained failure (throttled per what). */
+    private void contained(String what, Throwable t) {
+        Trail.record(this, what, t);
+        long now = System.currentTimeMillis();
+        Long last = containedAt.get(what);
+        if (last != null && now - last < 2500) return;   // no note spam
+        containedAt.put(what, now);
+        final Row nr = new Row();
+        nr.kind = K_SYS; nr.key = "guarded-" + System.nanoTime();
+        nr.ts = now;
+        nr.text.append("\u26a0 contained an internal error in ").append(what)
+               .append(" — the chat survived; \u2318 \u2192 Logs & shell has the trace");
+        ui.post(() -> guarded("containment note", () -> {
+            synchronized (lock) {
+                rows.add(nr); idxByKey.put(nr.key, rows.size() - 1);
+                touchView(nr);
+            }
+            autoscroll();
+        }));
+    }
 
     private void send() {
         final String q = input.getText().toString().trim();
@@ -909,13 +958,15 @@ public class ChatActivity extends Activity
                 reconcile(Json.parse(r.body));
                 ui.removeCallbacks(watchdog);
                 ui.postDelayed(watchdog, 2000);
-            } catch (Exception e) {
+            } catch (Throwable e) {
                 // P18: the POST timed out but the RUN may still be alive
                 // server-side — never kill it, never say "send failed".
                 // SSE events keep rendering; the watchdog ends busy only
                 // when the feed goes truly silent. NO auto-retry either:
                 // re-POSTing a message the server already accepted would
                 // run the agent twice (doubled tokens — field report #3).
+                // P23: catch(Throwable) — an Error here (OOM, linkage)
+                // used to kill the whole app on send (the field crash).
                 if (Resilience.isSendTimeout(e)) {
                     sys("⏱ " + Resilience.prettyNetError(e)
                             + " — still watching the run; tap ■ to stop if nothing moves");
@@ -926,6 +977,7 @@ public class ChatActivity extends Activity
                             + " — the sandbox restarts itself; resend this message in a moment");
                     setBusy(false);
                 } else {
+                    Trail.record(this, "send", e);
                     sys("send failed · " + Resilience.prettyNetError(e));
                     setBusy(false);
                 }
@@ -957,7 +1009,8 @@ public class ChatActivity extends Activity
                 reconcile(Json.parse(r.body));
                 ui.removeCallbacks(watchdog);
                 ui.postDelayed(watchdog, 2000);
-            } catch (Exception e) {
+            } catch (Throwable e) {
+                // P23: Throwable breadth — same rationale as send().
                 if (Resilience.isSendTimeout(e)) {
                     // same soft landing as send(): the run outlives the HTTP read
                     sys("⏱ " + Resilience.prettyNetError(e)
@@ -965,6 +1018,7 @@ public class ChatActivity extends Activity
                     ui.removeCallbacks(watchdog);
                     ui.postDelayed(watchdog, 1200);
                 } else {
+                    Trail.record(this, "send retry", e);
                     sys("retry failed · " + Resilience.prettyNetError(e));
                     setBusy(false);
                 }
@@ -1015,9 +1069,17 @@ public class ChatActivity extends Activity
     private void validateSelectedModel() {
         String[] sel = Models.selected(this);
         if (sel == null) return;
+        // P23: the send path must NEVER block on the models.dev HTTPS fetch
+        // (seconds on a cold process — and the catalog parse was the biggest
+        // allocation burst on every first send). Validate against what is
+        // already in memory; refresh in the background for the NEXT send.
+        // A stale pick that slips through still hits the P11 self-heal below
+        // ("Model not found" at run time clears + retries).
         List<Models.Prov> provs = Models.lastFetch();
-        if (provs == null || provs.isEmpty()) provs = Models.fetch(this);
-        if (provs.isEmpty()) return;                     // unknown state → keep
+        if (provs == null || provs.isEmpty()) {
+            ex.execute(() -> Resilience.guard(() -> Models.fetch(ChatActivity.this)));
+            return;                          // unknown state → keep the pick
+        }
         if (!Models.available(provs, sel[0], sel[1])) {
             Models.clear(this);
             ui.post(this::refreshChips);
@@ -1059,6 +1121,8 @@ public class ChatActivity extends Activity
                 }
             } catch (Exception e) {
                 sys("abort failed: " + e);
+            } catch (Throwable e) {
+                Trail.record(this, "abort", e);
             }
             setBusy(false);
         });
@@ -1172,20 +1236,22 @@ public class ChatActivity extends Activity
                     || "permission.updated".equals(type)
                     || "permission.v2.asked".equals(type)
                     || "permission.v2.updated".equals(type)) {
-                ui.post(this::checkPermissionQueue);
+                ui.post(() -> guarded("permissions", this::checkPermissionQueue));
             }
         } catch (Exception e) {
             // never let a malformed frame kill the screen
+        } catch (Throwable e) {
+            Trail.record(this, "event", e);
         }
     }
 
     /** ServerService state changes → header subtitle. */
     @Override
     public void on(int newState, String detail) {
-        ui.post(() -> refreshServerUi());
+        ui.post(() -> guarded("server ui", this::refreshServerUi));
         if (newState == ServerService.ST_HEALTHY) {
-            ui.post(this::checkPermissionQueue);
-            ui.post(this::showEnvWelcome);          // P15: one-shot env report
+            ui.post(() -> guarded("permissions", this::checkPermissionQueue));
+            ui.post(() -> guarded("env welcome", this::showEnvWelcome));          // P15: one-shot env report
             // P18: an AUTO-recovery happened while this chat was open —
             // say so, and make clear the chat survived (sessions are on
             // disk). This replaces the old cold-boot ritual entirely.
@@ -1203,8 +1269,11 @@ public class ChatActivity extends Activity
         if (envShown || isFinishing() || isDestroyed()) return;
         envShown = true;
         ex.execute(() -> {
-            final String rep = Debian.envReport(this);
-            ui.post(() -> sys(rep));
+            Throwable t = Resilience.guard(() -> {
+                final String rep = Debian.envReport(this);
+                ui.post(() -> sys(rep));
+            });
+            if (t != null) Trail.record(this, "env report", t);
         });
     }
 
@@ -1309,6 +1378,8 @@ public class ChatActivity extends Activity
                 }
             } catch (Exception e) {
                 sys("history failed: " + e);
+            } catch (Throwable e) {
+                Trail.record(this, "history", e);
             }
         });
     }
@@ -1392,6 +1463,8 @@ public class ChatActivity extends Activity
                 });
             } catch (Exception e) {
                 // offline / still starting: P19's feed self-heal + watchdog cover us
+            } catch (Throwable e) {
+                Trail.record(this, "resume replay", e);
             }
         });
     }
@@ -1458,6 +1531,8 @@ public class ChatActivity extends Activity
             }
         } catch (Exception e) {
             // response shape drift must never break the send path
+        } catch (Throwable e) {
+            Trail.record(this, "reconcile", e);
         }
     }
 
@@ -1512,6 +1587,8 @@ public class ChatActivity extends Activity
             }
         } catch (Exception e) {
             // a malformed part must never take the chat down
+        } catch (Throwable e) {
+            Trail.record(this, "part", e);
         }
     }
 
@@ -1533,7 +1610,7 @@ public class ChatActivity extends Activity
     }
 
     private void upsertUser(String key, String text) {
-        ui.post(() -> {
+        ui.post(() -> guarded("user row", () -> {
             synchronized (lock) {
                 Row r = rowByKey(key);
                 boolean changed;
@@ -1550,11 +1627,11 @@ public class ChatActivity extends Activity
                 if (changed) touchView(r);
             }
             autoscroll();
-        });
+        }));
     }
 
     private void upsertText(String key, String mid, String text) {
-        ui.post(() -> {
+        ui.post(() -> guarded("assistant row", () -> {
             synchronized (lock) {
                 Row r = rowByKey(key);
                 if (r == null) {
@@ -1577,11 +1654,11 @@ public class ChatActivity extends Activity
                 }
             }
             autoscroll();
-        });
+        }));
     }
 
     private void upsertReason(String key, String mid, String text) {
-        ui.post(() -> {
+        ui.post(() -> guarded("thinking row", () -> {
             synchronized (lock) {
                 Row r = rowByKey(key);
                 if (r == null) {
@@ -1599,11 +1676,11 @@ public class ChatActivity extends Activity
                 }
             }
             autoscroll();
-        });
+        }));
     }
 
     private void upsertTool(Row incoming) {
-        ui.post(() -> {
+        ui.post(() -> guarded("tool row", () -> {
             synchronized (lock) {
                 Row r = rowByKey(incoming.key);
                 boolean changed;
@@ -1625,7 +1702,7 @@ public class ChatActivity extends Activity
                 if (changed) requestPaint(r);
             }
             autoscroll();
-        });
+        }));
     }
 
     private Row toolRow(String key, Map<String, Object> part) {
@@ -1740,16 +1817,18 @@ public class ChatActivity extends Activity
     /** DirWatcher callback — already on the main looper, already debounced. */
     private void onFsChange(String path, String action) {
         if (!busy) return;                    // watcher is being stopped anyway
-        long now = System.currentTimeMillis();
-        synchronized (editFeed) {
-            EditPulse.record(editFeed, editRoot, path, action, now);
-        }
-        peekCache.remove(path);               // stale peek invalidates
-        ensureLiveRow();
-        ui.removeCallbacks(liveCollapse);
-        ui.postDelayed(liveCollapse, EditPulse.ACTIVE_MS + 500);
-        Row r = liveRow();
-        if (r != null) requestPaint(r);
+        guarded("file watch", () -> {
+            long now = System.currentTimeMillis();
+            synchronized (editFeed) {
+                EditPulse.record(editFeed, editRoot, path, action, now);
+            }
+            peekCache.remove(path);           // stale peek invalidates
+            ensureLiveRow();
+            ui.removeCallbacks(liveCollapse);
+            ui.postDelayed(liveCollapse, EditPulse.ACTIVE_MS + 500);
+            Row r = liveRow();
+            if (r != null) requestPaint(r);
+        });
     }
 
     private void collapseLive() {
@@ -1772,6 +1851,7 @@ public class ChatActivity extends Activity
             ui.post(this::ensureLiveRow);
             return;
         }
+        guarded("live card", () -> {
         boolean added;
         synchronized (lock) {
             if (idxByKey.containsKey(LIVE_KEY)) return;
@@ -1785,6 +1865,7 @@ public class ChatActivity extends Activity
             if (r != null) touchView(r);      // entrance animation
             autoscroll();
         }
+        });
     }
 
     /** The "edit shower" card — slim while idle, a brief shower while hot.
@@ -1994,12 +2075,12 @@ public class ChatActivity extends Activity
                 }
             }
             final String t = text;
-            ui.post(() -> {
+            ui.post(() -> guarded("peek paint", () -> {
                 peekCache.put(abs, t);
                 liveWaitingPeek = false;
                 Row r = liveRow();
                 if (r != null) requestPaint(r);
-            });
+            }));
         });
     }
 
@@ -2130,6 +2211,10 @@ public class ChatActivity extends Activity
             } catch (Exception e) {
                 sys("screenshot send failed: " + e);
                 setBusy(false);
+            } catch (Throwable e) {
+                Trail.record(this, "screenshot send", e);
+                sys("screenshot send hit an internal error — contained");
+                setBusy(false);
             } finally {
                 sending.set(false);
             }
@@ -2230,6 +2315,8 @@ public class ChatActivity extends Activity
                 ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) touchView(rr); });
             } catch (Exception e) {
                 ui.post(() -> sys("image part could not be decoded: " + e.getMessage()));
+            } catch (Throwable e) {
+                Trail.record(this, "image decode", e);
             }
         });
     }
@@ -2245,7 +2332,7 @@ public class ChatActivity extends Activity
                 return;
             }
         }
-        ex.execute(() -> {
+        ex.execute(() -> guarded("image decode", () -> {
             Bitmap bm = Vision.decodeBounded(path, 1024);
             if (bm == null) {
                 synchronized (failedImgs) { failedImgs.add(r.key); }
@@ -2254,7 +2341,7 @@ public class ChatActivity extends Activity
             }
             synchronized (imageCache) { imageCache.put(r.key, bm); }
             ui.post(() -> { Row rr = rowByKey(r.key); if (rr == r) requestPaint(rr); });
-        });
+        }));
     }
 
     /** The image bubble — rounded frame, caption, tap for the big view. */
@@ -2380,7 +2467,7 @@ public class ChatActivity extends Activity
 
         final String fMid = mid;
         final String fMeta = meta;
-        if (meta != null || e != null) ui.post(() -> {
+        if (meta != null || e != null) ui.post(() -> guarded("message info", () -> {
             boolean showError;
             synchronized (lock) {
                 MsgInfo mi = msgs.get(fMid);
@@ -2404,7 +2491,7 @@ public class ChatActivity extends Activity
                 err("✕ " + fErrName, fErrMsg == null ? "" : fErrMsg, String.valueOf(info));
                 setBusy(false);
             }
-        });
+        }));
     }
 
     /** P12: ⇅ tokens + $ cost summed over the session's messages. */
@@ -2469,13 +2556,13 @@ public class ChatActivity extends Activity
         Row r = new Row();
         r.kind = K_SYS; r.key = "sys-" + System.nanoTime(); r.ts = System.currentTimeMillis();
         r.text.append(s);
-        ui.post(() -> {
+        ui.post(() -> guarded("sys row", () -> {
             synchronized (lock) {
                 rows.add(r); idxByKey.put(r.key, rows.size() - 1);
                 touchView(r);
             }
             autoscroll();
-        });
+        }));
     }
 
     private void err(String title, String detail, String raw) {
@@ -2489,13 +2576,13 @@ public class ChatActivity extends Activity
             r.output.append(rawT);
         }
         r.open = true;
-        ui.post(() -> {
+        ui.post(() -> guarded("err row", () -> {
             synchronized (lock) {
                 rows.add(r); idxByKey.put(r.key, rows.size() - 1);
                 touchView(r);
             }
             autoscroll();
-        });
+        }));
     }
 
     // ------------------------------------------------------------ views
@@ -3302,8 +3389,11 @@ public class ChatActivity extends Activity
                 startActivity(new Intent(this, FilesActivity.class)); break;
             case "Sandbox environment":
                 ex.execute(() -> {
-                    final String rep = Debian.envReport(this);
-                    ui.post(() -> sys(rep));
+                    Throwable t = Resilience.guard(() -> {
+                        final String rep = Debian.envReport(this);
+                        ui.post(() -> sys(rep));
+                    });
+                    if (t != null) Trail.record(this, "env report", t);
                 });
                 break;
             case "Toggle Build / Plan": toggleMode(); break;
@@ -3356,7 +3446,7 @@ public class ChatActivity extends Activity
                 }
             } catch (Exception ignored) {}
             listS.sort((a, b) -> Double.compare(b.updated, a.updated));
-            ui.post(() -> showSessions(listS));
+            ui.post(() -> guarded("sessions sheet", () -> showSessions(listS)));
         });
     }
 
@@ -3451,8 +3541,11 @@ public class ChatActivity extends Activity
         // dead-ending on a toast. The P11-era gate made the picker look
         // broken whenever the server was still booting.
         ex.execute(() -> {
-            List<Models.Prov> provs = Models.fetch(this);
-            ui.post(() -> showModels(provs));
+            Throwable t = Resilience.guard(() -> {
+                List<Models.Prov> provs = Models.fetch(this);
+                ui.post(() -> showModels(provs));
+            });
+            if (t != null) Trail.record(this, "model sheet", t);
         });
     }
 

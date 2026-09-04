@@ -319,6 +319,65 @@ public final class Resilience {
         return ((Map<?, ?>) timeO).get("completed") != null;
     }
 
+    // ------------------------------------------------- P23 blast-radius zero
+
+    /**
+     * P23 — THE on-send crash answer. The field device died on message
+     * send with an unhandled Java exception (ApplicationExitInfo reason 4,
+     * crash file written) while every audited send-path stage had a
+     * catch(Exception). The hole: catch(Exception) does NOT stop Errors —
+     * OutOfMemoryError, linkage failures, verifier throws — and the app's
+     * many thread boundaries (worker pool, feed, SSE, drain, posted UI
+     * runnables) let ANY of them kill the whole process.
+     *
+     * Contract from P23 on: nothing on the send/chat/feed paths dies from
+     * a Throwable. It is CONTAINED — logged to the guard trail (⌘ → Logs
+     * & shell), surfaced as one honest chat line — and the run degrades.
+     * Pure + JVM-testable.
+     */
+    public static Throwable guard(Runnable r) {
+        try {
+            r.run();
+            return null;
+        } catch (Throwable t) {
+            return t;
+        }
+    }
+
+    /**
+     * P23: one bounded, greppable line for a contained failure — same
+     * convention as diagLine: ts · what · class[: message] · top app
+     * frame. The top frame is the first ai.opencode.app frame (framework
+     * frames above it are noise). Pure.
+     */
+    public static String guardLine(long tsMs, String what, Throwable t) {
+        StringBuilder b = new StringBuilder();
+        b.append(tsMs).append(" · ").append(what == null ? "guarded" : what);
+        b.append(" · ").append(t == null ? "-" : t.getClass().getName());
+        if (t != null) {
+            String m = t.getMessage();
+            if (m != null && !m.isEmpty()) {
+                m = m.replace('\n', ' ').replace('\r', ' ');
+                if (m.length() > 160) m = m.substring(0, 160) + "…";
+                b.append(": ").append(m);
+            }
+            StackTraceElement[] st = t.getStackTrace();
+            if (st != null) {
+                for (StackTraceElement e : st) {
+                    String cn = e.getClassName();
+                    if (cn != null && cn.startsWith("ai.opencode.app.")) {
+                        b.append(" · ")
+                         .append(cn.substring("ai.opencode.app.".length()))
+                         .append('.').append(e.getMethodName())
+                         .append(':').append(e.getLineNumber());
+                        break;
+                    }
+                }
+            }
+        }
+        return b.toString();
+    }
+
     /** P21 replay-keying contract: how many parts in a fetched session
      *  LACK a stable part id. The resume replay updates known messages by
      *  the deterministic messageID|partID key; parts WITHOUT an id can
