@@ -115,12 +115,29 @@ public class DeckView extends ViewGroup {
         setMeasuredDimension(w, h);
 
         int childW = w - getPaddingLeft() - getPaddingRight() - sidePad * 2;
-        int vh = viewportH();
-        // credit-card proportions, capped so the wallet leaves peek room
-        cardH = (int) Math.min(vh * 0.60f, childW * 0.64f);
-        cardH = Math.max(cardH, Theme.dp(getContext(), 168));
-
+        // P27 clipping fix (the field shot: the deck card's "last opened ·
+        // 2 min ago / Open →" footer clipped mid-line when the path wrapped
+        // to two lines). The old code forced a FIXED card height (EXACTLY
+        // spec); at larger font scales the content grew past it and the
+        // card's own clip cut the footer. Now the cards measure NATURALLY
+        // first and the shared height grows to fit the tallest card (still
+        // clamped so the wallet keeps its peek room) — one uniform height,
+        // every card fits, at any font scale.
+        // The cap uses the INCOMING spec height, not getHeight() — during
+        // the first measure getHeight() is still 0, which would collapse
+        // the cap to the 168dp floor (caught by the P27UiTest pin).
+        int vh = Math.max(1, MeasureSpec.getSize(hSpec)
+                - getPaddingTop() - getPaddingBottom());
         int cws = MeasureSpec.makeMeasureSpec(childW, MeasureSpec.EXACTLY);
+        int natural = Theme.dp(getContext(), 168);
+        for (int i = 0; i < getChildCount(); i++) {
+            getChildAt(i).measure(cws, MeasureSpec.makeMeasureSpec(0,
+                    MeasureSpec.UNSPECIFIED));
+            natural = Math.max(natural, getChildAt(i).getMeasuredHeight());
+        }
+        int cap = (int) Math.min(vh * 0.72f, childW * 0.90f);
+        cardH = Math.min(natural, Math.max(cap, Theme.dp(getContext(), 168)));
+
         int chs = MeasureSpec.makeMeasureSpec(cardH, MeasureSpec.EXACTLY);
         for (int i = 0; i < getChildCount(); i++) {
             getChildAt(i).measure(cws, chs);

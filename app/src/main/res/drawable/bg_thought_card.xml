@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- P10: "voice of mind" thinking card — violet tint, hairline violet rim. -->
+<!-- P27: thinking/live card — near-black surface + 1dp accent-tinted
+     hairline (AMOLED: hairline depth, no shadows, no violet wash). -->
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#1A1A2440"/>
+    <solid android:color="@color/surface"/>
     <corners android:radius="14dp"/>
-    <stroke android:width="1dp" android:color="#3D8B5CF6"/>
+    <stroke android:width="1dp" android:color="#33253A66"/>
 </shape>

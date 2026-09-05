@@ -161,6 +161,11 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 "Lite (Alpine) always works · Debian adds real apt — the\n"
                         + "installer probes proot and falls back automatically",
                 "ⓘ", v -> envExplain()));
+        env.addView(divider());
+        // P27 phase 2: the CURATED rootfs — ~50 MB of docs/man/timezones/
+        // perl gone at install, caches swept every boot. Default ON.
+        env.addView(switchRow("Curated rootfs", "curate_rootfs",
+                "trim docs · man · timezones · perl · locale archives (~50 MB); boot sweeps npm/apt caches (~108 MB)"));
         root.addView(env);
 
         // ---- keep alive (P12: background processing setup)
@@ -202,6 +207,11 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- interface
         root.addView(Theme.sectionLabel(this, "interface"));
         LinearLayout it = section();
+        // P27: AMOLED pure black is the DEFAULT theme — true-black base
+        // surfaces, hairline-raised cards. The toggle offers the softer
+        // dark surface set for screens where pure black bands visibly.
+        it.addView(switchRow("Pure black (AMOLED)", "amoled",
+                "true-black base · hairline depth · default ON"));
         it.addView(switchRow("Animations", "motion",
                 "all movement app-wide (also honors system \"remove animations\")"));
         root.addView(it);
@@ -209,7 +219,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.18.0-p18 · unstoppable sandbox (auto-restart + incident log) + graceful send timeouts + Σ pill that explains itself", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.27.0-p27 · stable taps under streaming (pinned live tree, in-place rows), resume-current chat, curated rootfs, AMOLED design system, tappable file mentions", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -256,7 +266,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         stateTxt = new TextView(this);
         stateTxt.setTextSize(14);
         stateTxt.setTypeface(Typeface.DEFAULT_BOLD);
-        stateTxt.setTextColor(0xFFFFFFFF);
+        stateTxt.setTextColor(Theme.TXT);
         stateTxt.setPadding(Theme.dp(this, 8), 0, 0, 0);
         stateTxt.setMaxLines(2);
         st.addView(stateTxt, new LinearLayout.LayoutParams(0,
@@ -267,7 +277,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         restart.setText("Restart server");
         restart.setTextSize(13);
         restart.setTypeface(Typeface.DEFAULT_BOLD);
-        restart.setTextColor(0xFFFFFFFF);
+        restart.setTextColor(Theme.TXT);
         restart.setGravity(Gravity.CENTER);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(0x33FFFFFF);
@@ -971,7 +981,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         View knob = new View(this);
         GradientDrawable kg = new GradientDrawable();
         kg.setShape(GradientDrawable.OVAL);
-        kg.setColor(0xFFFFFFFF);
+        kg.setColor(Theme.TXT);   // switch knob
         knob.setBackground(kg);
         FrameLayout.LayoutParams klp = new FrameLayout.LayoutParams(
                 Theme.dp(this, 20), Theme.dp(this, 20),
@@ -995,6 +1005,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             if ("dns_bridge".equals(keyOrNull) && now) {
                 Toast.makeText(this, "bridge on — restart server to apply",
                         Toast.LENGTH_LONG).show();
+            }
+            // P27: theme switch re-reads the palette and rebuilds this
+            // screen (every other screen re-reads on its next creation).
+            if ("amoled".equals(keyOrNull)) {
+                Theme.apply(SettingsActivity.this);
+                recreate();
             }
         });
         r.addView(sw);

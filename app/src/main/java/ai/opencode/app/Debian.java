@@ -243,6 +243,14 @@ public final class Debian {
             say(cb, "configuring apt + DNS bridge…");
             configure(c);
 
+            // P27 phase 2: the CURATED rootfs — doc/man/zoneinfo/perl/locale
+            // trim (~50+ MB off the stock layer), logged, Settings-gated.
+            try {
+                curate(c, cb);
+            } catch (Throwable t) {
+                Trail.record(c, "rootfs curate", t);   // a trim can never kill the install
+            }
+
             // marker BEFORE the probe so a probe crash doesn't re-extract
             writeMarker(new File(dir(c), ".extracted"), "ok\n");
 
@@ -456,6 +464,111 @@ public final class Debian {
 
     private static void writeMarker(File f, String s) throws IOException {
         writeText(f, s);
+    }
+
+    // --------------------------------------------------- P27: curation
+
+    /**
+     * P27 phase 2 — the curated rootfs walk. Deletes everything
+     * {@link DebianTrim#trimmed} says to delete from the extracted layer
+     * (doc / man / info / groff / legacy zoneinfo / locale archives /
+     * perl), counts freed bytes, writes files/debian/trim-report.txt.
+     * Runs ONCE at install time; the boot-hygiene sweep keeps it true on
+     * every later session. Never throws (caller guards anyway).
+     */
+    public static void curate(Context c, Progress cb) throws IOException {
+        boolean on = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                .getBoolean("curate_rootfs", true);
+        File report = new File(dir(c), "trim-report.txt");
+        if (!on) {
+            writeText(report, "curated rootfs OFF (Settings) — stock layer kept\n");
+            return;
+        }
+        File rootfs = rootfsDir(c);
+        final long[] freed = {0};
+        final int[] files = {0};
+        prune(rootfs, rootfs, freed, files, 0);
+        say(cb, "curated rootfs — " + files[0] + " items trimmed ("
+                + Binaries.human(freed[0]) + " back)");
+        writeText(report, "curated rootfs (P27)\n"
+                + "trimmed " + files[0] + " items · "
+                + Binaries.human(freed[0]) + " freed\n"
+                + "kept: bash, coreutils, findutils, sed/grep/awk, tar/gzip, "
+                + "git, curl, ca-certificates, apt (on-demand installs), jq\n"
+                + "dropped: docs, man pages, legacy timezones, locale "
+                + "archives, perl (agents don't use it; apt installs it "
+                + "back on demand)\n");
+    }
+
+    /** Recursive prune; rel = path relative to the rootfs root. */
+    private static void prune(File rootfs, File cur, long[] freed, int[] files,
+                              int depth) {
+        if (depth > 8) return;   // the trim targets are shallow trees
+        File[] kids = cur.listFiles();
+        if (kids == null) return;
+        String base = rootfs.getAbsolutePath();
+        for (File k : kids) {
+            String rel = k.getAbsolutePath().startsWith(base)
+                    ? k.getAbsolutePath().substring(base.length())
+                    : k.getAbsolutePath();
+            String relPath = rel.isEmpty() ? "/" : rel;
+            if (k.isDirectory()) {
+                if (DebianTrim.trimmedDir(relPath)) {
+                    long sz = Sandbox.sizeOf(k);
+                    if (deleteR(k)) { freed[0] += sz; files[0]++; }
+                } else {
+                    prune(rootfs, k, freed, files, depth + 1);
+                }
+            } else if (DebianTrim.trimmed(relPath)) {
+                long sz = k.length();
+                if (k.delete()) { freed[0] += sz; files[0]++; }
+            }
+        }
+    }
+
+    private static boolean deleteR(File f) {
+        File[] kids = f.listFiles();
+        if (kids != null) for (File k : kids) deleteR(k);
+        return f.delete();
+    }
+
+    /**
+     * P27 phase 2 — BOOT-TIME hygiene, Java-side (no guest shell, no proot
+     * in the path, runs even while the server is still warming up):
+     * /root/.npm + node caches + apt lists + downloaded .deb cache from the
+     * PREVIOUS session — ~108 MB that comes back every boot otherwise.
+     * Safe: pure caches; apt re-downloads indexes on demand, npm re-fetches.
+     */
+    public static void bootHygiene(Context c) {
+        try {
+            File rootfs = rootfsDir(c);
+            if (!rootfs.isDirectory()) return;
+            long freed = 0;
+            for (String rel : DebianTrim.bootHygieneTargets()) {
+                File f = new File(rootfs, rel);
+                if (!f.exists()) continue;
+                long sz = Sandbox.sizeOf(f);
+                if (deleteR(f)) freed += sz;
+            }
+            // /root scratch FILES from previous sessions (never directories —
+            // the seeded clone lives there)
+            File rootH = new File(rootfs, "root");
+            File[] kids = rootH == null ? null : rootH.listFiles();
+            if (kids != null) {
+                for (File k : kids) {
+                    if (k.isFile() && DebianTrim.scratchFile(k.getName())) {
+                        long sz = k.length();
+                        if (k.delete()) freed += sz;
+                    }
+                }
+            }
+            if (freed > 512 * 1024) {
+                writeText(new File(dir(c), "hygiene.txt"),
+                        "last boot hygiene: " + Binaries.human(freed) + " cleared\n");
+            }
+        } catch (Exception ignored) {
+            // hygiene is a nicety — never a boot blocker
+        }
     }
 
     /** P22: whole-file read for the launcher write-if-different compare. */

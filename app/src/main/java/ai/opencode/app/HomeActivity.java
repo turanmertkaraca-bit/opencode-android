@@ -232,11 +232,14 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         tag.setTextSize(9);
         tag.setTextColor(0xB3FFFFFF);
         tag.setLetterSpacing(0.18f);
+        // P27 clipping audit: letterspaced caps carry trailing advance —
+        // matching end padding so the last glyph never kisses the edge.
+        tag.setPadding(0, 0, Theme.dp(this, 5), 0);
         card.addView(tag);
 
         TextView name = new TextView(this);
         name.setText(p.name);
-        name.setTextColor(0xFFFFFFFF);
+        name.setTextColor(Theme.TXT);
         name.setTextSize(26);
         name.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         name.setMaxLines(2);
@@ -271,13 +274,15 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         when.setText(p.opened > 0 ? "last opened · " + relTime(p.opened) : "not opened yet");
         when.setTextSize(11);
         when.setTextColor(0xCCFFFFFF);
+        when.setSingleLine(true);
+        when.setEllipsize(android.text.TextUtils.TruncateAt.END);
         foot.addView(when, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
         TextView open = new TextView(this);
         open.setText("Open →");
         open.setTextSize(13);
         open.setTypeface(Typeface.DEFAULT_BOLD);
-        open.setTextColor(0xFFFFFFFF);
+        open.setTextColor(Theme.ACCENT_LT);
         foot.addView(open);
         card.addView(foot);
 
