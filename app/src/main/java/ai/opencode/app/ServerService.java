@@ -202,6 +202,7 @@ public class ServerService extends Service {
     public void onCreate() {
         super.onCreate();
         appCtx = getApplicationContext();
+        procStartTs = System.currentTimeMillis();   // P27 boot-budget t0
         // P25: the run engine binds here too (defensive — App.onCreate
         // already does it). From now on the SSE feed NEVER drops frames:
         // RunHub listens for the whole process lifetime, screen or not.
@@ -210,6 +211,9 @@ public class ServerService extends Service {
         nm.createNotificationChannel(new NotificationChannel(
                 CH, "OpenCode server", NotificationManager.IMPORTANCE_LOW));
     }
+
+    /** P27: process start — the cold-boot budget's other endpoint. */
+    private static volatile long procStartTs;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -397,6 +401,20 @@ public class ServerService extends Service {
                                         + "). This chat is still attached; resend if the "
                                         + "last message didn't finish";
                                 appendDiag("recovered", "attempt " + thisAttempt);
+                            }
+                            if (attempts == 0) {
+                                // P27 phase 2: the cold-boot budget, ON RECORD —
+                                // spawn→healthy is the number the field feels;
+                                // process→healthy covers an app-start that
+                                // triggered this spawn. Kept off the critical
+                                // path: the hygiene sweep runs AFTER health.
+                                long procMs = procStartTs > 0
+                                        ? System.currentTimeMillis() - procStartTs : -1;
+                                appendDiag("boot-budget", "spawn→healthy " + ms
+                                        + " ms · process→healthy " + procMs + " ms");
+                                final Context fc = appCtx;
+                                new Thread(() -> Debian.bootHygiene(fc), "oc-hygiene")
+                                        .start();
                             }
                             break;
                         }

@@ -822,22 +822,13 @@ public class ChatActivity extends Activity
         }
     }
 
-    /** "↓ latest" pill above the composer when scrolled up. */
+    /** "↓ latest" pill above the composer when scrolled up. P27: it lives
+     *  IN THE LAYOUT (inside the transcript's FrameLayout) — the old decor
+     *  anchor with a fixed 96dp margin floated over the composer text the
+     *  moment the input grew (field shot). Never overlaps anything now. */
     private void buildPill() {
-        FrameLayout content = (FrameLayout) ((ViewGroup)
-                getWindow().getDecorView().findViewById(android.R.id.content));
-        scrollPill = new TextView(this);
-        scrollPill.setText("↓  latest");
-        scrollPill.setTextSize(12);
-        scrollPill.setTextColor(Theme.ACCENT_LT);
-        scrollPill.setBackground(Theme.ripple(this, Theme.panel(this)));
-        scrollPill.setPadding(Theme.dp(this, 16), Theme.dp(this, 7), Theme.dp(this, 16), Theme.dp(this, 7));
-        FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        flp.bottomMargin = Theme.dp(this, 96);
-        content.addView(scrollPill, flp);
-        scrollPill.setVisibility(View.GONE);
+        scrollPill = findViewById(R.id.scrollPill);
+        if (scrollPill == null) return;
         scrollPill.setOnClickListener(v -> {
             pinnedBottom = true;
             scroll.smoothScrollTo(0,
@@ -902,27 +893,298 @@ public class ChatActivity extends Activity
     }
 
     // ------------------------------------------- P26: the live-tree footer
+    // P27 — REBUILT AS A PERSISTENT, IN-PLACE CARD. The P26 version called
+    // removeAllViews() + a full rebuild on EVERY hubLive (each debounced
+    // DirWatcher batch, each peek reload) — the field card was unusable
+    // mid-run: taps landed on views destroyed between touch-down and
+    // touch-up ("does nothing"), or on a DIFFERENT row that had replaced
+    // the one under the finger ("navigates into something unexpected"),
+    // and the idle auto-collapse could restructure the card mid-gesture.
+    //
+    // The contract now:
+    //   • the card skeleton is built ONCE per run (busy start); every
+    //     update after that is IN PLACE — header texts setText, tree rows
+    //     diffed by stable key and mutated, never torn down wholesale;
+    //   • a row's identity never changes under an existing view (key
+    //     mismatch → that view is replaced, matching views are only
+    //     re-bound), so a listener can never fall through to a row that
+    //     was not the one the user aimed at;
+    //   • the idle auto-collapse is applied structurally ONLY when no
+    //     touch is in progress on the card (else it retries in 150 ms —
+    //     the timer can never cancel a tap);
+    //   • head tap = PIN (RunHub.toggleLivePin): pinned cards never
+    //     auto-collapse; unpin returns to auto; selection pins too;
+    //   • liveOpen + selected file live in RunHub, so they survive every
+    //     repaint AND every re-bind (re-entering mid-run restores card,
+    //     tree, selection and peek exactly).
 
-    /** The live edit tree NO LONGER lives in the transcript (a row added
-     *  at run start was buried above the fold within seconds — the field
-     *  never saw the files). It is pinned here instead: always visible
-     *  above the composer while the agent works, scrolled with nothing,
-     *  gone the moment the run settles. Rebuilt on hubBusy/hubLive — both
-     *  already event-driven and debounced upstream. */
+    /** Max height of the tree box — beyond this it scrolls in place. */
+    private static final int TREE_MAX_DP = 200;
+    /** Estimated per-row height used to pre-size the scroll cap. */
+    private static final int TREE_ROW_DP = 27;
+
+    private LinearLayout liveCard;      // the card (built once per run)
+    private TextView liveDot, liveSummary, liveChev;
+    private ScrollView liveScroll;      // hosts the tree, height-capped
+    private LinearLayout liveBox;       // tree rows (diffed in place)
+    private LinearLayout livePeekSlot;  // the peek (rebuilt only on selection change)
+
+    /** The in-progress-tap guard: true while any descendant of the card is
+     *  pressed. Auto-collapse DEFERS while this is true — a scheduled
+     *  structural change must never eat a gesture. */
+    private boolean gestureInProgress() {
+        if (liveCard == null) return false;
+        if (liveCard.isPressed()) return true;
+        for (int i = 0; i < liveBox.getChildCount(); i++) {
+            if (liveBox.getChildAt(i).isPressed()) return true;
+        }
+        return liveScroll.isPressed() || (livePeekSlot != null && livePeekSlot.isPressed());
+    }
+
     private void syncLiveFooter() {
         if (liveSlot == null) return;
         if (!RunHub.busy()) {
+            // run over (settleBusyUi also cleared liveOpen/liveSel) — the
+            // whole card disappears, exactly as the field asked.
             if (liveSlot.getVisibility() != View.GONE
                     || liveSlot.getChildCount() != 0) {
                 liveSlot.removeAllViews();
                 liveSlot.setVisibility(View.GONE);
             }
+            liveCard = null; liveBox = null; liveScroll = null;
+            liveDot = null; liveSummary = null; liveChev = null;
+            livePeekSlot = null;
             return;
         }
         liveSlot.setVisibility(View.VISIBLE);
-        liveSlot.removeAllViews();
-        Throwable t = Resilience.guard(() -> liveSlot.addView(buildLiveView()));
+        if (liveCard == null || liveCard.getParent() == null) buildLiveSkeleton();
+        Throwable t = Resilience.guard(this::updateLiveCard);
         if (t != null) Trail.record(this, "live footer", t);
+    }
+
+    /** Build the once-per-run skeleton. Every listener attached here lives
+     *  for the whole run — nothing below is rebuilt by streaming. */
+    private void buildLiveSkeleton() {
+        liveSlot.removeAllViews();
+        liveCard = new LinearLayout(this);
+        liveCard.setOrientation(LinearLayout.VERTICAL);
+        liveCard.setBackgroundResource(R.drawable.bg_thought_card);
+        int cp = dp(11);
+        liveCard.setPadding(cp, dp(8), cp, dp(9));
+
+        // ---- header: ● PINNED/LIVE · summary ……………………………………… ▸
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        head.setPadding(0, dp(4), 0, dp(4));   // taller tap target
+
+        liveDot = text(9, R.color.text_primary, false);
+        liveDot.setText("●");
+        head.addView(liveDot);
+
+        TextView tag = text(10, R.color.text_secondary, true);
+        tag.setText("  LIVE");
+        tag.setLetterSpacing(0.14f);
+        // clipping audit: letterspaced caps carry trailing advance — match
+        // it with end padding so the following text keeps a real gap.
+        tag.setPadding(0, 0, dp(4), 0);
+        head.addView(tag);
+
+        liveSummary = text(11, R.color.text_secondary, false);
+        liveSummary.setPadding(dp(8), 0, 0, 0);
+        liveSummary.setSingleLine(true);
+        liveSummary.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        head.addView(liveSummary, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        liveChev = text(11, R.color.text_secondary, false);
+        liveChev.setText("▾");
+        liveChev.setPadding(dp(6), 0, dp(2), 0);
+        head.addView(liveChev);
+        liveCard.addView(head);
+
+        Theme.press(head);
+        head.setOnClickListener(v -> {
+            v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+            RunHub.toggleLivePin();   // pin ↔ unpin; notifyLive repaints in place
+        });
+
+        liveScroll = new ScrollView(this);
+        liveScroll.setVerticalScrollBarEnabled(false);
+        liveBox = new LinearLayout(this);
+        liveBox.setOrientation(LinearLayout.VERTICAL);
+        liveBox.setPadding(dp(2), dp(4), 0, 0);
+        liveScroll.addView(liveBox);
+        liveScroll.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        liveCard.addView(liveScroll);
+
+        livePeekSlot = new LinearLayout(this);
+        livePeekSlot.setOrientation(LinearLayout.VERTICAL);
+        liveCard.addView(livePeekSlot);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        liveCard.setLayoutParams(lp);
+        liveSlot.addView(liveCard);
+    }
+
+    /** One in-place refresh: header texts, then the tree/peek reconcile. */
+    private void updateLiveCard() {
+        if (liveCard == null) return;
+        boolean empty = RunHub.liveCount() == 0;
+        boolean expanded = RunHub.liveExpanded();
+        if (liveDot != null) {
+            // STATIC dot — no pulse (field request, kept). Brightness says
+            // the state: accent = pinned, dim accent = auto/live, gray =
+            // watching with no edits yet.
+            liveDot.setTextColor(empty ? Theme.TXT_DIM
+                    : RunHub.livePinned() ? Theme.ACCENT_LT : Theme.ACCENT);
+            liveDot.setAlpha(empty ? 0.55f : 1f);
+        }
+        if (liveSummary != null) {
+            liveSummary.setText(empty ? "watching project files…"
+                    : RunHub.liveSummaryLine(false)
+                      + (RunHub.livePinned() ? "  ·  pinned" : ""));
+        }
+        if (liveChev != null) liveChev.setText(expanded ? "▾" : "▸");
+
+        if (expanded && !empty) {
+            reconcileTree();
+            reconcilePeek();
+        } else {
+            // structural collapse — DEFERRED while a gesture is on the card
+            if ((liveBox != null && liveBox.getChildCount() > 0)
+                    || (liveScroll != null && liveScroll.getVisibility() != View.GONE)
+                    || (livePeekSlot != null && livePeekSlot.getChildCount() > 0)) {
+                if (gestureInProgress()) {          // never cancel a tap mid-air
+                    ui.removeCallbacks(deferredLiveUpdate);
+                    ui.postDelayed(deferredLiveUpdate, 150);
+                    return;
+                }
+                if (liveBox != null) liveBox.removeAllViews();
+                if (liveScroll != null) liveScroll.setVisibility(View.GONE);
+                if (livePeekSlot != null) livePeekSlot.removeAllViews();
+            }
+        }
+    }
+
+    private final Runnable deferredLiveUpdate = this::updateLiveCard;
+
+    // ---- in-place tree reconcile ------------------------------------------
+
+    /** One desired tree row: {kind, key, payload, depth}. kind "f" = file
+     *  (payload EditPulse.Ev), "d" = dir (payload EditPulse.TNode). */
+    private void flattenTree(List<EditPulse.TNode> nodes, int depth,
+                             java.util.Set<String> autoOpen, List<Object[]> out) {
+        for (EditPulse.TNode n : nodes) {
+            if (n.ev != null) {
+                out.add(new Object[]{"f", n.ev.abs, n.ev, depth});
+            } else {
+                out.add(new Object[]{"d", n.dir, n, depth});
+                if (dirOpen(n, autoOpen)) {
+                    flattenTree(n.kids, depth + 1, autoOpen, out);
+                }
+            }
+        }
+    }
+
+    /** Diff the desired rows into liveBox: matching keys are re-bound IN
+     *  PLACE (same view, same listener), key mismatches replace exactly
+     *  that index, additions append — a row under the finger is never
+     *  destroyed by streaming (and never swapped for another identity). */
+    private void reconcileTree() {
+        List<EditPulse.TNode> tree = RunHub.liveTree();
+        String newest = RunHub.liveNewest();
+        java.util.Set<String> autoOpen = autoOpenDirs(tree, newest);
+        List<Object[]> want = new ArrayList<>();
+        flattenTree(tree, 0, autoOpen, want);
+
+        boolean motion = Theme.motionOn(this);
+        int[] stagger = {0};
+        for (int i = 0; i < want.size(); i++) {
+            Object[] w = want.get(i);
+            String key = (String) w[1];
+            View cur = i < liveBox.getChildCount() ? liveBox.getChildAt(i) : null;
+            String curKey = cur != null && cur.getTag() instanceof String
+                    ? (String) cur.getTag() : null;
+            if (!key.equals(curKey)) {
+                View nv = "f".equals(w[0])
+                        ? makeFileRow((EditPulse.Ev) w[2], (Integer) w[3])
+                        : makeDirRow((EditPulse.TNode) w[2], (Integer) w[3], autoOpen);
+                nv.setTag(key);
+                if (i < liveBox.getChildCount()
+                        && !(cur != null && cur.isPressed())) {
+                    liveBox.removeViewAt(i);
+                    liveBox.addView(nv, i);
+                } else if (i >= liveBox.getChildCount()) {
+                    liveBox.addView(nv);
+                } else {
+                    liveBox.addView(nv, i);   // keep the pressed row one cycle
+                }
+                cur = nv;
+            }
+            // in-place rebind (text/counters/selection/highlight)
+            EditPulse.Ev ev = "f".equals(w[0]) ? (EditPulse.Ev) w[2] : null;
+            if (ev != null) bindFileRow(cur, ev, (Integer) w[3], newest, motion, stagger);
+            else bindDirRow(cur, (EditPulse.TNode) w[2], autoOpen);
+        }
+        // surplus rows fall off the tail (never the pressed one mid-gesture)
+        while (liveBox.getChildCount() > want.size()) {
+            int last = liveBox.getChildCount() - 1;
+            if (liveBox.getChildAt(last).isPressed()) break;
+            liveBox.removeViewAt(last);
+        }
+
+        // height cap — update the existing ScrollView's params IN PLACE
+        int capRows = Math.max(3, TREE_MAX_DP / TREE_ROW_DP);
+        boolean capped = want.size() > capRows;
+        ViewGroup.LayoutParams lp = liveScroll.getLayoutParams();
+        int wantH = capped ? dp(TREE_MAX_DP) : ViewGroup.LayoutParams.WRAP_CONTENT;
+        if (lp.height != wantH) {
+            lp.height = wantH;
+            liveScroll.setLayoutParams(lp);
+        }
+        if (liveScroll.getVisibility() != View.VISIBLE) liveScroll.setVisibility(View.VISIBLE);
+    }
+
+    /** The peek slot: rebuilt ONLY when the selection changes (user tap —
+     *  no streaming race), text updated in place on every fs event. */
+    private void reconcilePeek() {
+        String sel = RunHub.liveSel();
+        if (sel == null) {
+            if (livePeekSlot.getChildCount() > 0 && !livePeekSlot.isPressed()) {
+                livePeekSlot.removeAllViews();
+            }
+            return;
+        }
+        TextView pv;
+        if (livePeekSlot.getChildCount() > 0
+                && sel.equals(livePeekSlot.getTag())) {
+            pv = (TextView) livePeekSlot.getChildAt(0);
+        } else {
+            livePeekSlot.removeAllViews();
+            pv = mono(text(10, R.color.text_primary, false), 10);
+            pv.setBackgroundResource(R.drawable.bg_code);
+            int pp = dp(9);
+            pv.setPadding(pp, pp, pp, pp);
+            pv.setSingleLine(false);
+            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            plp.topMargin = dp(8);
+            livePeekSlot.addView(pv, plp);
+            livePeekSlot.setTag(sel);
+        }
+        String cached = RunHub.peekFor(sel);
+        if (cached != null) {
+            pv.setText(cached);
+        } else {
+            pv.setText("…");
+            RunHub.ensurePeek(sel);
+        }
     }
 
     // ---- P23: blast-radius zero ----------------------------------------
@@ -1037,129 +1299,10 @@ public class ChatActivity extends Activity
     }
 
     // ================================================= P25: live edit tree
-    // The view half of the edit shower. STATE (feed, selection, peek
-    // cache, watcher) lives in RunHub; this renders a COMPACT LIVE TREE:
-    // touched files grouped under their (only-touched) directories, dirs
-    // collapsed unless they carry the freshest activity (or the user
-    // opened them), a hard height cap so huge directories scroll INSIDE
-    // the card instead of flooding the chat.
-
-    /** Max height of the tree box — beyond this it scrolls in place. */
-    private static final int TREE_MAX_DP = 200;
-    /** Estimated per-row height used to pre-size the scroll cap. */
-    private static final int TREE_ROW_DP = 27;
-
-    /** The "edit shower" card — P26: rendered ONLY while a run is active,
-     *  ONLY in the pinned footer slot (never in the transcript). A compact
-     *  live tree of the files the agent is touching right now: dirs
-     *  collapsed unless they carry the freshest activity (or the user
-     *  opened them), height-capped, scrolling INSIDE the card, tap a file
-     *  for the line-precise peek. The dot is STATIC — no flashing (field
-     *  request), the card default-expands for the whole run: a stable
-     *  tree, not a strobe. When the run settles the card disappears
-     *  (settleBusyUi clears the state; the footer hides). */
-    private View buildLiveView() {
-        boolean empty = RunHub.liveCount() == 0;
-        boolean expanded = RunHub.liveOpen != null ? RunHub.liveOpen : Boolean.TRUE;
-
-        LinearLayout c = new LinearLayout(this);
-        c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackgroundResource(R.drawable.bg_thought_card);
-        int cp = dp(11);
-        c.setPadding(cp, dp(8), cp, dp(9));
-
-        // ---- header: ● LIVE · summary ………………………………………… ▸
-        LinearLayout head = new LinearLayout(this);
-        head.setOrientation(LinearLayout.HORIZONTAL);
-        head.setGravity(Gravity.CENTER_VERTICAL);
-
-        TextView dot = text(9, R.color.text_primary, false);
-        dot.setText("●");
-        dot.setTextColor(empty ? 0xFF6E6E6E : 0xFF9DB1FF);   // STATIC — no pulse
-        head.addView(dot);
-
-        TextView tag = text(10, R.color.text_secondary, true);
-        tag.setText("  LIVE");
-        tag.setLetterSpacing(0.14f);
-        head.addView(tag);
-
-        TextView sum = text(11, R.color.text_secondary, false);
-        sum.setPadding(dp(8), 0, 0, 0);
-        sum.setSingleLine(true);
-        sum.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-        sum.setText(empty ? "watching project files…" : RunHub.liveSummaryLine(false));
-        head.addView(sum, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-
-        TextView chev = text(11, R.color.text_secondary, false);
-        chev.setText(expanded ? "▾" : "▸");
-        chev.setPadding(dp(6), 0, 0, 0);
-        head.addView(chev);
-        c.addView(head);
-
-        // ---- the live tree: dirs collapsed, touched paths expanded,
-        //      hard height cap — huge directories scroll INSIDE the card
-        if (expanded && !empty) {
-            List<EditPulse.TNode> tree = RunHub.liveTree();
-            String newest = RunHub.liveNewest();
-            java.util.Set<String> autoOpen = autoOpenDirs(tree, newest);
-
-            LinearLayout box = new LinearLayout(this);
-            box.setOrientation(LinearLayout.VERTICAL);
-            box.setPadding(dp(2), dp(4), 0, 0);
-            int[] stagger = {0};
-            boolean motion = Theme.motionOn(this);
-            renderTreeNodes(box, tree, 0, newest, autoOpen, motion, stagger);
-
-            ScrollView sc = new ScrollView(this);
-            sc.setVerticalScrollBarEnabled(false);
-            sc.addView(box);
-            // cap: rows beyond ~TREE_MAX_DP scroll inside the card
-            int rows = countNodes(tree, autoOpen);
-            int capRows = Math.max(3, TREE_MAX_DP / TREE_ROW_DP);
-            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    rows > capRows ? dp(TREE_MAX_DP)
-                            : ViewGroup.LayoutParams.WRAP_CONTENT);
-            sc.setLayoutParams(tlp);
-            c.addView(sc);
-
-            // ---- the peek: the exact edited region, never the full file
-            String sel = RunHub.liveSel();
-            if (sel != null) {
-                TextView pv = mono(text(10, R.color.text_primary, false), 10);
-                pv.setBackgroundResource(R.drawable.bg_code);
-                int pp = dp(9);
-                pv.setPadding(pp, pp, pp, pp);
-                pv.setSingleLine(false);
-                String cached = RunHub.peekFor(sel);
-                if (cached != null) {
-                    pv.setText(cached);
-                } else {
-                    pv.setText("…");
-                    RunHub.ensurePeek(sel);
-                }
-                LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT,
-                        ViewGroup.LayoutParams.WRAP_CONTENT);
-                plp.topMargin = dp(8);
-                pv.setLayoutParams(plp);
-                c.addView(pv);
-            }
-        }
-
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = dp(8);
-        c.setLayoutParams(lp);
-        Theme.press(c);
-        head.setOnClickListener(v -> {
-            RunHub.liveOpen = expanded ? Boolean.FALSE : Boolean.TRUE;
-            syncLiveFooter();              // P26: no row to repaint — the footer IS the card
-        });
-        return c;
-    }
+    // The view half of the edit shower (P27: persistent card + in-place
+    // row reconcile — see the contract block above syncLiveFooter). STATE
+    // (feed, selection, peek cache, watcher, pin) lives in RunHub; rows
+    // below are built once per appearance and re-bound by key.
 
     /** Dirs the user has NOT explicitly toggled follow the freshest
      *  activity: the newest event's ancestor chain is expanded, sibling
@@ -1189,61 +1332,26 @@ public class ChatActivity extends Activity
         return st != null ? st : autoOpen.contains(d.dir);
     }
 
-    private void renderTreeNodes(LinearLayout into, List<EditPulse.TNode> nodes,
-                                 int depth, String newest,
-                                 java.util.Set<String> autoOpen,
-                                 boolean motion, int[] stagger) {
-        for (EditPulse.TNode n : nodes) {
-            if (n.ev != null) {
-                View row = liveFileRow(n.ev, depth, newest);
-                into.addView(row);
-                if (!n.ev.seen && motion) {          // only NEW events animate
-                    row.setAlpha(0f);                // repaints never replay
-                    row.setTranslationY(dp(8));
-                    row.animate().alpha(1f).translationY(0f)
-                            .setStartDelay(stagger[0]).setDuration(170)
-                            .setInterpolator(Theme.DECEL).start();
-                    stagger[0] = Math.min(stagger[0] + 45, 270);
-                }
-                n.ev.seen = true;
-            } else {
-                into.addView(dirRowView(n, depth, autoOpen));
-                if (dirOpen(n, autoOpen)) {
-                    renderTreeNodes(into, n.kids, depth + 1, newest,
-                            autoOpen, motion, stagger);
-                }
-            }
-        }
-    }
+    // ---- P27 row views: built ONCE per appearance, re-bound by key ----
+    // Each row carries its views as tags; bind* only setText/setBackground
+    // (plus the one-shot entrance animation for brand-new events). Tap
+    // listeners capture NOTHING that streams — they re-read the hub state
+    // at click time, so a row can never act on stale data.
 
-    private int countNodes(List<EditPulse.TNode> nodes, java.util.Set<String> autoOpen) {
-        int n = 0;
-        for (EditPulse.TNode t : nodes) {
-            n++;
-            if (t.ev == null && dirOpen(t, autoOpen)) n += countNodes(t.kids, autoOpen);
-        }
-        return n;
-    }
-
-    /** One directory row inside the tree — tap toggles expand/collapse. */
-    private View dirRowView(final EditPulse.TNode d, int depth,
+    /** One directory row — tap toggles expand/collapse (user interaction:
+     *  also pins the card open, a collapse under an open finger reads as
+     *  the app fighting the user). */
+    private View makeDirRow(final EditPulse.TNode d, int depth,
                             final java.util.Set<String> autoOpen) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        int rp = dp(6 + depth * 12);
-        row.setPadding(rp, dp(3), rp, dp(3));
 
         TextView chev = text(10, R.color.text_secondary, false);
-        chev.setText(dirOpen(d, autoOpen) ? "▾" : "▸");
         chev.setPadding(0, 0, dp(5), 0);
         row.addView(chev);
 
         TextView name = mono(text(11, R.color.text_secondary, false), 11);
-        String seg = d.dir;
-        int sl = seg.lastIndexOf('/');
-        if (sl >= 0) seg = seg.substring(sl + 1);
-        name.setText(seg + "/");
         name.setSingleLine(true);
         name.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         row.addView(name, new LinearLayout.LayoutParams(0,
@@ -1251,17 +1359,32 @@ public class ChatActivity extends Activity
 
         TextView n = text(10, R.color.text_secondary, false);
         n.setPadding(dp(6), 0, 0, 0);
-        n.setText("· " + d.hits + (d.hits == 1 ? " edit" : " edits"));
         row.addView(n);
 
         Theme.press(row);
         row.setOnClickListener(v -> {
             dirState.put(d.dir, !dirOpen(d, autoOpen));
             capDirState();
-            RunHub.Row r = rowByKey(LIVE_KEY);
-            if (r != null) touchView(r);
+            if (RunHub.liveOpen == null) RunHub.toggleLivePin();  // stay open
+            updateLiveCard();
         });
+        bindDirRow(row, d, autoOpen);
         return row;
+    }
+
+    /** In-place rebind of a dir row (chevron, name, hit counter). */
+    private void bindDirRow(View rowV, EditPulse.TNode d,
+                            java.util.Set<String> autoOpen) {
+        LinearLayout row = (LinearLayout) rowV;
+        TextView chev = (TextView) row.getChildAt(0);
+        TextView name = (TextView) row.getChildAt(1);
+        TextView n = (TextView) row.getChildAt(2);
+        chev.setText(dirOpen(d, autoOpen) ? "▾" : "▸");
+        String seg = d.dir;
+        int sl = seg.lastIndexOf('/');
+        if (sl >= 0) seg = seg.substring(sl + 1);
+        name.setText(seg + "/");
+        n.setText("· " + d.hits + (d.hits == 1 ? " edit" : " edits"));
     }
 
     /** dirState is view-local preference memory — bounded like everything. */
@@ -1273,21 +1396,13 @@ public class ChatActivity extends Activity
     }
 
     /** One file row inside the tree — tap to peek around the edit.
-     *  P25: the NEWEST event's row is auto-highlighted; depth indents. */
-    private View liveFileRow(final EditPulse.Ev e, int depth, String newest) {
+     *  The NEWEST event's row carries the accent dot; depth indents. */
+    private View makeFileRow(final EditPulse.Ev e, int depth) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        int rp = dp(6 + depth * 12);
-        row.setPadding(rp, dp(3), rp, dp(3));
-        boolean sel = e.abs != null && e.abs.equals(RunHub.liveSel());
-        boolean isNewest = e.abs != null && e.abs.equals(newest);
-        if (sel) row.setBackgroundResource(R.drawable.bg_code);
-        else row.setBackground(null);
 
-        TextView g = text(11, "del".equals(e.action) ? R.color.err
-                : R.color.text_secondary, false);
-        g.setText(EditPulse.glyph(e.action));
+        TextView g = text(11, R.color.text_secondary, false);
         LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -1296,7 +1411,6 @@ public class ChatActivity extends Activity
         row.addView(g);
 
         TextView p = mono(text(11, R.color.text_primary, false), 11);
-        p.setText(e.rel + (e.hits > 1 ? "  ×" + e.hits : ""));
         p.setSingleLine(true);
         p.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         row.addView(p, new LinearLayout.LayoutParams(0,
@@ -1304,23 +1418,58 @@ public class ChatActivity extends Activity
 
         TextView age = text(10, R.color.text_secondary, false);
         age.setPadding(dp(6), 0, 0, 0);
-        age.setText(relTime((System.currentTimeMillis() - e.ts) / 1000.0));
         row.addView(age);
 
-        if (isNewest) {
-            TextView fresh = text(9, 0xFF9DB1FF, true);
-            fresh.setPadding(dp(5), 0, 0, 0);
-            fresh.setText("●");
-            row.addView(fresh);
-        }
+        TextView fresh = text(9, R.color.accent_light, true);
+        fresh.setPadding(dp(5), 0, dp(2), 0);
+        fresh.setText("●");
+        fresh.setVisibility(View.GONE);
+        row.addView(fresh);
 
         Theme.press(row);
         row.setOnClickListener(v -> {
             String next = (RunHub.liveSel() != null && RunHub.liveSel().equals(e.abs))
                     ? null : e.abs;
-            RunHub.setLiveSel(next);
+            RunHub.setLiveSel(next);   // pins open + loads the peek
         });
         return row;
+    }
+
+    /** In-place rebind of a file row (glyph, path, age, newest dot,
+     *  selection highlight, entrance animation for events not yet seen). */
+    private void bindFileRow(View rowV, EditPulse.Ev e, int depth, String newest,
+                             boolean motion, int[] stagger) {
+        LinearLayout row = (LinearLayout) rowV;
+        int rp = dp(6 + depth * 12);
+        row.setPadding(rp, dp(3), rp, dp(3));
+        boolean sel = e.abs != null && e.abs.equals(RunHub.liveSel());
+        boolean isNewest = e.abs != null && e.abs.equals(newest);
+        if (sel) row.setBackgroundResource(R.drawable.bg_code);
+        else row.setBackground(null);
+
+        TextView g = (TextView) row.getChildAt(0);
+        g.setText(EditPulse.glyph(e.action));
+        g.setTextColor(getColor("del".equals(e.action)
+                ? R.color.err : R.color.text_secondary));
+
+        TextView p = (TextView) row.getChildAt(1);
+        p.setText(e.rel + (e.hits > 1 ? "  ×" + e.hits : ""));
+
+        TextView age = (TextView) row.getChildAt(2);
+        age.setText(relTime((System.currentTimeMillis() - e.ts) / 1000.0));
+
+        TextView fresh = (TextView) row.getChildAt(3);
+        fresh.setVisibility(isNewest ? View.VISIBLE : View.GONE);
+
+        if (!e.seen && motion) {          // only NEW events animate —
+            row.setAlpha(0f);             // repaints never replay it
+            row.setTranslationY(dp(8));
+            row.animate().alpha(1f).translationY(0f)
+                    .setStartDelay(stagger[0]).setDuration(170)
+                    .setInterpolator(Theme.DECEL).start();
+            stagger[0] = Math.min(stagger[0] + 45, 270);
+        }
+        e.seen = true;
     }
 
     // ================================================= P17: vision / images
@@ -1459,6 +1608,7 @@ public class ChatActivity extends Activity
     private void spendPopover() {
         long sumTok = RunHub.sessionTok();
         double sumCost = RunHub.sessionCost();
+        long cachedTok = RunHub.sessionCacheRead();
         long lastTok;
         synchronized (lock) { lastTok = RunHub.tx().lastAssistantTok; }
         if (sumTok <= 0 && sumCost <= 0) return;
@@ -1468,12 +1618,22 @@ public class ChatActivity extends Activity
          .append("re-reads the whole chat, so depth is what each NEW turn ")
          .append("costs before the model writes a single word. \"$\" is ")
          .append("what the provider billed for the whole session so far.\n\n");
-        long limit = Models.contextLimitFor(Models.lastFetch(),
+        long limit = Models.resolveLimit(this, Models.lastFetch(),
                 RunHub.selProviderPub(), RunHub.selModelPub());
         if (lastTok > 0) {
             m.append("Now: ~").append(Resilience.fmtTok(lastTok));
             if (limit > 0) m.append(" of ").append(Resilience.fmtTok(limit));
             m.append(" tokens in the window.\n\n");
+        }
+        // P27: the money question, answered with the session's own numbers.
+        // Prompt caching is automatic provider-side; these are the CACHED
+        // input tokens the provider reported — billed at the discounted
+        // rate, so they are the discount already being applied.
+        if (cachedTok > 0) {
+            m.append("Prompt cache: ").append(Resilience.fmtTok(cachedTok))
+             .append(" tokens of this session's input were served from the ")
+             .append("provider's cache (billed at the discounted rate) — ")
+             .append("caching is on and working.\n\n");
         }
         String verdict = Resilience.contextVerdict(lastTok);
         boolean heavy = limit > 0 ? lastTok * 100 / limit >= 50 : lastTok >= 50_000;
@@ -1699,7 +1859,18 @@ public class ChatActivity extends Activity
                     body.setText(s.length() == 0 ? "…" : s + "▍");
                 } else {
                     CharSequence md;
-                    try { md = Markdown.render(r.text.toString()); }
+                    try {
+                        final ChatActivity self = this;
+                        Markdown.MentionResolver mres = new Markdown.MentionResolver() {
+                            @Override public String resolve(String candidate) {
+                                return self.resolveMention(candidate);
+                            }
+                            @Override public void open(String abs) {
+                                self.openInFiles(abs);
+                            }
+                        };
+                        md = Markdown.render(r.text.toString(), mres);
+                    }
                     catch (Exception e) { md = r.text.toString(); }
                     body.setText(md.length() == 0 ? "…" : md);
                     body.setOnLongClickListener(v -> {
@@ -1816,7 +1987,7 @@ public class ChatActivity extends Activity
                 head.setGravity(Gravity.CENTER_VERTICAL);
 
                 TextView disc = text(12, R.color.on_accent, true);
-                disc.setTextColor(0xFFFFFFFF);   // literal — not a resource id
+                disc.setTextColor(Theme.ON_DISC);   // token — P27 no inline hex
                 disc.setText(toolGlyph(r.tool));
                 disc.setGravity(Gravity.CENTER);
                 disc.setBackground(Theme.circle(toolTint(r.tool, failed)));
@@ -1860,6 +2031,27 @@ public class ChatActivity extends Activity
                     if (r.output.length() > 0) {
                         c.addView(label("output"));
                         c.addView(codeBlock(r.output.toString(), 12000));
+                    }
+                    // P27 phase 4: tap-through to the Files viewer for the
+                    // file this tool touched — added as its OWN row so it
+                    // never conflicts with the head/card toggle. Only when
+                    // the file still exists in the serving dir.
+                    String touched = Mentions.toolFilePath(r.tool, r.title);
+                    if (touched != null) {
+                        final String abs = touched;
+                        TextView open = text(12, R.color.accent_light, true);
+                        open.setText("↗ open in Files");
+                        open.setBackgroundResource(R.drawable.bg_chip);
+                        int op = dp(10);
+                        open.setPadding(op, dp(6), op, dp(6));
+                        LinearLayout.LayoutParams olp = new LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT);
+                        olp.topMargin = dp(8);
+                        open.setLayoutParams(olp);
+                        Theme.press(open);
+                        open.setOnClickListener(v -> openInFiles(abs));
+                        c.addView(open);
                     }
                 }
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -1973,24 +2165,15 @@ public class ChatActivity extends Activity
         }
     }
 
-    /** P10: icon-disc tint per tool — instant "what ran" recognition. */
+    /** P10: icon-disc tint per tool — P27: the ten-hue rainbow (indigo,
+     *  sky, emerald, violet, amber, cyan, pink…) was the loudest accent
+     *  sprawl on the screen; the GLYPH already says which tool ran. Now:
+     *  the ONE accent for every tool, danger for failures — the same
+     *  family everything else live/interactive uses. */
     private static int toolTint(String tool, boolean failed) {
-        if (failed) return 0xFFB34848;
-        if (tool == null) return 0xFF5A6478;
-        switch (tool) {
-            case "bash": return 0xFF5B6CFF;          // indigo
-            case "read": return 0xFF0EA5E9;          // sky
-            case "list": return 0xFF38BDF8;          // light sky
-            case "write":
-            case "edit": return 0xFF10B981;          // emerald
-            case "patch": return 0xFF8B5CF6;         // violet
-            case "glob":
-            case "grep": return 0xFFF59E0B;          // amber
-            case "webfetch": return 0xFF22D3EE;      // cyan
-            case "todowrite": return 0xFFEC4899;     // pink
-            case "task": return 0xFF6366F1;          // indigo 2
-            default: return 0xFF5A6478;
-        }
+        if (failed) return Theme.TINT_DANGER;
+        if ("todowrite".equals(tool)) return Theme.TINT_OK;
+        return Theme.TINT_ACCENT;
     }
 
     /** P10: rounded, hairline code block used for tool input/output. */
@@ -2024,6 +2207,40 @@ public class ChatActivity extends Activity
         ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         cm.setPrimaryClip(ClipData.newPlainText(label, s));
         Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show();
+    }
+
+    // ------------------------------------------ P27: tappable file mentions
+
+    /** The mention resolver the markdown renderer calls back: candidate →
+     *  absolute path, but ONLY when the file actually exists in (or under)
+     *  the serving directory right now. Non-existent mentions stay plain
+     *  text. Never throws — a resolver hiccup must not break the row. */
+    private String resolveMention(String candidate) {
+        try {
+            String root = ServerService.servingDir() != null
+                    ? ServerService.servingDir().getAbsolutePath() : null;
+            String abs = Mentions.resolve(root, candidate);
+            return (abs != null && new File(abs).isFile()) ? abs : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Deep-link the EXISTING Files viewer to one file (phase 4 contract:
+     *  reuse, never rebuild). Back from Files returns here — same task
+     *  stack, scroll position untouched. */
+    private void openInFiles(String abs) {
+        if (abs == null) return;
+        File f = new File(abs);
+        if (!f.isFile()) {
+            Toast.makeText(this, "file no longer exists", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Theme.pop(findViewById(R.id.list));
+        Intent i = new Intent(this, FilesActivity.class);
+        i.putExtra("open", abs);
+        startActivity(i);
+        overridePendingTransition(R.anim.slide_in_right, R.anim.fade_out);
     }
 
     // ------------------------------------------------------- permissions
@@ -2409,6 +2626,7 @@ public class ChatActivity extends Activity
     private android.app.AlertDialog modelDlg;
     private List<Models.Prov> sheetProvs;
     private Runnable sheetRefill;
+    private TextView sheetHint;
     private boolean keysFromSheet;
 
     private void modelSheet() {
@@ -2505,6 +2723,7 @@ public class ChatActivity extends Activity
                 + "falls-back if refused · ⌘ → API keys to add one");
         hint.setPadding(dp(4), dp(8), dp(4), dp(10));
         root.addView(hint);
+        sheetHint = hint;
         b.setView(root);
         final AlertDialog dlg = b.create();
         dlg.show();
@@ -2525,6 +2744,7 @@ public class ChatActivity extends Activity
                 modelDlg = null;
                 sheetRefill = null;
                 sheetProvs = null;
+                sheetHint = null;
             }
         });
 
@@ -2623,22 +2843,40 @@ public class ChatActivity extends Activity
                         // glance, exactly what would work.
                         int col = isCur ? R.color.ok
                                 : m.live ? R.color.text_primary : R.color.text_secondary;
+                        // P27 clipping audit: the P26 row jammed provider +
+                        // price into ONE middle-ellipsized line — the price
+                        // collided with the path ellipsis (field shot). Two
+                        // fixed rows now: name+tags, then provider (left,
+                        // middle-ellipsis) vs price (right, never truncated
+                        // by the path).
                         TextView t1 = text(14, col, isCur || m.live);
                         t1.setText((isCur ? "✓ " : "") + m.name
                                 + (m.live ? "" : "   ·  catalog")
                                 + (m.free ? "   ⟨free⟩" : ""));
                         t1.setSingleLine(true);
                         t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                        box.addView(t1);
+                        LinearLayout meta = new LinearLayout(ChatActivity.this);
+                        meta.setOrientation(LinearLayout.HORIZONTAL);
+                        meta.setGravity(Gravity.CENTER_VERTICAL);
                         TextView t2 = text(11, R.color.text_secondary, false);
-                        t2.setText(pr.id + "/" + m.id
-                                + (!m.free && m.costIn > 0
-                                        ? String.format(Locale.US,
-                                          "   · $%g in / $%g out per Mtok",
-                                          m.costIn, m.costOut) : ""));
+                        t2.setText(pr.id + "/" + m.id);
                         t2.setSingleLine(true);
                         t2.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-                        box.addView(t1);
-                        box.addView(t2);
+                        meta.addView(t2, new LinearLayout.LayoutParams(0,
+                                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                        if (!m.free && (m.costIn > 0 || m.costOut > 0)) {
+                            TextView cost = text(11, R.color.text_secondary, false);
+                            cost.setTypeface(Typeface.MONOSPACE);
+                            cost.setText(String.format(Locale.US,
+                                    "$%g in / $%g out/Mtok", m.costIn, m.costOut));
+                            cost.setSingleLine(true);
+                            cost.setPadding(dp(8), 0, 0, 0);
+                            meta.addView(cost, new LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT));
+                        }
+                        box.addView(meta);
                     } else {
                         TextView t = text(12, R.color.text_secondary, false);
                         t.setText(String.valueOf(it[2]));
@@ -2687,22 +2925,35 @@ public class ChatActivity extends Activity
                 if (pr.usable) {
                     Models.save(this, pr.id, m.id, true);
                     refreshChips();
-                    Toast.makeText(this, m.name + " is in the discovery catalog "
-                            + "— trying it. If your server can't serve it right "
-                            + "now, the run falls back to the default automatically",
-                            Toast.LENGTH_LONG).show();
+                    // P27: the P26 toast was THREE lines of LONG toast —
+                    // a gray wall over the sheet (field shot). The hint
+                    // line at the sheet's bottom says it without covering
+                    // anything, and a short toast confirms the pick.
+                    Toast.makeText(this, "model → " + m.name + " (try-anyway)",
+                            Toast.LENGTH_SHORT).show();
+                    if (sheetHint != null) {
+                        sheetHint.setText(m.name + " is in the discovery catalog — "
+                                + "trying it. If the server can't serve it, the run "
+                                + "falls back to the default automatically");
+                        sheetHint.setTextColor(getColor(R.color.accent_light));
+                    }
                     dlg.dismiss();
                 } else {
                     // P16: say WHICH key — Zen and Go are separate, and that
                     // distinction is the whole P16 key fix. Without a key the
                     // server can't use the provider at all, so a try is noise.
-                    Toast.makeText(this, "no key for " + pr.name + " yet — "
+                    String why = "no key for " + pr.name + " yet — "
                             + (pr.id.startsWith("opencode")
                                 ? "add the " + pr.name + " key in ⌘ → API keys "
                                   + "(separate from your other opencode key)"
                                 : "⌘ → API keys first")
-                            + ", then tap ↻ up top",
-                            Toast.LENGTH_LONG).show();
+                            + ", then tap ↻ up top";
+                    Toast.makeText(this, "no key for " + pr.name,
+                            Toast.LENGTH_SHORT).show();
+                    if (sheetHint != null) {
+                        sheetHint.setText(why);
+                        sheetHint.setTextColor(getColor(R.color.accent_light));
+                    }
                 }
                 return;
             }

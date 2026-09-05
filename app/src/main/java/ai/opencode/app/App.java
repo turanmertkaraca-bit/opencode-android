@@ -24,6 +24,10 @@ public class App extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
+        // P27: the design system reads its prefs (AMOLED pure black default)
+        // ONCE at process start — every screen, drawable and markdown link
+        // renders from the same palette from the first frame.
+        Theme.apply(this);
         // P25: the run engine exists for the WHOLE process lifetime — it
         // owns the transcript, busy state, send orchestration and the
         // live-edit feed, so a running agent turn never depends on any

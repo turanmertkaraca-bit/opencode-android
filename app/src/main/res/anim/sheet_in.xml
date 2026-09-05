@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P27 sheet motion: slide-up + fade, decel, 200 ms. -->
+<translate xmlns:android="http://schemas.android.com/apk/res/android"
+    android:fromYDelta="12%" android:toYDelta="0"
+    android:duration="200" android:interpolator="@android:anim/decelerate_interpolator"/>

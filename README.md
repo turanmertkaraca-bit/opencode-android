@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.26.0 — P26)
+## Install (v0.27.0 — P27)
 
-1. Grab `opencode-p26-v0.26.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p27-v0.27.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -394,5 +394,6 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P8 project deck, per-project sandboxes, motion design | shipped |
 | P9–P24 streaming polish, self-healing, native audit, flush isolation | shipped |
 | P25 runs outlive the chat (RunHub, context-depth pill, live tree) | shipped |
-| P26 evergreen: pinned live tree, back navigation, resume re-sync, catalog try-anyway, month/year caps | **current** |
+| P26 evergreen: pinned live tree, back navigation, resume re-sync, catalog try-anyway, month/year caps | shipped |
+| P27 stable taps + resume-current + curated rootfs + AMOLED design system + tappable file mentions | **current** |
 | Next: on-device toolchain (clang) import path | planned |

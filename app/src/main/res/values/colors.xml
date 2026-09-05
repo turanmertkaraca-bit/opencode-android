@@ -1,28 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- P12 "graphite" palette: strict monochrome. Hierarchy comes from
-     brightness steps only — no hue anywhere except a single desaturated
-     clay red reserved for errors (so failures still read as failures).
-     Same color NAMES as P4-P11; every screen keeps working. -->
+<!-- P27 palette: AMOLED pure black + ONE calm blue accent family.
+     Hierarchy: true-black base, near-black blue-gray raised surfaces
+     distinguished by 1dp hairlines (no shadows), one accent for
+     live/interactive, danger/ok for states. Text: primary / secondary 70%
+     / tertiary 45%. Same color NAMES as every prior phase — every screen
+     keeps working. Theme.java mirrors these values programmatically. -->
 <resources>
-    <color name="bg">#0A0A0A</color>
-    <color name="surface">#141414</color>
-    <color name="surface2">#1D1D1D</color>
-    <color name="stroke">#2A2A2A</color>
-    <color name="accent">#F5F5F5</color>
-    <color name="accent_light">#D9D9D9</color>
-    <color name="on_accent">#0A0A0A</color>
-    <color name="text_primary">#F2F2F2</color>
-    <color name="text_secondary">#969696</color>
-    <color name="user_bubble">#262626</color>
-    <color name="user_text">#F2F2F2</color>
-    <color name="ok">#E3E3E3</color>
-    <color name="err">#C9A2A2</color>
-    <color name="warn">#BFBFBF</color>
+    <color name="bg">#000000</color>
+    <color name="surface">#0B0E16</color>
+    <color name="surface2">#121724</color>
+    <color name="stroke">#1B2233</color>
+    <color name="accent">#7C9CFF</color>
+    <color name="accent_light">#A5B8FF</color>
+    <color name="on_accent">#0A0D18</color>
+    <color name="text_primary">#F4F6FB</color>
+    <color name="text_secondary">#ABAFBC</color>
+    <color name="text_tertiary">#6E7280</color>
+    <color name="user_bubble">#141A2C</color>
+    <color name="user_text">#F4F6FB</color>
+    <color name="ok">#7FD1A7</color>
+    <color name="err">#E07A7A</color>
+    <color name="warn">#E5C07B</color>
     <color name="ic_bg">#0D1117</color>
     <!-- P8 extras (kept for compatibility) -->
-    <color name="bg_glow">#101010</color>
-    <color name="dot_ready">#E3E3E3</color>
-    <color name="dot_busy">#BFBFBF</color>
-    <color name="dot_down">#C9A2A2</color>
-    <color name="dot_idle">#969696</color>
+    <color name="bg_glow">#0D1017</color>
+    <color name="dot_ready">#7FD1A7</color>
+    <color name="dot_busy">#E5C07B</color>
+    <color name="dot_down">#E07A7A</color>
+    <color name="dot_idle">#6E7280</color>
 </resources>

@@ -85,6 +85,11 @@ public final class RunHub implements ServerService.EventListener {
         public String meta;                // "⇅ 12.3k tok · $0.0041"
         public double cost;                // session-total accumulation
         public long tok;
+        /** P27: provider-reported CACHED input tokens for this message
+         *  (prompt cache hits — billed at the discounted rate). Surfaced
+         *  in the Σ popover so "are the money-saving features on?" has a
+         *  visible answer: cached tokens ARE being counted as cached. */
+        public long cacheRead;
         public boolean errorShown;
     }
 
@@ -102,6 +107,14 @@ public final class RunHub implements ServerService.EventListener {
          *  thoughts) — the replay must never re-append ancient parts. */
         public final java.util.ArrayDeque<String> trimmedKeys = new java.util.ArrayDeque<>();
         public long lastAssistantTok;      // P25: context-depth meter input
+        /** P27: high-water of lastAssistantTok WITHIN the current run.
+         *  Providers report per-message usage unevenly mid-run (cache-read
+         *  accounting lands on some turns and not others), which made the
+         *  Σ pill swing (field: "said 47% once and turned back into 8%").
+         *  Context depth is physically monotone within one run — the pill
+         *  reads the peak while busy, the exact value at rest. Reset at
+         *  every run start; cleared on session resets. */
+        public long depthPeak;
         public int rowsAdded;              // monotonically bumps on add (view cue)
         // P26: RUNNING session sums. A year-long run must not re-iterate
         // an ever-growing msgs map on every pill paint — totals move by
@@ -176,7 +189,20 @@ public final class RunHub implements ServerService.EventListener {
     private static final List<Ui> uis = new ArrayList<>();
 
     public static void bindUi(Ui u) {
-        synchronized (uis) { if (!uis.contains(u)) uis.add(u); }
+        boolean added;
+        synchronized (uis) { added = !uis.contains(u) && uis.add(u); }
+        // P27 — the stale-on-return killer, finally dead at the ROOT: while
+        // no view was bound the hub kept mutating the model (SSE never
+        // stopped), and those mutations fired notifyRow into an EMPTY sink —
+        // the view's per-row cache went stale. A resume-time re-pull then
+        // re-delivered identical parts, every upsert saw "!changed" and
+        // correctly stayed silent — so NOTHING ever told the view to
+        // repaint. The screen sat behind until the activity was recreated
+        // (drawer path) — exactly the field repro ("home button → back →
+        // stale; drawer → chat → current"). The fix is one honest event:
+        // every fresh bind gets a full repaint of the model AS IT IS NOW.
+        // Event-driven, zero polling, no re-POST, no stream restart.
+        if (added) fire(u::hubReset);
     }
 
     public static void unbindUi(Ui u) {
@@ -377,13 +403,33 @@ public final class RunHub implements ServerService.EventListener {
         synchronized (LOCK) { return cur.tokSum; }
     }
 
+    /** P27: session-cumulative CACHED input tokens (prompt-cache hits the
+     *  provider billed at the discounted rate). Bounded iteration — the
+     *  bookkeeping map is capped at MSG_CAP entries; called only when the
+     *  user opens the Σ popover. */
+    public static long sessionCacheRead() {
+        synchronized (LOCK) {
+            long n = 0;
+            for (MsgInfo mi : cur.msgs.values()) n += mi.cacheRead;
+            return n;
+        }
+    }
+
     /** P25: the pill line — CURRENT context depth vs the model's window,
-     *  plus the (unchanged) session cost. "48k / 200k · 24% · $0.0041". */
+     *  plus the (unchanged) session cost. "48k / 200k · 24% · $0.0041".
+     *  P27: while a run is active the depth reads the run's HIGH-WATER —
+     *  per-message usage reports arrive unevenly mid-run (cache-read
+     *  accounting lands on some turns, not others), so the raw last-turn
+     *  number can jump down and up again; the window only ever fills, so
+     *  the meter shows the peak until the run settles. */
     public static String ctxPillLine() {
         long last;
-        synchronized (LOCK) { last = cur.lastAssistantTok; }
-        String meter = Resilience.contextMeter(last, Models.contextLimitFor(
-                Models.lastFetch(), selProvider(), selModel()));
+        synchronized (LOCK) {
+            last = (busy && cur.depthPeak > cur.lastAssistantTok)
+                    ? cur.depthPeak : cur.lastAssistantTok;
+        }
+        String meter = Resilience.contextMeter(last, Models.resolveLimit(
+                appCtx, Models.lastFetch(), selProvider(), selModel()));
         double cost = sessionCost();
         if (meter.isEmpty() && cost <= 0) return "";
         StringBuilder b = new StringBuilder(meter);
@@ -985,12 +1031,17 @@ public final class RunHub implements ServerService.EventListener {
         }
         Map<String, Object> tk = Json.map(info, "tokens");
         long total = 0;
+        long cacheRead = 0;
         if (tk != null) {
             total += num(tk.get("input")) + num(tk.get("output"))
                     + num(tk.get("reasoning"));
             Map<String, Object> cache = Json.map(tk, "cache");
-            if (cache != null) total += num(cache.get("read")) + num(cache.get("write"));
+            if (cache != null) {
+                cacheRead = (long) num(cache.get("read"));
+                total += cacheRead + num(cache.get("write"));
+            }
         }
+        final long fCacheRead = cacheRead;
         Object costO = info.get("cost");
         double cost = (costO instanceof Number) ? ((Number) costO).doubleValue() : 0;
         String meta = null;
@@ -1008,7 +1059,10 @@ public final class RunHub implements ServerService.EventListener {
         final long fTok = total;
         final boolean hasSpend = total > 0 || cost > 0;
         if (hasSpend && "assistant".equals(role)) {
-            synchronized (LOCK) { t.lastAssistantTok = fTok; }   // P25 depth input
+            synchronized (LOCK) {
+                t.lastAssistantTok = fTok;   // P25 depth input
+                if (fTok > t.depthPeak) t.depthPeak = fTok;   // P27 high-water
+            }
         }
         Map<String, Object> e = Json.map(info, "error");
         final String fErrName = e != null ? nz(Json.str(e, "name"), "error") : null;
@@ -1036,6 +1090,7 @@ public final class RunHub implements ServerService.EventListener {
                     t.tokSum += fTok - mi.tok;
                     mi.cost = fCost;
                     mi.tok = fTok;
+                    mi.cacheRead = fCacheRead;   // P27: Σ popover cache line
                     // refresh recency: the freshest messages survive the cap
                     t.msgs.remove(fMid);
                     t.msgs.put(fMid, mi);
@@ -1442,6 +1497,7 @@ public final class RunHub implements ServerService.EventListener {
             // runSessionId is set by the SENDERS (send/sendImage) — never
             // here: the P19 re-arm flips busy for a run whose session may
             // not be the one on screen.
+            synchronized (LOCK) { cur.depthPeak = cur.lastAssistantTok; }  // P27: peak is per-run
             if (!was) {
                 startEditWatch();
             }
@@ -1908,7 +1964,10 @@ public final class RunHub implements ServerService.EventListener {
         notifyLive();
     }
 
-    /** View tapped a file row (abs, or null to deselect). */
+    /** View tapped a file row (abs, or null to deselect). P27: selecting a
+     *  file is a user interaction — it PINS the card open (the peek must
+     *  not be yanked away by the idle auto-collapse) and keeps tracking
+     *  the file for the whole run. */
     public static void setLiveSel(String abs) {
         liveSelPath = abs;
         if (abs != null) {
@@ -1921,6 +1980,36 @@ public final class RunHub implements ServerService.EventListener {
     }
 
     public static String liveSel() { return liveSelPath; }
+
+    // ---- P27: the PIN model ------------------------------------------------
+    // liveOpen tri-state, now with explicit meaning:
+    //   null   — AUTO (the user never touched the card): expanded while the
+    //            feed is hot (edits < ACTIVE_MS old), auto-collapsed when
+    //            idle. The view applies the collapse structurally ONLY when
+    //            no touch is in progress, so the timer can never eat a tap.
+    //   TRUE   — PINNED open by the user (tap the head): never auto-collapses.
+    //   FALSE  — user explicitly collapsed (rare; head tap while pinned-to-
+    //            open is unpin → auto, but a selection keeps this honest).
+    // Every repaint and re-bind reads the SAME hub state, so liveOpen and
+    // liveSelPath survive every paint — and settleBusyUi (run over) clears
+    // both, which is what makes the whole card disappear when the run ends.
+
+    /** Head tap: unpinned → PIN open; pinned → back to auto. */
+    public static void toggleLivePin() {
+        liveOpen = (liveOpen == Boolean.TRUE) ? null : Boolean.TRUE;
+        notifyLive();
+    }
+
+    /** True when the user pinned the card open (dot burns accent). */
+    public static boolean livePinned() { return liveOpen == Boolean.TRUE; }
+
+    /** The effective expanded state: user choice wins; auto follows heat. */
+    public static boolean liveExpanded() {
+        if (liveOpen != null) return liveOpen;
+        synchronized (editFeed) {
+            return EditPulse.hot(editFeed, System.currentTimeMillis());
+        }
+    }
 
     // P26: the K_LIVE row is GONE from the transcript model. It used to
     // be inserted at run start — and every tool/text row that streamed in

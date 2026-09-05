@@ -89,6 +89,37 @@ public class DiagnosticsActivity extends Activity {
         root.addView(section("last Java crash — the actual trace"));
         root.addView(crashSection());
 
+        // P27 phase 2: sandbox weight + boot budget — the trim report, the
+        // boot hygiene line, and the measured cold-boot numbers, so the
+        // "size + speed" work is ON THE RECORD, not a claim.
+        root.addView(section("sandbox weight (P27 curated rootfs)"));
+        TextView tvSize = monoText();
+        StringBuilder sz = new StringBuilder();
+        try {
+            Debian.ensureDirs(this);
+            long deb = Debian.sizeOf(this);
+            String trim = readSmall(new java.io.File(Debian.dir(this), "trim-report.txt"));
+            String hyg = readSmall(new java.io.File(Debian.dir(this), "hygiene.txt"));
+            sz.append("debian layer: ").append(Binaries.human(deb)).append('\n');
+            if (trim != null) sz.append("trim: ").append(trim.replace('\n', ' ')).append('\n');
+            if (hyg != null) sz.append("boot hygiene: ").append(hyg.replace('\n', ' ')).append('\n');
+            if (trim == null && hyg == null)
+                sz.append("no trim/hygiene report yet (install Debian or reboot the sandbox)\n");
+        } catch (Exception e) {
+            sz.append("(unavailable: ").append(e.getMessage()).append(")\n");
+        }
+        // P27: the app+server memory budget — what the sandbox costs right
+        // now (app = our own VmRSS; server = the opencode child's, found by
+        // exact binary-path match like the orphan sweep, read-only).
+        sz.append(rssBudget());
+        tvSize.setText(sz.toString());
+        root.addView(tvSize);
+        root.addView(note("The curated rootfs drops docs/man pages/legacy "
+                + "timezones/locale archives/perl at install and sweeps the "
+                + "npm + apt caches at every boot. The opencode server binary "
+                + "is upstream (bun-embedded runtime — its size is structural); "
+                + "it ships once, compressed, never duplicated."));
+
         root.addView(section("contained errors — caught so the app didn't crash"));
         TextView tvTrail = monoText();
         String trail = Trail.read(this);
@@ -400,6 +431,73 @@ public class DiagnosticsActivity extends Activity {
         } catch (Throwable t) {
             return "(unreadable: " + t + ")";
         }
+    }
+
+    /** P27: one-liner read for optional report files — null when absent
+     *  (unlike readBounded, absence is a normal state here, not an error). */
+    private static String readSmall(File f) {
+        try {
+            if (!f.isFile()) return null;
+            String s = Api.readAll(new java.io.FileInputStream(f)).trim();
+            return s.isEmpty() ? null : s;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** P27: VmRSS (kB) out of a /proc/<pid>/status payload. Pure. */
+    static long parseVmRssKb(String status) {
+        if (status == null) return -1;
+        for (String line : status.split("\n")) {
+            if (line.startsWith("VmRSS:")) {
+                String digits = line.replaceAll("[^0-9]", "");
+                if (!digits.isEmpty()) {
+                    try { return Long.parseLong(digits); } catch (Exception ignored) {}
+                }
+            }
+        }
+        return -1;
+    }
+
+    /** P27: the app+server RSS budget line for Diagnostics. The server
+     *  child is located by exact binary-path match (the orphan-sweep
+     *  rule, read-only) so no other app's process is ever touched. */
+    private String rssBudget() {
+        StringBuilder b = new StringBuilder();
+        try {
+            long appRss = parseVmRssKb(Api.readAll(
+                    new java.io.FileInputStream("/proc/self/status")));
+            b.append("app RSS: ").append(appRss > 0 ? Binaries.human(appRss * 1024) : "?");
+            long serverRss = -1;
+            File bin = Binaries.binaryFile(this);
+            File[] dirs = new File("/proc").listFiles();
+            if (dirs != null && bin.exists()) {
+                for (File d : dirs) {
+                    try { Integer.parseInt(d.getName()); } catch (Exception e) { continue; }
+                    String cl;
+                    try {
+                        cl = Api.readAll(new java.io.FileInputStream(new File(d, "cmdline")));
+                    } catch (Exception e) { continue; }
+                    if (!Resilience.isOcCmdline(cl, bin.getAbsolutePath())) continue;
+                    long r = parseVmRssKb(Api.readAll(
+                            new java.io.FileInputStream(new File(d, "status"))));
+                    if (r > serverRss) serverRss = r;
+                }
+            }
+            b.append(" · server RSS: ")
+             .append(serverRss > 0 ? Binaries.human(serverRss * 1024)
+                    : "not running");
+            long mem = -1;
+            try {
+                mem = Resilience.parseMemAvailableKb(Api.readAll(
+                        new java.io.FileInputStream("/proc/meminfo")));
+            } catch (Exception ignored) {}
+            if (mem > 0) b.append(" · device free: ").append(Binaries.human(mem * 1024));
+            b.append('\n');
+        } catch (Exception e) {
+            b.append("memory budget unavailable: ").append(e.getMessage()).append('\n');
+        }
+        return b.toString();
     }
 
     /** P21: the system's own record of why OUR process exited, newest

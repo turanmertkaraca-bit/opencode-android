@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- P8: dark-only, now with motion. windowAnimationStyle gives every
-         activity a fast slide/fade (150-220 ms) without touching any code. -->
+    <!-- P8: dark-only, now AMOLED. windowAnimationStyle gives every
+         activity a fast slide/fade (150-220 ms) without touching code. -->
     <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/bg</item>
         <item name="android:colorPrimary">@color/accent</item>
@@ -13,6 +13,24 @@
         <item name="android:textColorPrimary">@color/text_primary</item>
         <item name="android:textColorSecondary">@color/text_secondary</item>
         <item name="android:windowAnimationStyle">@style/OcWindowAnim</item>
+        <!-- P27: ONE presentation for every sheet/popover (palette, model,
+             sessions, commands, confirms) — same surface, same motion. -->
+        <item name="android:alertDialogTheme">@style/OcSheet</item>
+    </style>
+
+    <!-- P27 sheet: near-black surface + hairline border, rounded top,
+         slide-up in / slide-down out (symmetric, 200 ms — inside the
+         170-220 ms window). Every AlertDialog in the app inherits this
+         by theme, so the graphite-gray system boxes from the field
+         screenshots are gone everywhere at once. -->
+    <style name="OcSheet" parent="android:Theme.Material.Dialog.Alert">
+        <item name="android:windowBackground">@drawable/bg_sheet</item>
+        <item name="android:colorAccent">@color/accent</item>
+        <item name="android:colorPrimary">@color/accent</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:windowEnterAnimation">@anim/sheet_in</item>
+        <item name="android:windowExitAnimation">@anim/sheet_out</item>
     </style>
 
     <!-- fast + snappy: nothing lingers longer than ~220 ms -->

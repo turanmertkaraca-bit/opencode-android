@@ -3,6 +3,7 @@ package ai.opencode.app;
 import android.animation.ObjectAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -72,6 +73,10 @@ public class FilesActivity extends Activity {
     private final Map<String, Long> heat = new HashMap<>();
     private static final long HEAT_MS = 10_000;
 
+    /** P27 phase 4: a file to open straight away (deep-link from a chat
+     *  mention / live-tree chip). Consumed on the first resume. */
+    private String pendingOpen;
+
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
@@ -80,6 +85,8 @@ public class FilesActivity extends Activity {
             proj = new File("/sdcard/opencode-projects");
         baseDir = proj;
         cwd = proj;
+        Intent in = getIntent();
+        if (in != null) pendingOpen = in.getStringExtra("open");
 
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundResource(R.drawable.bg_home);
@@ -105,6 +112,37 @@ public class FilesActivity extends Activity {
         super.onResume();
         render();
         if (liveOn) startWatching();
+        consumePendingOpen();
+    }
+
+    /** P27: open the deep-linked file — land on its folder, then raise the
+     *  file's preview sheet (the SAME viewer every file row uses). Gone or
+     *  outside the project → one quiet toast, no dead end. */
+    private void consumePendingOpen() {
+        if (pendingOpen == null) return;
+        String p = pendingOpen;
+        pendingOpen = null;
+        try {
+            File f = new File(p);
+            String base = baseDir.getCanonicalPath();
+            String fp = f.getCanonicalPath();
+            if (!f.isFile()) {
+                Toast.makeText(this, "file no longer exists", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (!fp.equals(base) && !fp.startsWith(base + "/")) {
+                Toast.makeText(this, "file is outside this project", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            File dir = f.getParentFile();
+            if (dir != null && !dir.getAbsolutePath().equals(cwd.getAbsolutePath())) {
+                cwd = dir;
+                render();
+            }
+            preview(f);
+        } catch (Exception e) {
+            Toast.makeText(this, "could not open that file", Toast.LENGTH_SHORT).show();
+        }
     }
 
     @Override
@@ -426,17 +464,20 @@ public class FilesActivity extends Activity {
         box.setLayoutParams(lp);
         Theme.press(box);
 
-        // icon disc
+        // icon disc — P27: ONE visual weight. The old pair (folders solid
+        // WHITE, files dark outline) fought each other on every listing
+        // (field shot). Now both are quiet: accent-subtle fill for folders,
+        // hairline outline for files, glyphs from the same palette.
         TextView disc = new TextView(this);
         boolean dir = f.isDirectory();
         disc.setText(dir ? "▸" : extGlyph(f.getName()));
         disc.setTextSize(13);
         disc.setTypeface(Typeface.MONOSPACE);
         disc.setGravity(Gravity.CENTER);
-        disc.setTextColor(dir ? Color.rgb(10, 10, 10) : Theme.ACCENT_LT);
+        disc.setTextColor(dir ? Theme.ACCENT : Theme.TXT_DIM);
         GradientDrawable gd = new GradientDrawable();
         gd.setShape(GradientDrawable.OVAL);
-        if (dir) { gd.setColor(Theme.ACCENT); }
+        if (dir) { gd.setColor(Theme.ACCENT_BG); gd.setStroke(1, Theme.STROKE); }
         else { gd.setColor(0x00000000); gd.setStroke(Theme.dp(this, 1), Theme.STROKE); }
         disc.setBackground(gd);
         box.addView(disc, new LinearLayout.LayoutParams(Theme.dp(this, 34), Theme.dp(this, 34)));

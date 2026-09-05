@@ -96,12 +96,20 @@
         android:layout_height="1dp"
         android:background="@color/stroke"/>
 
-    <!-- transcript -->
+    <!-- transcript. P27: wrapped in a FrameLayout so the "↓ latest"
+         scroll pill lives INSIDE the transcript's bounds — the old decor-
+         anchored pill (fixed 96dp bottom margin) floated ON TOP of the
+         composer text whenever the input grew past one line (field shot:
+         the pill covering the user's own typed words). -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
     <ScrollView
         android:id="@+id/scroll"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
+        android:layout_height="match_parent"
         android:fillViewport="true"
         android:scrollbars="vertical"
         android:overScrollMode="never">
@@ -163,9 +171,31 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:padding="14dp"/>
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:paddingTop="14dp"
+                android:paddingBottom="14dp"/>
         </LinearLayout>
     </ScrollView>
+
+    <!-- ↓ latest — anchored to the transcript bottom, INSIDE the frame:
+         it can never overlap the composer, permission card or live footer. -->
+    <TextView
+        android:id="@+id/scrollPill"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="10dp"
+        android:background="@drawable/bg_chip"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="7dp"
+        android:paddingBottom="7dp"
+        android:text="↓  latest"
+        android:textColor="@color/accent_light"
+        android:textSize="12sp"
+        android:visibility="gone"/>
+    </FrameLayout>
 
     <!-- P26: the live edit tree — PINNED above the composer while a run
          is active (always visible, never buried by the streaming rows,

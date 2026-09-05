@@ -200,13 +200,35 @@ public final class Models {
                 if (mm == null) continue;
                 if (Json.str(mm, "id") == null) mm.put("id", e.getKey());
                 String mid = Json.str(mm, "id");
-                if (mid == null || have.contains(mid)) continue;
+                if (mid == null) continue;
+                if (have.contains(mid)) {
+                    // P27 flicker fix: the SAME model arrives from two
+                    // sources with DIFFERENT context windows (the server's
+                    // provider entry vs the models.dev catalog — field saw
+                    // the Σ pill say 47% (200k window) then drop to 8% (1M)
+                    // as fetches disagreed). The merge is now DETERMINISTIC:
+                    // the curated catalog's limit wins whenever it has one.
+                    if (!fromServer) upgradeCtx(prov, mid, mm);
+                    continue;
+                }
                 addModel(prov, mm, fromServer);
                 have.add(mid);
             }
         } else {
             List<Object> ml = Json.arr(models);
             if (ml != null) for (Object mo : ml) addModel(prov, Json.obj(mo), fromServer);
+        }
+    }
+
+    /** P27: let the models.dev catalog correct an already-merged model's
+     *  context window. Pure rule, JVM-pinned: catalog limit (>0) always
+     *  wins; otherwise the first-seen value stands. */
+    static void upgradeCtx(Prov prov, String mid, Map<String, Object> mm) {
+        if (prov == null || mid == null || mm == null) return;
+        long cat = parseCtx(mm);
+        if (cat <= 0) return;
+        for (Mdl m : prov.models) {
+            if (mid.equals(m.id)) { m.ctx = cat; return; }
         }
     }
 
@@ -265,6 +287,76 @@ public final class Models {
             }
         }
         return 0;
+    }
+
+    // ------------------------------------------------- P27: sticky window
+
+    private static final String KEY_CTXWIN = "ctxwin";
+    /** At most this many (provider/model → window) entries live in prefs. */
+    static final int CTXWIN_CAP = 64;
+
+    /** The context window for the Σ pill, DETERMINISTIC for a session:
+     *  the live fetch decides; when this fetch knows nothing (server blip,
+     *  catalog offline) the last KNOWN window for this exact model stands
+     *  in — the denominator can flicker between sources, never within a
+     *  session once a value is on record. Known values are stashed for the
+     *  next cold start. Never network. */
+    public static long resolveLimit(Context c, List<Prov> provs,
+                                    String provider, String id) {
+        long v = contextLimitFor(provs, provider, id);
+        if (v > 0) {
+            stashLimit(c, provider, id, v);
+            return v;
+        }
+        return stickyLimit(c, provider, id);
+    }
+
+    private static java.util.Map<String, String> ctxWinMap(Context c) {
+        java.util.Map<String, String> out = new java.util.LinkedHashMap<>();
+        try {
+            java.util.Map<String, ?> all = c.getSharedPreferences(PREFS,
+                    Context.MODE_PRIVATE).getAll();
+            for (java.util.Map.Entry<String, ?> e : all.entrySet()) {
+                if (e.getKey() != null && e.getKey().startsWith(KEY_CTXWIN + ":")
+                        && e.getValue() instanceof String) {
+                    out.put(e.getKey(), (String) e.getValue());
+                }
+            }
+        } catch (Exception ignored) {}
+        return out;
+    }
+
+    static void stashLimit(Context c, String provider, String id, long ctx) {
+        if (c == null || provider == null || id == null || ctx <= 0) return;
+        try {
+            android.content.SharedPreferences ed0 = c.getSharedPreferences(PREFS,
+                    Context.MODE_PRIVATE);
+            String key = KEY_CTXWIN + ":" + provider + "/" + id;
+            String cur = ed0.getString(key, null);
+            if (cur != null && cur.equals(String.valueOf(ctx))) return;
+            android.content.SharedPreferences.Editor ed = ed0.edit().putString(
+                    key, String.valueOf(ctx));
+            // bounded: eldest entries (insertion order of the map) evicted
+            java.util.Map<String, String> all = ctxWinMap(c);
+            all.remove(key);
+            while (all.size() >= CTXWIN_CAP) {
+                String eldest = all.keySet().iterator().next();
+                ed.remove(eldest);
+                all.remove(eldest);
+            }
+            ed.apply();
+        } catch (Exception ignored) {}
+    }
+
+    static long stickyLimit(Context c, String provider, String id) {
+        if (c == null || provider == null || id == null) return 0;
+        try {
+            String v = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString(KEY_CTXWIN + ":" + provider + "/" + id, null);
+            return v == null ? 0 : Long.parseLong(v);
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     // ------------------------------------------------------- catalog net
