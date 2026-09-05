@@ -755,12 +755,16 @@ public class ChatActivity extends Activity
         }
     }
 
-    /** Three-dot typing indicator between transcript and composer. */
+    /** Three-dot typing indicator — P28: fills the DECLARED typingSlot
+     *  from the layout (directly above the composer). The old runtime
+     *  parenting (scroll.getParent() + indexOfChild(permSlot)) broke when
+     *  P27 wrapped the transcript in a FrameLayout: indexOfChild returned
+     *  -1, Math.max clamped it to 0, and the dots became an overlay inside
+     *  the transcript — the field's "thinking animation is in the middle".
+     *  A declared slot cannot drift; syncTyping only toggles visibility. */
     private void buildTyping() {
-        typing = new LinearLayout(this);
-        typing.setOrientation(LinearLayout.HORIZONTAL);
-        typing.setGravity(Gravity.CENTER_VERTICAL);
-        typing.setPadding(Theme.dp(this, 18), Theme.dp(this, 4), 0, Theme.dp(this, 2));
+        typing = findViewById(R.id.typingSlot);
+        typing.setPadding(dp(18), dp(2), dp(16), dp(2));
         for (int i = 0; i < 3; i++) {
             TextView d = new TextView(this);
             d.setText("●");
@@ -768,7 +772,7 @@ public class ChatActivity extends Activity
             d.setTextColor(Theme.ACCENT_LT);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.rightMargin = Theme.dp(this, 4);
+            lp.rightMargin = dp(4);
             d.setLayoutParams(lp);
             typing.addView(d);
         }
@@ -777,10 +781,6 @@ public class ChatActivity extends Activity
         t.setTextSize(12);
         t.setTextColor(Theme.TXT_DIM);
         typing.addView(t);
-        typing.setVisibility(View.GONE);
-
-        ViewGroup parent = (ViewGroup) scroll.getParent();
-        parent.addView(typing, Math.max(0, parent.indexOfChild(permSlot)));
     }
 
     private void syncTyping() {
@@ -1180,10 +1180,41 @@ public class ChatActivity extends Activity
         }
         String cached = RunHub.peekFor(sel);
         if (cached != null) {
-            pv.setText(cached);
+            // P28: the "▸ " focus line gets the accent highlight — at a
+            // glance the peek shows WHICH line the agent is editing right
+            // now. The change guard compares CONTENT (String.contentEquals):
+            // SpannableString.equals is identity-based, so a naive equals()
+            // would re-setText (and re-layout) on every hot-feed poll for
+            // identical text — exactly the churn this guard exists to stop.
+            CharSequence cur = pv.getText();
+            if (!cached.contentEquals(cur)) pv.setText(stylePeek(cached));
         } else {
             pv.setText("…");
             RunHub.ensurePeek(sel);
+        }
+    }
+
+    /** P28: paint the peek's focus line — accent-subtle background wash +
+     *  accent-light text over the "▸ " range (EditPulse.focusRange, pure).
+     *  Never throws: a broken window renders plain. Package-visible: the
+     *  P28UiTest pins the span shape (the paintRowOnce seam pattern). */
+    CharSequence stylePeek(String peek) {
+        try {
+            int[] fr = EditPulse.focusRange(peek);
+            if (fr == null) return peek;
+            android.text.SpannableString sp = new android.text.SpannableString(peek);
+            sp.setSpan(new android.text.style.BackgroundColorSpan(
+                    Theme.ACCENT_BG), fr[0], fr[1],
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            sp.setSpan(new android.text.style.ForegroundColorSpan(
+                    Theme.ACCENT_LT), fr[0], fr[1],
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            sp.setSpan(new android.text.style.StyleSpan(
+                    android.graphics.Typeface.BOLD), fr[0], fr[1],
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            return sp;
+        } catch (Exception e) {
+            return peek;
         }
     }
 
@@ -1873,6 +1904,11 @@ public class ChatActivity extends Activity
                     }
                     catch (Exception e) { md = r.text.toString(); }
                     body.setText(md.length() == 0 ? "…" : md);
+                    // P28: the field fix — P27 rendered the accent+underline
+                    // mention links but nothing ever fired their taps (the
+                    // rows have no movement method). Hit-test routing keeps
+                    // selection + long-press copy + scroll drags native.
+                    if (Markdown.hasLinks(md)) Markdown.enableSpanTaps(body);
                     body.setOnLongClickListener(v -> {
                         copyText(r.text.toString(), "response");
                         return true;

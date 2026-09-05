@@ -235,6 +235,25 @@
         android:ellipsize="end"
         android:visibility="gone"/>
 
+    <!-- P28: the three-dot typing indicator — a DECLARED slot in the root
+         column, directly above the composer. History: it used to be
+         parented at runtime via scroll.getParent() + indexOfChild(permSlot);
+         the P27 transcript FrameLayout changed scroll's parent, the lookup
+         returned -1 and the dots ended up as an overlay INSIDE the
+         transcript (field: "thinking animation is in the middle"). A
+         declared slot can never drift again. -->
+    <LinearLayout
+        android:id="@+id/typingSlot"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="18dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="2dp"
+        android:paddingBottom="2dp"
+        android:visibility="gone"/>
+
     <!-- composer (P16: id added so DeX wide layout can cap it) -->
     <LinearLayout
         android:id="@+id/composerBar"

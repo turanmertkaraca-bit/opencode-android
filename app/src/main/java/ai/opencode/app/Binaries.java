@@ -148,6 +148,36 @@ public final class Binaries {
         }
     }
 
+    /**
+     * P28: sha256 with a (len, mtime) memo in prefs. The cold-boot path
+     * printed the binary's sha on EVERY launch — a full read+hash of a
+     * ~175 MB file sitting between the user and the server spawn. The hash
+     * only changes when the binary itself changes (app update / re-import),
+     * so: same len+mtime → the memo answers from prefs (one stat, no read);
+     * anything else → recompute once and restamp. Diagnostics keeps showing
+     * the REAL current value — the memo is invalidated by any file change,
+     * so it is the real value by construction.
+     */
+    public static String sha256Cached(Context c, File f) {
+        try {
+            long len = f.length(), mt = f.lastModified();
+            android.content.SharedPreferences p =
+                    c.getSharedPreferences("oc", Context.MODE_PRIVATE);
+            if (p.getLong("sha_len", -1) == len
+                    && p.getLong("sha_mt", -1) == mt) {
+                String v = p.getString("sha_val", null);
+                if (v != null) return v;
+            }
+            String v = sha256(f);
+            p.edit().putLong("sha_len", len)
+                    .putLong("sha_mt", mt)
+                    .putString("sha_val", v).apply();
+            return v;
+        } catch (Exception e) {
+            return sha256(f);              // memo trouble → the honest path
+        }
+    }
+
     public static String human(long bytes) {
         if (bytes >= 1024L * 1024 * 1024) return String.format("%.1f GB", bytes / 1073741824.0);
         if (bytes >= 1024L * 1024) return String.format("%.0f MB", bytes / 1048576.0);

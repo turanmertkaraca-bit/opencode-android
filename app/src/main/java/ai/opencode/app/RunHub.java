@@ -1914,7 +1914,7 @@ public final class RunHub implements ServerService.EventListener {
         editRoot = dir.getAbsolutePath();
         synchronized (editFeed) { editFeed.clear(); }
         synchronized (editFocus) { editFocus.clear(); }
-        synchronized (peekCache) { peekCache.clear(); }
+        synchronized (peekCache) { peekCache.clear(); peekStamp.clear(); }
         liveWaitingPeek = false;
         if (editWatcher == null) {
             editWatcher = new DirWatcher(Looper.getMainLooper(), RunHub::onFsChange);
@@ -1955,7 +1955,10 @@ public final class RunHub implements ServerService.EventListener {
     private static void reloadSelectedPeek() {
         String p = liveSelPath;
         if (p == null || !busy) return;
-        synchronized (peekCache) { peekCache.remove(p); }
+        // P28: NO pre-clear here — loadPeek's (len, mtime) memo decides.
+        // Pre-clearing would defeat the memo (it skips the read only when
+        // the cache is warm), and this is THE hot path during an append
+        // storm: every debounced fs batch lands here.
         liveWaitingPeek = false;
         loadPeek(p);
     }
@@ -1972,7 +1975,7 @@ public final class RunHub implements ServerService.EventListener {
         liveSelPath = abs;
         if (abs != null) {
             liveOpen = Boolean.TRUE;
-            synchronized (peekCache) { peekCache.remove(abs); }
+            synchronized (peekCache) { peekCache.remove(abs); peekStamp.remove(abs); }
             liveWaitingPeek = false;
             loadPeek(abs);
         }
@@ -2019,9 +2022,36 @@ public final class RunHub implements ServerService.EventListener {
     // below) in a footer pinned above the composer: always visible while
     // the agent works, gone the moment it settles.
 
-    /** Load the peek window off-thread — a bounded, line-numbered slice. */
+    // P28: per-path (len, mtime) of the LAST peek content in peekCache —
+    // the memo that keeps an append storm from re-reading + re-splitting a
+    // big file on every debounced fs batch when nothing actually changed.
+    private static final Map<String, long[]> peekStamp = new HashMap<>();
+
+    /** Load the peek window off-thread. P28 three tiers, cheapest first:
+     *  (1) memo — (len, mtime) unchanged and cache warm → no read at all;
+     *  (2) tail — no edit-tool locator and file > 64 KB → read the last
+     *      TAIL_BYTES only (a streamed append can only be at the tail) and
+     *      count the skipped newlines for honest line numbers;
+     *  (3) full — locator needs a whole-file needle search; the read is
+     *      hard-capped at 2 MB so a file that grew mid-read can never blow
+     *      memory. */
     private static void loadPeek(final String abs) {
         if (abs == null) return;
+        final File f = new File(abs);
+        final long flen;
+        final long fmt;
+        try { flen = f.length(); fmt = f.lastModified(); } catch (Exception e) {
+            main(() -> { synchronized (peekCache) { peekCache.put(abs, "  (can't stat file)"); } notifyLive(); });
+            return;
+        }
+        synchronized (peekCache) {
+            long[] st = peekStamp.get(abs);
+            if (st != null && st[0] == flen && st[1] == fmt
+                    && peekCache.containsKey(abs)) {
+                notifyLive();                       // memo hit — text still good
+                return;
+            }
+        }
         final String focus;
         synchronized (editFocus) { focus = editFocus.get(abs); }
         String action;
@@ -2036,14 +2066,35 @@ public final class RunHub implements ServerService.EventListener {
                 text = "  (deleted)";
             } else {
                 try {
-                    File f = new File(abs);
-                    if (f.length() > 2_000_000) {
+                    if (flen > 2_000_000) {
                         text = "  (file too large to peek — open it in Files)";
-                    } else {
-                        try (FileInputStream fin = new FileInputStream(f)) {
-                            String content = Api.readAll(fin);
-                            text = EditPulse.peek(content, focus, EditPulse.PEEK_LINES);
+                    } else if (focus == null && flen > EditPulse.TAIL_BYTES) {
+                        // ---- P28 tier 2: the tail slice ----
+                        byte[] tail = new byte[EditPulse.TAIL_BYTES];
+                        boolean headCut;
+                        try (java.io.RandomAccessFile raf =
+                                     new java.io.RandomAccessFile(f, "r")) {
+                            raf.seek(flen - tail.length);
+                            raf.readFully(tail);
                         }
+                        headCut = tail[0] != '\n';
+                        long nlBefore = 0;
+                        try (FileInputStream in = new FileInputStream(f)) {
+                            byte[] buf = new byte[64 * 1024];
+                            long remaining = flen - tail.length;
+                            int r;
+                            while (remaining > 0 && (r = in.read(buf, 0,
+                                    (int) Math.min(buf.length, remaining))) > 0) {
+                                nlBefore += EditPulse.countNewlines(buf, r);
+                                remaining -= r;
+                            }
+                        }
+                        text = EditPulse.peekTailWindow(tail, nlBefore,
+                                EditPulse.PEEK_LINES, headCut);
+                    } else {
+                        // ---- tier 3: bounded full read ----
+                        String content = readBounded(f, flen, 2_000_000);
+                        text = EditPulse.peek(content, focus, EditPulse.PEEK_LINES);
                     }
                 } catch (Exception e2) {
                     text = "  (can't peek: " + e2.getMessage() + ")";
@@ -2051,11 +2102,33 @@ public final class RunHub implements ServerService.EventListener {
             }
             final String t = text;
             main(() -> {
-                synchronized (peekCache) { peekCache.put(abs, t); }
+                synchronized (peekCache) {
+                    peekCache.put(abs, t);
+                    peekStamp.put(abs, new long[]{flen, fmt});
+                }
                 liveWaitingPeek = false;
                 notifyLive();
             });
         });
+    }
+
+    /** Read at most {@code cap} bytes of {@code f} as UTF-8 — never more,
+     *  even if the file grew between length() and the read. */
+    private static String readBounded(File f, long knownLen, int cap)
+            throws Exception {
+        try (FileInputStream fin = new FileInputStream(f)) {
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream(
+                    (int) Math.min(knownLen > 0 ? knownLen : cap, cap));
+            byte[] buf = new byte[64 * 1024];
+            long budget = cap;
+            int r;
+            while (budget > 0 && (r = fin.read(buf, 0,
+                    (int) Math.min(buf.length, budget))) > 0) {
+                out.write(buf, 0, r);
+                budget -= r;
+            }
+            return out.toString("UTF-8");
+        }
     }
 
     // ---- view-facing snapshots (all main-thread reads, lock-scoped) ----

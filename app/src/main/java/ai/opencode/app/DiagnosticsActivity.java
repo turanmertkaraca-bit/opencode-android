@@ -173,7 +173,7 @@ public class DiagnosticsActivity extends Activity {
         File bin = Binaries.binaryFile(this);
         tvBin.setText(bin.exists()
                 ? bin.getAbsolutePath() + "\n" + Binaries.human(bin.length())
-                + " · sha " + Binaries.sha256(bin)
+                + " · sha " + Binaries.sha256Cached(this, bin)
                 : "not extracted yet");
         root.addView(tvBin);
         LinearLayout b2 = new LinearLayout(this);
@@ -297,7 +297,7 @@ public class DiagnosticsActivity extends Activity {
                                 File bin = Binaries.binaryFile(this);
                                 tvBin.setText(bin.getAbsolutePath() + "\n"
                                         + Binaries.human(bin.length())
-                                        + " · sha " + Binaries.sha256(bin));
+                                        + " · sha " + Binaries.sha256Cached(this, bin));
                             });
                         } catch (Exception e) {
                             ui.post(() -> Toast.makeText(this,
