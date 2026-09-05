@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.27.0 — P27)
+## Install (v0.28.0 — P28)
 
-1. Grab `opencode-p27-v0.27.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p28-v0.28.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -21,6 +21,50 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 5. If anything ever dies: **Diagnostics → "last exits"** names the killer
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
+
+## What's in v0.28.0 (P28 — the P27 field report, fixed)
+
+P27 shipped the live card, the resume-current catch-up, AMOLED and the
+tappable mentions. The field report on P28's plate: "clicking on these
+blue file links does nothing" (the existence detection was perfect — the
+TAP was dead), "the thinking animation is in the middle now instead of
+right above the chat box", and a fair question: "sure it won't glitch
+when the file is too big?" All three are fixed, plus two lightness wins:
+
+- **the file links actually open now** — a ClickableSpan only ever fires
+  through a movement method, and the transcript rows (selectable text,
+  so copy-a-response keeps working) have none attached: P27 rendered the
+  accent + underline beautifully and the tap fell through to the row and
+  died. Taps are now routed by hit-testing the span array at the touch
+  point — a genuine tap opens the Files viewer, a scroll drag across a
+  link never does, selection and long-press copy keep their native
+  handling, and glyph-boundary rounding (±1 offset + equal-x runs) can't
+  strand a tap one character away from its link.
+- **the thinking dots live above the composer again** — they were
+  parented at runtime via `scroll.getParent()` + `indexOfChild(permSlot)`;
+  the P27 transcript FrameLayout changed scroll's parent, the lookup
+  returned −1 and the dots became a floating overlay INSIDE the
+  transcript. The slot is now declared in the layout itself — it cannot
+  drift again (and a test pins where it lives).
+- **the peek is big-file-proof** — the cap was already 11 lines; what
+  could stutter was the WORK behind it: every debounced fs batch re-read
+  and re-split up to 2 MB of a streaming file. Now: a (len, mtime) memo
+  skips unchanged files entirely, a streamed append (no edit-tool
+  locator) reads only the last 8 KB with honest line numbers, full reads
+  are hard-capped at 2 MB even if the file grows mid-read, and the line
+  the agent is editing is HIGHLIGHTED in the accent color — "shows what
+  the AI is currently editing" is now literally true at a glance.
+- **faster cold boot** — the boot thread used to read + SHA-256 the whole
+  ~175 MB binary on every app launch before the server could spawn. The
+  hash is memoized by (len, mtime) now: one stat instead of 175 MB of
+  I/O; the value restamps itself when the binary actually changes, so
+  Diagnostics still shows the real fingerprint.
+- **the opencode binary and the sandbox stay as P27 shipped them** — the
+  server binary is upstream (bun-compiled; nothing safe to strip inside,
+  shipped once, gzipped, never duplicated) and the curated rootfs trim
+  (~50+ MB at install) plus the post-boot cache hygiene (~108 MB/session)
+  landed in P27. P28's lightness wins are the ones the app itself was
+  wasting: fewer full-file reads under streaming, no cold-boot hashing.
 
 ## What's in v0.26.0 (P26 — the evergreen release)
 

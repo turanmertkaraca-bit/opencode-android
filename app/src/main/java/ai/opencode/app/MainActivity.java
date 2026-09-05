@@ -83,8 +83,11 @@ public class MainActivity extends Activity implements ServerService.Evt {
                     Binaries.extractBundled(this, msg -> line("  " + msg));
                 }
                 File bin = Binaries.binaryFile(this);
+                // P28: the sha is (len, mtime)-memoized now — this line
+                // used to read+hash ~175 MB on every cold launch, directly
+                // on the boot thread, ahead of the server spawn.
                 line("binary ok · " + Binaries.human(bin.length())
-                        + " · sha " + Binaries.sha256(bin));
+                        + " · sha " + Binaries.sha256Cached(this, bin));
                 // P9: sandbox toolkit (pkg package manager) — one-time ~4 MB
                 // unpack. Failure is NON-fatal: chat works without it.
                 if (!Sandbox.ready(this)) {

@@ -288,4 +288,81 @@ public final class EditPulse {
         }
         return null;
     }
+
+    // ------------------------------------------------------------ P28 peek
+
+    /** P28: how many tail bytes the cheap peek path reads. A shell/streamed
+     *  append (no edit-tool locator) can only be changing the file's tail —
+     *  reading + splitting megabytes on every debounced fs batch was the
+     *  field's "glitchy when the file gets big" risk. 8 KB covers the
+     *  11-line window with room to spare. */
+    public static final int TAIL_BYTES = 8192;
+
+    /** Newlines in raw[0..len) — the line-number base for a tail window.
+     *  Pure, allocation-free; called on ≤2 MB prefixes only. */
+    public static long countNewlines(byte[] raw, int len) {
+        if (raw == null || len <= 0) return 0;
+        long c = 0;
+        for (int i = 0; i < len; i++) if (raw[i] == '\n') c++;
+        return c;
+    }
+
+    /**
+     * P28: the TAIL peek — same numbered-window format as {@link #peek},
+     * built from only the file's last bytes. focus is the newest line
+     * (marked "▸"), the header counts every line hidden above it
+     * ({@code linesBefore} = newlines in the skipped prefix), and there is
+     * never a "+N more" footer because the window ends at EOF by
+     * construction. {@code headCut} = the slice started mid-line (a "…"
+     * prefix marks the partial first line). Pure; JVM-pinned.
+     */
+    public static String peekTailWindow(byte[] raw, long linesBefore,
+                                        int maxLines, boolean headCut) {
+        if (maxLines <= 0) maxLines = PEEK_LINES;
+        if (raw == null || raw.length == 0) return "";
+        String content = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+        String[] all = content.split("\n", -1);
+        int n = all.length;
+        if (n > 1 && all[n - 1].isEmpty()) n--;      // POSIX-final newline
+        if (n == 0) return "";
+        int focus = n - 1;                            // the newest line
+        int from = Math.max(0, focus - maxLines + 1);
+        long above = linesBefore + from;
+        StringBuilder b = new StringBuilder();
+        if (above > 0) b.append("  … ").append(above)
+                .append(above == 1 ? " line" : " lines").append(" above\n");
+        for (int i = from; i <= focus; i++) {
+            String t = all[i];
+            if (t.length() > PEEK_LINE_CAP) t = t.substring(0, PEEK_LINE_CAP) + "…";
+            if (i == from && headCut) t = "…" + t;
+            b.append(i == focus ? "▸ " : "  ")
+                    .append(linesBefore + i + 1).append("│ ").append(t);
+            if (i < focus) b.append('\n');
+        }
+        return b.toString();
+    }
+
+    /**
+     * P28: the "▸ " focus line of a rendered peek window, as a
+     * {start, end} char range (end exclusive) — the view paints it with the
+     * accent highlight so "what the AI is editing right now" is visible at
+     * a glance. Null when the window has no focus mark. Pure.
+     */
+    public static int[] focusRange(String peek) {
+        if (peek == null || peek.isEmpty()) return null;
+        int s = peek.indexOf("▸ ");
+        if (s < 0) return null;
+        int e = peek.indexOf('\n', s);
+        if (e < 0) e = peek.length();
+        return new int[]{s, e};
+    }
+
+    /**
+     * P28: whether a peek (or any file snapshot) must be re-read: content
+     * identity is approximated by (length, mtime) — the memo that keeps a
+     * heavy append-storm from re-reading an unchanged file. Pure.
+     */
+    public static boolean changed(long prevLen, long prevMt, long len, long mt) {
+        return prevLen != len || prevMt != mt;
+    }
 }
