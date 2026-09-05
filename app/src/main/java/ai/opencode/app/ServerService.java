@@ -279,6 +279,10 @@ public class ServerService extends Service {
         File cwd = (startDir != null && startDir.isDirectory())
                 ? startDir : Binaries.homeDir(this);
         servingDir = cwd;
+        // P26: tell the hub which root this server owns — a DECK SWITCH
+        // lands here as a different root and the hub resets to a fresh
+        // chat instead of POSTing into a session this server never had.
+        RunHub.onProjectRoot(cwd.getAbsolutePath());
 
         // P19: pick a bindable port BEFORE spawning. Verified on the rig:
         // opencode maps --port 0 to its own default (4096), so a true

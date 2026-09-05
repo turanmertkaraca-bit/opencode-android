@@ -354,16 +354,41 @@ public final class Models {
 
     private static final String PREFS = "oc";
     private static final String KEY = "model";
+    /** P26: set when the user deliberately picks a discovery-catalog model
+     *  ("· catalog", dim). The free list rotates, so the pick may work —
+     *  and if the server refuses, the run-time model-not-found self-heal
+     *  clears it and falls back to the server default. */
+    private static final String KEY_FORCED = "model_forced";
 
-    /** Persist the picked model as "providerID/modelID". */
+    /** Persist the picked model as "providerID/modelID" (server-listed pick). */
     public static void save(Context c, String provider, String id) {
+        save(c, provider, id, false);
+    }
+
+    /** Persist the pick + whether it was forced out of the discovery
+     *  catalog (try-anyway semantics). */
+    public static void save(Context c, String provider, String id, boolean forced) {
         c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                .putString(KEY, provider + "/" + id).apply();
+                .putString(KEY, provider + "/" + id)
+                .putBoolean(KEY_FORCED, forced)
+                .apply();
     }
 
     /** Clear the per-session override. */
     public static void clear(Context c) {
-        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY).apply();
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .remove(KEY).remove(KEY_FORCED).apply();
+    }
+
+    /** True when the current pick was a deliberate catalog choice (P26). */
+    public static boolean forced(Context c) {
+        if (c == null) return false;
+        try {
+            return c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getBoolean(KEY_FORCED, false);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** The picked model as {providerID, modelID}, or null for server default. */

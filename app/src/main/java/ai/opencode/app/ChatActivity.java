@@ -125,6 +125,7 @@ public class ChatActivity extends Activity
     //                                          the veil sat GONE 24/7: real idle
     //                                          burn on the main screen.
     private LinearLayout typing;
+    private LinearLayout liveSlot;   // P26: pinned live-tree footer (always visible while a run works)
     private TextView scrollPill;
     private boolean pillShown;
     private final List<ObjectAnimator> typingAnims = new ArrayList<>();
@@ -132,8 +133,10 @@ public class ChatActivity extends Activity
     // ---- P17/P25: live edit feed — STATE lives in RunHub, the VIEW here
     // renders it. The DirWatcher runs while a run is active (hub-owned),
     // so the shower keeps recording with the chat closed. The view keeps
-    // only its own bits: the pulse animator and the tree's dir states.
-    private ObjectAnimator livePulseAnim;
+    // only the tree's dir states (its own expand/collapse memory).
+    // P26: the card is the PINNED FOOTER (never a transcript row), the
+    // pulsing live dot is GONE — a static dot says the same thing
+    // without flashing (field: "remove the flashing live symbol").
     /** P25 tree: user-decided dir expand/collapse (null = auto: follow
      *  the newest event's branch). Bounded; cleared on session resets. */
     private final java.util.Map<String, Boolean> dirState = new java.util.HashMap<>();
@@ -149,6 +152,7 @@ public class ChatActivity extends Activity
         setContentView(R.layout.activity_chat);
         list = findViewById(R.id.list);
         scroll = findViewById(R.id.scroll);
+        liveSlot = findViewById(R.id.liveSlot);
         tvTitle = findViewById(R.id.tvTitle);
         tvSub = findViewById(R.id.tvSub);
         tvStatus = findViewById(R.id.tvStatus);
@@ -237,13 +241,16 @@ public class ChatActivity extends Activity
         RunHub.bindUi(this);
         rows = RunHub.rows();
         String interrupted = RunHub.consumeInterruptedNote();
-        boolean emptyStart = RunHub.rows().isEmpty();
-        if (RunHub.sessionId() != null && emptyStart) {
-            // P25 process-kill recovery (or first open after boot): the
-            // run-state file restored the session — pull its transcript.
-            RunHub.loadSession(RunHub.sessionId());
-        } else if (RunHub.sessionId() != null) {
-            RunHub.reconcileOnBind();            // P20 replay, now hub-owned
+        // P26: reconcile is now the ONLY resume path. The old empty-start
+        // branch called loadSession, which SWAPS the transcript for a fresh
+        // Tx and replays — when the pull raced the sandbox boot it died
+        // silently and the screen sat empty/"loading" until the NEXT
+        // open. reconcileOnBind upserts in place (works identically for
+        // the empty cold start), never wipes, and plants replayNeeded so
+        // the ST_HEALTHY flip below re-runs it the moment the server
+        // answers. The chat updates every time, never trails behind.
+        if (RunHub.sessionId() != null) {
+            RunHub.reconcileOnBind();
         }
         // the note lands AFTER the (re)load — the transcript swap must
         // never wipe it
@@ -251,6 +258,11 @@ public class ChatActivity extends Activity
         checkPermissionQueue();
         refreshServerUi();
         refreshChips();
+        // P26: paint the CURRENT busy state on every bind — the ■ stop
+        // button, the status line, the typing dots AND the live footer
+        // all hang off this one call (they used to initialize only on a
+        // busy CHANGE, so re-entering mid-run showed a stale ↑ button).
+        applyBusyUi(RunHub.busy());
         // P16: returning from API keys with the model sheet open → refresh
         // the rows IN PLACE, so the provider whose key was just added goes
         // bright/ready without closing and reopening the picker.
@@ -300,11 +312,18 @@ public class ChatActivity extends Activity
         ui.removeCallbacks(flushPaints);
         paintScheduled = false;
         dirtyRows.clear();
-        if (livePulseAnim != null) { livePulseAnim.cancel(); livePulseAnim = null; }
         // P25: that is ALL. The run, the SSE feed, the transcript, the
         // edit watcher — all live in RunHub now. Leaving to the deck keeps
         // the run streaming; nothing here can abort it (only ■ can).
         super.onPause();
+    }
+
+    /** P26: back takes the same journey as the ‹ button — chat → project
+     *  deck (the app never dumps the user on the launcher mid-journey). */
+    @Override
+    public void onBackPressed() {
+        finish();
+        overridePendingTransition(R.anim.fade_in, R.anim.slide_out_right);
     }
 
     // ------------------------------------------------ P25: RunHub.Ui
@@ -337,8 +356,9 @@ public class ChatActivity extends Activity
     }
 
     @Override public void hubLive() {
-        RunHub.Row r = rowByKey(LIVE_KEY);
-        if (r != null) requestPaint(r);
+        // P26: the live card is the pinned FOOTER now — repaint it directly
+        // (already debounced upstream: DirWatcher 280 ms + peek 120 ms).
+        syncLiveFooter();
     }
 
     /** The transcript was replaced (session switch / model trim): rebuild
@@ -512,16 +532,20 @@ public class ChatActivity extends Activity
             if (r.key == null) return;      // unkeyed rows: trail only
             String k = r.key;
             Trail.record(this, "paint row " + k, t);
+            // P26 long-run caps: a month of flaky rows must not grow the
+            // bookkeeping maps forever — bounded, like everything else.
+            if (paintFails.size() > 512) paintFails.clear();
             Integer c = paintFails.get(k);
             int n = c == null ? 1 : c + 1;
             paintFails.put(k, n);
             if (n < Resilience.paintFailQuarantineAfter()) return;
             paintFails.remove(k);
+            if (quarantined.size() > 512) quarantined.clear();
             quarantined.add(k);
             ui.post(() -> guarded("quarantine swap", () -> {
                 RunHub.Row qr = rowByKey(k);
                 if (qr == null) return;
-                if (qr.kind == K_LIVE) return;   // the live card manages itself
+                if (qr.kind == K_LIVE) return;   // legacy guard: live card lives in the footer now
                 synchronized (lock) {
                     qr.kind = K_SYS;
                     qr.text.setLength(0);
@@ -874,6 +898,31 @@ public class ChatActivity extends Activity
             tvStatus.setVisibility(View.GONE);
         }
         syncTyping();
+        syncLiveFooter();                   // P26: footer appears/disappears with the run
+    }
+
+    // ------------------------------------------- P26: the live-tree footer
+
+    /** The live edit tree NO LONGER lives in the transcript (a row added
+     *  at run start was buried above the fold within seconds — the field
+     *  never saw the files). It is pinned here instead: always visible
+     *  above the composer while the agent works, scrolled with nothing,
+     *  gone the moment the run settles. Rebuilt on hubBusy/hubLive — both
+     *  already event-driven and debounced upstream. */
+    private void syncLiveFooter() {
+        if (liveSlot == null) return;
+        if (!RunHub.busy()) {
+            if (liveSlot.getVisibility() != View.GONE
+                    || liveSlot.getChildCount() != 0) {
+                liveSlot.removeAllViews();
+                liveSlot.setVisibility(View.GONE);
+            }
+            return;
+        }
+        liveSlot.setVisibility(View.VISIBLE);
+        liveSlot.removeAllViews();
+        Throwable t = Resilience.guard(() -> liveSlot.addView(buildLiveView()));
+        if (t != null) Trail.record(this, "live footer", t);
     }
 
     // ---- P23: blast-radius zero ----------------------------------------
@@ -930,6 +979,12 @@ public class ChatActivity extends Activity
             // disk). This replaces the old cold-boot ritual entirely.
             final String note = ServerService.consumeRecoveryNote();
             if (note != null) ui.post(() -> sys("♻ " + note));
+            // P26: the boot-race self-heal — a resume that fired before the
+            // sandbox answered planted replayNeeded; the server now speaks,
+            // so pull the transcript NOW instead of waiting for the user to
+            // bounce the screen (the "comeback shows a stale/loading chat"
+            // bug, fixed at the root).
+            RunHub.reconcileOnBind();
         }
     }
 
@@ -994,28 +1049,18 @@ public class ChatActivity extends Activity
     /** Estimated per-row height used to pre-size the scroll cap. */
     private static final int TREE_ROW_DP = 27;
 
-    /** The "edit shower" card — slim while idle, a brief shower while hot.
-     *  P19: restyled onto the thought-card surface (the ✦ thinking card's
-     *  family — a sibling, not a chat bubble), and when a run ends with
-     *  ZERO edits the row collapses to nothing (no empty records).
-     *  P25: the shower is a COMPACT LIVE TREE — touched files grouped
-     *  under their directories, height-capped, scrolling inside the card. */
+    /** The "edit shower" card — P26: rendered ONLY while a run is active,
+     *  ONLY in the pinned footer slot (never in the transcript). A compact
+     *  live tree of the files the agent is touching right now: dirs
+     *  collapsed unless they carry the freshest activity (or the user
+     *  opened them), height-capped, scrolling INSIDE the card, tap a file
+     *  for the line-precise peek. The dot is STATIC — no flashing (field
+     *  request), the card default-expands for the whole run: a stable
+     *  tree, not a strobe. When the run settles the card disappears
+     *  (settleBusyUi clears the state; the footer hides). */
     private View buildLiveView() {
-        boolean settled = !RunHub.busy();
         boolean empty = RunHub.liveCount() == 0;
-        if (settled && empty) {
-            View ghost = new View(this);
-            ghost.setVisibility(View.GONE);
-            LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0);
-            glp.topMargin = 0;
-            ghost.setLayoutParams(glp);
-            return ghost;
-        }
-        boolean hot = RunHub.liveHot();
-        boolean expanded = RunHub.liveOpen != null ? RunHub.liveOpen : (hot && !settled);
-
-        if (livePulseAnim != null) { livePulseAnim.cancel(); livePulseAnim = null; }
+        boolean expanded = RunHub.liveOpen != null ? RunHub.liveOpen : Boolean.TRUE;
 
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
@@ -1030,14 +1075,11 @@ public class ChatActivity extends Activity
 
         TextView dot = text(9, R.color.text_primary, false);
         dot.setText("●");
-        dot.setTextColor(settled ? 0xFF6E6E6E : 0xFF9DB1FF);   // subtle blue live
+        dot.setTextColor(empty ? 0xFF6E6E6E : 0xFF9DB1FF);   // STATIC — no pulse
         head.addView(dot);
-        if (!settled && expanded && Theme.motionOn(this)) {
-            livePulseAnim = Theme.pulse(dot);
-        }
 
-        TextView tag = text(10, settled ? R.color.text_secondary : 0xFFB9C4FF, true);
-        tag.setText(settled ? "  EDITS" : "  LIVE");
+        TextView tag = text(10, R.color.text_secondary, true);
+        tag.setText("  LIVE");
         tag.setLetterSpacing(0.14f);
         head.addView(tag);
 
@@ -1045,7 +1087,7 @@ public class ChatActivity extends Activity
         sum.setPadding(dp(8), 0, 0, 0);
         sum.setSingleLine(true);
         sum.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-        sum.setText(RunHub.liveSummaryLine(settled));
+        sum.setText(empty ? "watching project files…" : RunHub.liveSummaryLine(false));
         head.addView(sum, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
@@ -1057,7 +1099,7 @@ public class ChatActivity extends Activity
 
         // ---- the live tree: dirs collapsed, touched paths expanded,
         //      hard height cap — huge directories scroll INSIDE the card
-        if (expanded) {
+        if (expanded && !empty) {
             List<EditPulse.TNode> tree = RunHub.liveTree();
             String newest = RunHub.liveNewest();
             java.util.Set<String> autoOpen = autoOpenDirs(tree, newest);
@@ -1114,9 +1156,7 @@ public class ChatActivity extends Activity
         Theme.press(c);
         head.setOnClickListener(v -> {
             RunHub.liveOpen = expanded ? Boolean.FALSE : Boolean.TRUE;
-            lastToggled = LIVE_KEY;
-            RunHub.Row r = rowByKey(LIVE_KEY);
-            if (r != null) touchView(r);
+            syncLiveFooter();              // P26: no row to repaint — the footer IS the card
         });
         return c;
     }
@@ -1832,8 +1872,10 @@ public class ChatActivity extends Activity
                 c.setOnClickListener(v -> { r.open = !r.open; lastToggled = r.key; touchView(r); });
                 return c;
             }
+            // P26: K_LIVE never appears in the transcript anymore (the
+            // tree lives in the pinned footer) — defensive no-op.
             case K_LIVE:
-                return buildLiveView();
+                return new View(this);
             case K_IMAGE:
                 return buildImageView(r);
             case K_ERR: {
@@ -2459,8 +2501,8 @@ public class ChatActivity extends Activity
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         TextView hint = text(11, R.color.text_secondary, false);
-        hint.setText("bright = runs now · dim = catalog (needs its key) · "
-                + "tap a dim row to see why · ⌘ → API keys to add one");
+        hint.setText("bright = runs now · dim = catalog — tap to try, auto-"
+                + "falls-back if refused · ⌘ → API keys to add one");
         hint.setPadding(dp(4), dp(8), dp(4), dp(10));
         root.addView(hint);
         b.setView(root);
@@ -2633,17 +2675,27 @@ public class ChatActivity extends Activity
             if (!"m".equals(it[0])) return;
             Models.Prov pr = (Models.Prov) it[1];
             Models.Mdl m = (Models.Mdl) it[2];
-            // P12a restored: discovery-catalog entries are NOT selectable —
-            // the server would answer "Model not found". Say why instead.
+            // P26: discovery-catalog entries are now SELECTABLE — the field
+            // asked "why can't I select them?". The old hard refusal (the
+            // server would answer "Model not found") treated the user like
+            // they can't read a dim row: the free list ROTATES, so a
+            // catalog pick may well work. Try it; if the server refuses,
+            // the run-time model-not-found self-heal (fixed in P25) clears
+            // the pick and re-sends with the server default — one honest
+            // note in the chat, no dead end, no double token burn.
             if (!m.live) {
                 if (pr.usable) {
+                    Models.save(this, pr.id, m.id, true);
+                    refreshChips();
                     Toast.makeText(this, m.name + " is in the discovery catalog "
-                            + "but not offered by your server right now (the free "
-                            + "list rotates) — pick a non-tagged model",
+                            + "— trying it. If your server can't serve it right "
+                            + "now, the run falls back to the default automatically",
                             Toast.LENGTH_LONG).show();
+                    dlg.dismiss();
                 } else {
                     // P16: say WHICH key — Zen and Go are separate, and that
-                    // distinction is the whole P16 key fix.
+                    // distinction is the whole P16 key fix. Without a key the
+                    // server can't use the provider at all, so a try is noise.
                     Toast.makeText(this, "no key for " + pr.name + " yet — "
                             + (pr.id.startsWith("opencode")
                                 ? "add the " + pr.name + " key in ⌘ → API keys "
@@ -2654,7 +2706,7 @@ public class ChatActivity extends Activity
                 }
                 return;
             }
-            Models.save(this, pr.id, m.id);
+            Models.save(this, pr.id, m.id, false);
             // P11: chat picks are PER-CHAT only — writing them into
             // opencode.json made every future session (and every fallback
             // body) hostage to a model the catalog can rotate away.

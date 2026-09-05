@@ -167,6 +167,20 @@
         </LinearLayout>
     </ScrollView>
 
+    <!-- P26: the live edit tree — PINNED above the composer while a run
+         is active (always visible, never buried by the streaming rows,
+         never fights the transcript scroll). Filled by ChatActivity's
+         syncLiveFooter(); gone the moment the run settles. -->
+    <LinearLayout
+        android:id="@+id/liveSlot"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="2dp"
+        android:visibility="gone"/>
+
     <!-- composer -->
     <LinearLayout
         android:id="@+id/permSlot"
