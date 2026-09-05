@@ -120,6 +120,19 @@ public class FilesActivity extends Activity {
         ui.post(this::render);   // DeX window resizes re-set the column
     }
 
+    /** P26: back walks the directory tree UP first (the field: "back drops
+     *  me to the app drawer instead of going back to the directory") —
+     *  standard file-manager semantics. At the project root, back leaves. */
+    @Override
+    public void onBackPressed() {
+        if (cwd != null && baseDir != null
+                && !cwd.getAbsolutePath().equals(baseDir.getAbsolutePath())) {
+            up();                            // clamped to the project root by up()
+            return;
+        }
+        super.onBackPressed();
+    }
+
     // -------------------------------------------------------------- live
 
     private void startWatching() {

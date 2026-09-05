@@ -94,18 +94,33 @@ public final class RunHub implements ServerService.EventListener {
     public static final class Tx {
         public final List<Row> rows = new ArrayList<>();
         public final Map<String, Integer> idxByKey = new HashMap<>();
-        public final Map<String, MsgInfo> msgs = new HashMap<>();
+        /** Insertion-ordered so the long-run eviction (P26) can drop the
+         *  OLDEST message bookkeeping first. */
+        public final Map<String, MsgInfo> msgs = new LinkedHashMap<>();
         public final Map<String, Integer> typeCount = new HashMap<>();
         /** Keys of rows dropped by the 450-row trim (and purged empty
          *  thoughts) — the replay must never re-append ancient parts. */
         public final java.util.ArrayDeque<String> trimmedKeys = new java.util.ArrayDeque<>();
         public long lastAssistantTok;      // P25: context-depth meter input
         public int rowsAdded;              // monotonically bumps on add (view cue)
+        // P26: RUNNING session sums. A year-long run must not re-iterate
+        // an ever-growing msgs map on every pill paint — totals move by
+        // delta on each message update and survive the eviction of old
+        // MsgInfo entries.
+        public double costSum;
+        public long tokSum;
     }
 
     private static final int TRIMMED_KEY_CAP = 4096;
-    private static final int TRIM_OVER = 450, TRIM_KEEP = 350;
-    private static final int ARCHIVE_CAP = 4;
+    // package-private: the JVM suite pins these walls
+    static final int TRIM_OVER = 450, TRIM_KEEP = 350;
+    static final int ARCHIVE_CAP = 4;
+    /** P26 long-run caps: message bookkeeping per session, pid-less part
+     *  counters, edit-focus snippets. A month/year run grows INTO these
+     *  walls and stays there — bounded memory, evergreen behavior. */
+    static final int MSG_CAP = 400;
+    static final int TYPE_COUNT_CAP = 1024;
+    static final int EDIT_FOCUS_CAP = 200;
 
     // ------------------------------------------------------------ state
 
@@ -127,6 +142,12 @@ public final class RunHub implements ServerService.EventListener {
     private static volatile boolean modelFixRetried;
     private static volatile boolean flakeRetried;
     private static volatile boolean interruptedNotePending;
+    /** P26: set when a bind-time session re-pull could not reach the
+     *  server (boot race: the chat re-opened before the sandbox finished
+     *  starting). The next ST_HEALTHY flip re-runs the pull — the screen
+     *  that used to sit "loading" on an empty transcript now fills
+     *  itself the moment the server answers. Event-driven, zero polling. */
+    private static volatile boolean replayNeeded;
     /** P22 latch: ensureSession + model validation do network I/O before
      *  busy flips — a double-tap must not queue two identical runs. */
     private static final AtomicBoolean sending = new AtomicBoolean(false);
@@ -344,22 +365,16 @@ public final class RunHub implements ServerService.EventListener {
     }
 
     /** Session-cumulative cost — the money meter (P14 semantics kept
-     *  exactly; the user verified it and it must not drift). */
+     *  exactly; the user verified it and it must not drift). P26: O(1) —
+     *  the total moves by delta on every message update instead of
+     *  re-iterating an ever-growing map. */
     public static double sessionCost() {
-        synchronized (LOCK) {
-            double c = 0;
-            for (MsgInfo mi : cur.msgs.values()) c += mi.cost;
-            return c;
-        }
+        synchronized (LOCK) { return cur.costSum; }
     }
 
     /** Session-cumulative tokens (for the Σ popover's explanation). */
     public static long sessionTok() {
-        synchronized (LOCK) {
-            long t = 0;
-            for (MsgInfo mi : cur.msgs.values()) t += mi.tok;
-            return t;
-        }
+        synchronized (LOCK) { return cur.tokSum; }
     }
 
     /** P25: the pill line — CURRENT context depth vs the model's window,
@@ -633,8 +648,15 @@ public final class RunHub implements ServerService.EventListener {
             String mid = Json.str(part, "messageID");
             if (mid == null) mid = "m" + Integer.toHexString(System.identityHashCode(part));
             String pid = Json.str(part, "id");
-            int n;
-            synchronized (LOCK) { n = mergeCount(t, mid + "|" + type); }
+            // P26: the counter only exists to disambiguate parts WITHOUT a
+            // stable id. Counting every stable-keyed part too made the map
+            // grow one entry per (message,type) pair — unbounded on a
+            // year-long run. Now it stays near-empty on real traffic and
+            // carries a hard cap for the pid-less flood case.
+            int n = 0;
+            if (pid == null || pid.isEmpty()) {
+                synchronized (LOCK) { n = mergeCount(t, mid + "|" + type); }
+            }
             final String key = (pid != null && !pid.isEmpty())
                     ? mid + "|" + pid : mid + "|" + type + "#" + n;
             final String role = roleHint != null ? roleHint : roleOf(t, mid);
@@ -710,12 +732,11 @@ public final class RunHub implements ServerService.EventListener {
 
     private static int mergeCount(Tx t, String k) {
         Integer c = t.typeCount.get(k);
-        n2 = c == null ? 1 : c + 1;
-        t.typeCount.put(k, n2);
-        return n2;
+        int n = c == null ? 1 : c + 1;
+        if (t.typeCount.size() > TYPE_COUNT_CAP) t.typeCount.clear();   // P26 cap
+        t.typeCount.put(k, n);
+        return n;
     }
-
-    private static int n2; // scratch for mergeCount (main-thread only)
 
     // --------------------------------------------------------- upserts
 
@@ -1005,10 +1026,23 @@ public final class RunHub implements ServerService.EventListener {
             boolean showError;
             synchronized (LOCK) {
                 MsgInfo mi = t.msgs.get(fMid);
-                if (mi != null && fMeta != null) mi.meta = fMeta;
-                if (mi != null && hasSpend) {
+                if (mi == null) { mi = new MsgInfo(); t.msgs.put(fMid, mi); }
+                if (fMeta != null) mi.meta = fMeta;
+                if (hasSpend) {
+                    // P26: move the totals by DELTA — safe for re-reported
+                    // (cumulative or corrected) values, and the eviction
+                    // below can never lose a cent/token already counted.
+                    t.costSum += fCost - mi.cost;
+                    t.tokSum += fTok - mi.tok;
                     mi.cost = fCost;
                     mi.tok = fTok;
+                    // refresh recency: the freshest messages survive the cap
+                    t.msgs.remove(fMid);
+                    t.msgs.put(fMid, mi);
+                    while (t.msgs.size() > MSG_CAP) {
+                        String eldest = t.msgs.keySet().iterator().next();
+                        t.msgs.remove(eldest);
+                    }
                 }
                 showError = mi != null && !mi.errorShown && fErrName != null;
                 if (showError) mi.errorShown = true;
@@ -1283,7 +1317,10 @@ public final class RunHub implements ServerService.EventListener {
     /** P11: if the saved model is not in the server's live catalog, drop it
      *  BEFORE the request instead of failing the send. Empty fetch (server
      *  hiccup) never clears anything. Never blocks on the network — the
-     *  in-memory catalog decides, a background refresh serves the NEXT send. */
+     *  in-memory catalog decides, a background refresh serves the NEXT send.
+     *  P26: a FORCED pick (the user deliberately chose a discovery-catalog
+     *  model, knowing the free list rotates) is kept — the run attempts it
+     *  and the run-time model-not-found self-heal covers a real refusal. */
     private static void validateSelectedModel() {
         String[] sel = Models.selected(appCtx);
         if (sel == null) return;
@@ -1295,13 +1332,20 @@ public final class RunHub implements ServerService.EventListener {
             });
             return;                          // unknown state → keep the pick
         }
-        if (!Models.available(provs, sel[0], sel[1])) {
+        if (!keepPick(Models.forced(appCtx),
+                Models.available(provs, sel[0], sel[1]))) {
             Models.clear(appCtx);
             notifySpend();
             sys("⚠ saved model " + sel[0] + "/" + sel[1]
                     + " is no longer offered by the server — cleared "
                     + "(⌘ → Model to pick another; the free list rotates)");
         }
+    }
+
+    /** Pure rule the JVM suite pins: keep the pick when the server serves
+     *  it OR the user explicitly forced a catalog model (try-anyway). */
+    static boolean keepPick(boolean forced, boolean available) {
+        return forced || available;
     }
 
     /**
@@ -1400,7 +1444,6 @@ public final class RunHub implements ServerService.EventListener {
             // not be the one on screen.
             if (!was) {
                 startEditWatch();
-                ensureLiveRow();
             }
         } else if (was) {
             stopEditWatch();
@@ -1410,13 +1453,19 @@ public final class RunHub implements ServerService.EventListener {
         if (was != b) saveRunState();
     }
 
-    /** Settle-time cleanup (P17/P20 keepers): the live card becomes a
-     *  quiet record, dead empty THINKING cards are purged. */
+    /** Settle-time cleanup. P26: the live tree NO LONGER lives in the
+     *  transcript — the chat hosts it as a pinned footer while the run
+     *  is active, and here (run over) it disappears entirely, exactly as
+     *  the field asked. What remains: the edit/write tool cards in the
+     *  transcript and the files themselves in the project file manager.
+     *  Dead empty THINKING cards are purged as before (P20). */
     private static void settleBusyUi() {
-        Integer li = cur.idxByKey.get(LIVE_KEY);
-        if (li != null && li < cur.rows.size()) notifyRow(LIVE_KEY);
+        liveSelPath = null;
+        liveOpen = null;
+        liveWaitingPeek = false;
         purgeEmptyThoughts();
         notifySpend();
+        notifyLive();
     }
 
     /** P19 quiet-end: the feed may die without session.idle/error; after
@@ -1444,6 +1493,13 @@ public final class RunHub implements ServerService.EventListener {
      *  untouched), then replays the last 80 messages from the server's
      *  store. NEVER re-POSTs anything. */
     public static void loadSession(String id) {
+        // P26: re-opening the session that is ALREADY displayed must never
+        // wipe its transcript (the old swap-then-replay left an empty,
+        // "loading" screen until the pull came back) — just re-sync it.
+        if (id != null && id.equals(sessionId)) {
+            reconcileOnBind();
+            return;
+        }
         modelFixRetried = false;      // fresh chat → fresh self-heal budget
         flakeRetried = false;
         runHadOutput = false;
@@ -1485,6 +1541,7 @@ public final class RunHub implements ServerService.EventListener {
                 }
                 Api.Resp r = Api.get("/session/" + id + "/message");
                 if (!r.ok()) {
+                    replayNeeded = true;       // P26: healthy flip will retry
                     sys("history unavailable · HTTP " + r.status);
                     return;
                 }
@@ -1508,8 +1565,10 @@ public final class RunHub implements ServerService.EventListener {
                     }
                 }
             } catch (Exception e) {
+                replayNeeded = true;
                 sys("history failed: " + e);
             } catch (Throwable e) {
+                replayNeeded = true;
                 Trail.record(appCtx, "hub history", e);
             }
         });
@@ -1524,6 +1583,12 @@ public final class RunHub implements ServerService.EventListener {
      * place, missed parts append in order, trimmed rows never resurrect,
      * and a run that FINISHED while away settles with a one-line note.
      * Never re-POSTs, never restarts a healthy stream.
+     *
+     * P26: on resume this is now the ONLY entry — no loadSession, so a
+     * re-open can never swap the live transcript for a fresh (empty) Tx
+     * and re-render it from scratch. And a pull that fires while the
+     * sandbox is still booting no longer dies silently: it plants
+     * {@link #replayPending()}, and the next healthy flip re-runs it.
      */
     public static void reconcileOnBind() {
         final String id = sessionId;
@@ -1531,9 +1596,17 @@ public final class RunHub implements ServerService.EventListener {
         IO.execute(() -> {
             try {
                 Api.Resp r = Api.get("/session/" + id + "/message");
-                if (!r.ok()) return;            // server blip: P18/P19 cover it
+                if (!r.ok()) {
+                    replayNeeded = true;       // boot race / blip → retry on healthy
+                    return;
+                }
                 List<Object> arr = Json.arr(Json.parse(r.body));
-                if (arr == null || arr.isEmpty()) return;
+                if (arr == null || arr.isEmpty()) {
+                    replayNeeded = true;
+                    return;
+                }
+                replayNeeded = false;
+                refreshTitleIfPlaceholder(id);
                 // P21: the settle rule, extracted into Resilience so the
                 // REAL server payloads replay through it in the JVM tests.
                 final boolean lastAssistantDone = Resilience.lastAssistantDoneFrom(arr);
@@ -1587,11 +1660,92 @@ public final class RunHub implements ServerService.EventListener {
                             + "everything it said is right here");
                 });
             } catch (Exception e) {
-                // offline / still starting: P19's feed self-heal + watchdog cover us
+                replayNeeded = true;   // offline / still starting: retry on healthy
             } catch (Throwable e) {
+                replayNeeded = true;
                 Trail.record(appCtx, "hub replay", e);
             }
         });
+    }
+
+    /** True when the last bind-time re-pull could not reach the server
+     *  and is waiting for a healthy flip to try again (P26, test seam). */
+    public static boolean replayPending() { return replayNeeded; }
+
+    // ------------------------------------------------ project switching
+
+    /** The project root the current session belongs to. Each project has
+     *  its OWN server (per-project sandbox) — sessions do NOT carry
+     *  across servers, so the old global sessionId made every send after
+     *  a deck switch POST into a session the new server has never heard
+     *  of ("send failed · HTTP 404", forever). Now the switch is an
+     *  event: the hub resets to a fresh chat; the old project's history
+     *  is one ≡ session-sheet tap away when you switch back. */
+    private static volatile String sessionRoot;
+
+    /** ServerService calls this the moment a server comes up for a root
+     *  (event-driven, no polling). Same root → no-op. */
+    public static void onProjectRoot(String root) {
+        if (root == null) return;
+        final String prev = sessionRoot;
+        sessionRoot = root;
+        if (prev != null && !prev.equals(root)) resetForProjectSwitch();
+    }
+
+    private static void resetForProjectSwitch() {
+        main(() -> {
+            synchronized (LOCK) {
+                archive.clear();
+                cur = new Tx();
+            }
+            sessionId = null;
+            sessionTitle = "New chat";
+            runSessionId = null;
+            lastUserText = null;
+            modelFixRetried = false;
+            flakeRetried = false;
+            interruptedNotePending = false;
+            replayNeeded = false;            // the old session is unreachable — stop retrying it
+            liveSelPath = null;
+            liveOpen = null;
+            if (editWatcher != null) editWatcher.stop();
+            busy = false;                    // the old server (and its run) died with the switch
+            notifyReset();
+            notifyTitle();
+            notifyBusy();
+            notifySpend();
+            notifyLive();
+            saveRunState();
+        });
+    }
+
+    /** One /session lookup for the display title — only while the hub
+     *  still carries a placeholder ("Recovered chat"/"New chat"). Keeps
+     *  the cold-start resume path (reconcileOnBind, no loadSession) from
+     *  showing a placeholder forever. */
+    private static void refreshTitleIfPlaceholder(final String id) {
+        String t = sessionTitle;
+        if (t != null && !t.isEmpty() && !"New chat".equals(t)
+                && !"Recovered chat".equals(t)) return;
+        try {
+            Api.Resp sl = Api.get("/session");
+            if (!sl.ok()) return;
+            List<Object> sarr = Json.arr(Json.parse(sl.body));
+            if (sarr == null) return;
+            for (Object o : sarr) {
+                Map<String, Object> m = Json.obj(o);
+                if (m != null && id.equals(Json.str(m, "id"))) {
+                    String nt = Json.str(m, "title");
+                    if (nt != null && !nt.isEmpty()) {
+                        sessionTitle = nt;
+                        notifyTitle();
+                    }
+                    break;
+                }
+            }
+        } catch (Exception ignored) {
+            // a title is cosmetic — never let it break the replay
+        }
     }
 
     /** The old activity checked isFinishing() before settling; the hub has
@@ -1677,8 +1831,15 @@ public final class RunHub implements ServerService.EventListener {
 
     private static DirWatcher editWatcher;
     private static final Map<String, EditPulse.Ev> editFeed = new HashMap<>();
-    /** edit-tool snippets keyed by abs path — the peek's line locator. */
-    private static final Map<String, String> editFocus = new HashMap<>();
+    /** edit-tool snippets keyed by abs path — the peek's line locator.
+     *  P26: insertion-ordered with a hard cap — a run that touches ten
+     *  thousand files evicts the OLDEST focus instead of growing forever. */
+    private static final Map<String, String> editFocus =
+            new LinkedHashMap<String, String>(16, 0.75f, false) {
+        @Override protected boolean removeEldestEntry(Map.Entry<String, String> e) {
+            return size() > EDIT_FOCUS_CAP;
+        }
+    };
     private static final Map<String, String> peekCache = new HashMap<>();
     private static String editRoot;
     /** null = auto (hot → open); TRUE/FALSE = user override. */
@@ -1719,7 +1880,6 @@ public final class RunHub implements ServerService.EventListener {
             }
             synchronized (peekCache) { peekCache.remove(path); }   // stale peek out
             scheduleLivePeek(path);           // P25: the peek LIVE-UPDATES
-            ensureLiveRow();
             H.removeCallbacks(liveCollapse);
             H.postDelayed(liveCollapse, EditPulse.ACTIVE_MS + 500);
             notifyLive();
@@ -1762,24 +1922,13 @@ public final class RunHub implements ServerService.EventListener {
 
     public static String liveSel() { return liveSelPath; }
 
-    /** Insert the ONE live card row (idempotent). Main-thread safe. */
-    private static void ensureLiveRow() {
-        main(() -> {
-            boolean added;
-            synchronized (LOCK) {
-                if (cur.idxByKey.containsKey(LIVE_KEY)) return;
-                Row r = new Row();
-                r.kind = K_LIVE;
-                r.key = LIVE_KEY;
-                r.ts = System.currentTimeMillis();
-                cur.rows.add(r);
-                cur.idxByKey.put(LIVE_KEY, cur.rows.size() - 1);
-                cur.rowsAdded++;
-                added = true;
-            }
-            if (added) notifyRow(LIVE_KEY);
-        });
-    }
+    // P26: the K_LIVE row is GONE from the transcript model. It used to
+    // be inserted at run start — and every tool/text row that streamed in
+    // afterwards landed BELOW it, so autoscroll buried the tree above the
+    // fold within seconds (the field saw "no files in chat"). The chat
+    // now renders the tree from the FEED (liveTree/liveNewest/peek APIs
+    // below) in a footer pinned above the composer: always visible while
+    // the agent works, gone the moment it settles.
 
     /** Load the peek window off-thread — a bounded, line-numbered slice. */
     private static void loadPeek(final String abs) {

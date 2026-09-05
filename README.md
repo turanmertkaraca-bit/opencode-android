@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.22.0 — P22)
+## Install (v0.26.0 — P26)
 
-1. Grab `opencode-p22-v0.22.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p26-v0.26.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -22,7 +22,68 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
 
-## What's in v0.22.0 (P22 — the native-layer audit)
+## What's in v0.26.0 (P26 — the evergreen release)
+
+The field verdict on P25: "stable, can handle long runs" — with a
+short list. All of it fixed here:
+
+- **the live edit tree is actually visible now** — P25 inserted it as a
+  transcript row at run start, and every tool/text row that streamed in
+  afterwards landed BELOW it, so autoscroll buried the tree above the
+  fold within seconds (the field: "the files the AI edited don't show up
+  in chat"). The tree is now a PINNED FOOTER above the composer: always
+  on screen while the agent works, in nothing's way, gone the moment the
+  run settles — files stay in the project file manager, as before.
+- **the flashing live symbol is gone** — the pulsing ● and the
+  hot-driven expand/collapse strobe were replaced by a static dot and a
+  card that stays expanded (a stable tree, not a strobe).
+- **back walks backward instead of dumping you on the launcher** — Files
+  now goes UP one directory per back press (project root → leaves), and
+  chat's system back mirrors its ‹ button (chat → deck).
+- **the chat updates every time you come back** — the stale screen had
+  two roots: re-opening the displayed session SWAPPED its transcript for
+  a fresh empty one and re-rendered from a replay that could race the
+  sandbox boot and die silently (the "loading…" screen until the next
+  bounce); and a failed re-pull had no retry. Now resume always upserts
+  in place (never wipes), and a pull that fires before the server
+  answers arms a retry that runs the moment the server flips healthy —
+  event-driven, zero polling.
+- **catalog models are selectable** — "why can't I select them?" was by
+  design (the free list rotates), but a hard refusal reads like a bug.
+  A dim "· catalog" row now taps through: the run tries it, and if the
+  server truly can't serve it, the model-not-found self-heal clears the
+  pick and re-sends with the server default — one honest note, no dead
+  end, no double token burn.
+- **built to run for a month — or a year** — the indefinite-run audit
+  capped every growth path: per-message token/cost bookkeeping is now a
+  capped LRU whose totals move by delta (the Σ/$ pill reads are O(1)
+  forever), the pid-less part counter no longer grows one entry per
+  part, edit-focus snippets and paint-fault maps carry hard caps, and a
+  12,000-part soak test proves rows/memory/sums stay inside their walls
+  with exact totals on day 300 as on minute one. Under it all the
+  existing self-healing chain stands: SSE auto-reconnect, server
+  supervisor with backoff, orphan sweep, heartbeat, crash/incident
+  capture, run-state recovery.
+:- **144 JVM tests green** (10 new: sums-vs-eviction, delta corrections,
+  counter gating, focus-map cap, replay retry flag, try-anyway rule,
+  forced-pick prefs round-trip, project-switch reset, the soak).
+
+## What was in v0.25.0 (P25 — runs outlive the chat)
+
+A new RunHub (run engine) owned the transcript, busy state, send
+orchestration, the SSE consumption and the live-edit watcher for the
+whole process lifetime — the chat became a pure view (bind on resume,
+unbind on pause), re-entering mid-run re-PULLed the session from the
+server API through the same upsert pipeline (never re-POSTed, never
+restarted a healthy stream), only the stop button aborted, and a
+swipe-kill mid-run recovered on next launch via a persisted run-state
+file. The Σ pill became a CONTEXT DEPTH meter ("48k / 200k · 24%"),
+the $ meter untouched; the edit shower became a compact live tree and
+the peek live-updated during runs. The suite caught a real dormant bug:
+the run-time model-not-found matcher checked the wrong token, so that
+self-heal trigger could never fire.
+
+## What was in v0.22.0 (P22 — the native-layer audit)
 
 The ask was blunt: "are you sure the native code is tested? most problems
 are coming from there." Fair — so this release EXECUTED the native layer
@@ -330,5 +391,8 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P5 model picker + stop + session mgmt | shipped |
 | P6 wizard + bundled binary + in-app keys | shipped |
 | P7 chat-first rewrite, no proot, crash-proofing | shipped |
-| P8 project deck, per-project sandboxes, motion design | **current** |
+| P8 project deck, per-project sandboxes, motion design | shipped |
+| P9–P24 streaming polish, self-healing, native audit, flush isolation | shipped |
+| P25 runs outlive the chat (RunHub, context-depth pill, live tree) | shipped |
+| P26 evergreen: pinned live tree, back navigation, resume re-sync, catalog try-anyway, month/year caps | **current** |
 | Next: on-device toolchain (clang) import path | planned |
