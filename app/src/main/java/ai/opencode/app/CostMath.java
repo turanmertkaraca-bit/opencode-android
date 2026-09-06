@@ -88,9 +88,19 @@ public final class CostMath {
      * The quiet hint line above the composer. Contract:
      *   no new content (no text, no attaches)            → ""  (hidden)
      *   tokens only (price unknown / free)               → "≈ 1.2k new · ctx 48k"
-     *   priced                                           → "≈ 1.2k new · next ≈ $0.0142 · ctx 48k"
+     *   priced                                           → "≈ 1.2k new · next $0.0142 · ctx 48k"
      *   free model with a known 0 price                  → "… · free model"
-     *   ctx ≥ 50% of the window                          → " · compact to pay less"
+     *   ctx ≥ 50% of the window                          → " · /compact saves"
+     *
+     * P30 clipping fix: the field reported the line "clipping to the other
+     * side of the UI". Three coordinated changes — the layout left-aligns
+     * the line with the input well (it used to hug the far right edge,
+     * visually sliding out of the composer) and ellipsizes as a last
+     * resort; THIS format was shortened so the ellipsis never fires in
+     * practice. Budget: the worst realistic line
+     * "≈ 12.5k new · next $0.1420 · ctx 480k · /compact saves" is 54
+     * chars ≈ 324dp at 10sp mono — inside a 360dp screen minus the
+     * composer's 24dp padding. Pinned by a length test.
      * The Σ pill keeps its exact protected format; this line never feeds it.
      */
     public static String hintLine(long newTok, long ctxTok, double cost,
@@ -99,11 +109,11 @@ public final class CostMath {
         StringBuilder b = new StringBuilder();
         b.append("≈ ").append(compact(Resilience.fmtTok(newTok))).append(" new");
         if (priceKnown) {
-            if (cost > 0) b.append(" · next ≈ ").append(Resilience.fmtCost(cost));
+            if (cost > 0) b.append(" · next ").append(Resilience.fmtCost(cost));
             else b.append(" · free model");
         }
         if (ctxTok > 0) b.append(" · ctx ").append(compact(Resilience.fmtTok(ctxTok)));
-        if (windowPct(ctxTok, limit) >= 50) b.append(" · compact to pay less");
+        if (windowPct(ctxTok, limit) >= 50) b.append(" · /compact saves");
         return b.toString();
     }
 

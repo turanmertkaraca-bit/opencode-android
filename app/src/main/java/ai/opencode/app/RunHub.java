@@ -165,6 +165,50 @@ public final class RunHub implements ServerService.EventListener {
      *  busy flips — a double-tap must not queue two identical runs. */
     private static final AtomicBoolean sending = new AtomicBoolean(false);
 
+    /**
+     * P30 — per-session "the model has been TOLD this reply style" state.
+     * sessionId → the last style state announced into THAT session via a
+     * <system-reminder> note (TerseMode.wrap). Null/absent = this session
+     * never heard it (a fresh chat, or the app restarted — then the next
+     * send with terse ON re-announces once, a few tokens of honesty).
+     * LRU-capped at 64 sessions like every other per-session map here.
+     */
+    private static final java.util.Map<String, Boolean> styleTold =
+            new java.util.LinkedHashMap<String, Boolean>(16, 0.75f, false) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Boolean> e) {
+                    return size() > 64;
+                }
+            };
+
+    /** The terse preference — a plain app preference since P30. NEVER a
+     *  file in the project (the P29 AGENTS.md block leaked into git
+     *  diffs and other sessions; the field report killed that). */
+    private static boolean tersePref() {
+        try {
+            return appCtx.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .getBoolean("terse", false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Record that session sid now runs style state `state` (called only
+     *  after a POST that actually carried/omitted the note accordingly). */
+    private static void styleMark(String sid, boolean state) {
+        if (sid == null) return;
+        synchronized (styleTold) { styleTold.put(sid, state); }
+    }
+
+    /** P30: the session's style memory is void — the model must be
+     *  re-told on the next send. Used after /compact (the summary that
+     *  replaces the window is not guaranteed to carry the note) and by
+     *  tests. Pure bookkeeping, no I/O. */
+    public static void styleToldReset(String sid) {
+        if (sid == null) return;
+        synchronized (styleTold) { styleTold.remove(sid); }
+    }
+
     private static final Handler H = new Handler(Looper.getMainLooper());
     private static final ExecutorService IO = Executors.newCachedThreadPool();
     /** Permission replies — must NEVER wait on anything. */
@@ -1158,7 +1202,18 @@ public final class RunHub implements ServerService.EventListener {
                 lastPartTs = System.currentTimeMillis();
                 runSessionId = sid;               // THIS send owns busy now
                 setBusy(true);
-                List<String> bodies = buildBodies(text, Models.selected(appCtx), agent);
+                // P30: the terse preference rides THIS message as a
+                // <system-reminder> prefix when the session hasn't been
+                // told the current state — the mid-session toggle flip
+                // takes effect on the very next send (P29 waited for a
+                // new session; the field called it broken). One pref
+                // read per send, captured ONCE so wrap and mark agree.
+                final boolean tp = tersePref();
+                final Boolean told;
+                synchronized (styleTold) { told = styleTold.get(sid); }
+                List<String> bodies = buildBodies(
+                        TerseMode.wrap(text, tp, told),
+                        Models.selected(appCtx), agent);
                 Api.Resp r = null;
                 boolean modelDropped = false;
                 for (int i = 0; i < bodies.size(); i++) {
@@ -1204,6 +1259,7 @@ public final class RunHub implements ServerService.EventListener {
                 if (modelDropped)
                     sys("note: the server ignored the picked model for this "
                             + "message — it answered with its default model");
+                styleMark(sid, tp);              // P30: this session is in sync now
                 reconcile(r.body);
                 H.removeCallbacks(watchdog);
                 H.postDelayed(watchdog, 2000);
@@ -1237,7 +1293,15 @@ public final class RunHub implements ServerService.EventListener {
             try {
                 lastPartTs = System.currentTimeMillis();
                 setBusy(true);
-                List<String> bodies = buildBodies(q, Models.selected(appCtx), agent);
+                // P30: retries wrap like first sends — the failed original
+                // never marked the session (styleMark runs on success only),
+                // so the note rides exactly when needed and never doubles.
+                final boolean tp = tersePref();
+                final Boolean told;
+                synchronized (styleTold) { told = styleTold.get(sid); }
+                List<String> bodies = buildBodies(
+                        TerseMode.wrap(q, tp, told),
+                        Models.selected(appCtx), agent);
                 Api.Resp r = null;
                 for (String body : bodies) {
                     r = Api.post("/session/" + sid + "/message", body, 900_000);
@@ -1250,6 +1314,7 @@ public final class RunHub implements ServerService.EventListener {
                     setBusy(false);
                     return;
                 }
+                styleMark(sid, tp);              // P30
                 reconcile(r.body);
                 H.removeCallbacks(watchdog);
                 H.postDelayed(watchdog, 2000);
@@ -1296,14 +1361,20 @@ public final class RunHub implements ServerService.EventListener {
                 setBusy(true);
 
                 // ---- path 1: the server's own file part (raw pixels)
+                // P30: the style note rides the caption like any text send.
+                final boolean tp = tersePref();
+                final Boolean told;
+                synchronized (styleTold) { told = styleTold.get(sid); }
+                final String wireCap = TerseMode.wrap(cap2, tp, told);
                 Api.Resp r = null;
-                for (String body : buildImageBodies(cap2, dataUrl,
+                for (String body : buildImageBodies(wireCap, dataUrl,
                         Models.selected(appCtx), agent)) {
                     r = Api.post("/session/" + sid + "/message", body, 300_000);
                     if (r.ok()) break;
                 }
                 if (r != null && r.ok()) {
                     sys("◉ screenshot attached — the agent sees the pixels");
+                    styleMark(sid, tp);          // P30
                     reconcile(r.body);
                     H.removeCallbacks(watchdog);
                     H.postDelayed(watchdog, 2000);
@@ -1383,8 +1454,13 @@ public final class RunHub implements ServerService.EventListener {
                 setBusy(true);
 
                 // ---- path 1: the server's own file parts (raw pixels)
+                // P30: the style note rides the caption like any text send.
+                final boolean tp = tersePref();
+                final Boolean told;
+                synchronized (styleTold) { told = styleTold.get(sid); }
+                final String wireCap = TerseMode.wrap(cap, tp, told);
                 Api.Resp r = null;
-                for (String body : buildMultiImageBodies(cap, urls,
+                for (String body : buildMultiImageBodies(wireCap, urls,
                         Models.selected(appCtx), agent)) {
                     r = Api.post("/session/" + sid + "/message", body, 300_000);
                     if (r.ok()) break;
@@ -1393,6 +1469,7 @@ public final class RunHub implements ServerService.EventListener {
                     sys("◉ " + urls.size() + (urls.size() == 1
                             ? " image attached" : " images attached")
                             + " — the agent sees the pixels");
+                    styleMark(sid, tp);          // P30
                     reconcile(r.body);
                     H.removeCallbacks(watchdog);
                     H.postDelayed(watchdog, 2000);
@@ -1661,6 +1738,12 @@ public final class RunHub implements ServerService.EventListener {
                 if (r.ok()) {
                     sys("◈ compacting — the summary lands as a new message "
                             + "and the window frees up (history stays in the session)");
+                    // P30: the summary replaces the window and is not
+                    // guaranteed to carry the style note — void the
+                    // session's style memory so the next send re-announces
+                    // the terse preference once. Costs a few tokens; buys
+                    // certainty the style survives the compact.
+                    styleToldReset(sid);
                 } else {
                     sys("compact refused · HTTP " + r.status);
                 }

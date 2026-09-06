@@ -2648,76 +2648,57 @@ public class ChatActivity extends Activity
 
     // ----------------------------------------------------------- palette
 
-    // ---- P29: the terse token-saver (i-have-adhd / caveman pattern) ----
+    // ---- P29→P30: the terse token-saver (i-have-adhd / caveman pattern) ----
     // The community presets cut 40-65% of output tokens with one move:
-    // the agent ACTS more and TALKS less. The app writes that instruction
-    // as a managed block into the project's AGENTS.md (opencode's own
-    // project-rules mechanism) — zero per-message overhead, survives
-    // restarts, and the user's own AGENTS.md content is preserved.
+    // the agent ACTS more and TALKS less.
+    //
+    // P30 REDESIGN (field report): P29 wrote a managed block into the
+    // project's AGENTS.md — but opencode reads that file ONCE per session,
+    // so a mid-conversation flip did nothing until the next session (the
+    // feature "looked broken"), and the block lived inside the project
+    // folder, leaking the style into git diffs and other sessions. Now:
+    //   • the toggle is a plain app preference — no file writes, nothing
+    //     to commit, nothing project-wide, ever;
+    //   • the preference reaches the model as a <system-reminder> note
+    //     prepended to the user's NEXT message in THIS session
+    //     (RunHub.send → TerseMode.wrap) — live, one turn, no extra cost;
+    //   • this screen is honest about the timing: "applies from your
+    //     next message".
 
-    /** True when the serving project's AGENTS.md carries the managed block. */
+    /** The terse preference — app-wide, instant to read, no I/O on the
+     *  project folder. */
     private boolean terseOn() {
-        File dir = ServerService.servingDir();
-        if (dir == null) return false;
-        try {
-            return TerseMode.isOn(Api.readAll(new java.io.FileInputStream(
-                    new File(dir, "AGENTS.md"))));
-        } catch (Exception e) {
-            return false;                       // no file = off
-        }
+        return getSharedPreferences("oc", MODE_PRIVATE)
+                .getBoolean("terse", false);
     }
 
-    /** Toggle the managed block in AGENTS.md (project root), preserving
-     *  all user content around it. File I/O off-thread; one sys line. */
+    /** Flip the preference. The model is told with the NEXT message in
+     *  this chat (a <system-reminder> rides it — see TerseMode.wrap);
+     *  the UI says exactly that instead of implying an instant rewrite.
+     *  A run already streaming keeps its current style — the note lands
+     *  on the message after. No file is touched. */
     private void toggleTerse() {
-        final File dir = ServerService.servingDir();
-        if (dir == null || !dir.isDirectory()) {
-            sys("terse mode needs an open project — it edits AGENTS.md there");
-            return;
-        }
-        ex.execute(() -> {
-            Throwable t = Resilience.guard(() -> {
-                final File f = new File(dir, "AGENTS.md");
-                String cur = null;
-                try {
-                    cur = Api.readAll(new java.io.FileInputStream(f));
-                } catch (Exception ignored) {}
-                final boolean on = !TerseMode.isOn(cur);
-                final String next = TerseMode.merge(cur, on);
-                try {
-                    File tmp = new File(dir, "AGENTS.md.part");
-                    try (java.io.FileOutputStream o = new java.io.FileOutputStream(tmp)) {
-                        o.write(next.getBytes("UTF-8"));
-                    }
-                    if (f.exists()) f.delete();
-                    if (!tmp.renameTo(f)) throw new IOException("rename failed");
-                    ui.post(() -> {
-                        Theme.pop(chipMode);
-                        sys(on
-                            ? "◈ terse replies ON — AGENTS.md now asks the agent to "
-                              + "act first and skip the essay (community presets cut "
-                              + "output tokens 40-65%); your next message picks it up"
-                            : "terse replies OFF — the managed block was removed "
-                              + "from AGENTS.md (your own content untouched)");
-                    });
-                } catch (IOException ioe) {
-                    Trail.record(this, "terse toggle", ioe);
-                    ui.post(() -> sys("could not update AGENTS.md: "
-                            + ioe.getMessage()));
-                }
-            });
-            if (t != null) {
-                Trail.record(this, "terse toggle", t);
-                sys("terse toggle hit an internal error — contained");
-            }
-        });
+        final boolean on = !terseOn();
+        getSharedPreferences("oc", MODE_PRIVATE).edit()
+                .putBoolean("terse", on).apply();
+        Theme.pop(chipMode);
+        sys(on
+            ? "◈ terse replies ON — the agent is told with your NEXT message "
+              + "in this chat: act first, skip the essay (community presets "
+              + "cut output tokens 40-65%). AGENTS.md is never touched."
+            : "terse replies OFF — your next message in this chat tells the "
+              + "agent the normal style is back. AGENTS.md is never touched.");
+        Toast.makeText(this, on
+                ? "Terse replies on — applies from your next message"
+                : "Terse replies off — applies from your next message",
+                Toast.LENGTH_SHORT).show();
     }
 
     private void palette() {
         final String[] cmds = {
                 "New chat", "Sessions…", "Model…", "Toggle Build / Plan",
                 "Compact context (save tokens)",
-                terseOn() ? "Turn OFF terse replies (token saver)"
+                terseOn() ? "Turn OFF terse replies (next message)"
                           : "Turn ON terse replies (token saver)",
                 autoAllowOn() ? "Turn OFF unattended (auto-allow)"
                               : "Turn ON unattended (auto-allow)",
