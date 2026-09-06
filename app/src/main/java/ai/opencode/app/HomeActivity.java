@@ -23,6 +23,8 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * P8 — Home. The project deck.
@@ -45,6 +47,12 @@ public class HomeActivity extends Activity implements ServerService.Evt {
     private DeckView deck;
     private LinearLayout dots;
     private TextView dotDot, dotText;
+    /** P30: delete projects runs off-thread — a big tree must not freeze
+     *  the deck mid-swipe. Single-threaded like every other screen pool. */
+    private final ExecutorService ex = Executors.newSingleThreadExecutor();
+    /** P30: main-thread hop for the delete flow's UI steps. */
+    private final android.os.Handler ui = new android.os.Handler(
+            android.os.Looper.getMainLooper());
     private final List<Projects.P> cur = new ArrayList<>();
     private ObjectAnimator pulse;
     private boolean inited;
@@ -332,6 +340,9 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         }
         @Override public void onLongPress(int page) {
             if (page < 0 || page >= cur.size()) return;
+            // P30: the long-press answers the finger immediately — the
+            // sheet pops with a tick, never silence under it.
+            Theme.haptic(deck);
             cardActions(cur.get(page));
         }
     }
@@ -393,18 +404,97 @@ public class HomeActivity extends Activity implements ServerService.Evt {
     private void cardActions(Projects.P p) {
         new AlertDialog.Builder(this)
                 .setTitle(p.name)
-                .setItems(new String[]{"Open", "Rename", "Remove card"}, (d, w) -> {
+                .setItems(new String[]{"Open", "Rename", "Remove card",
+                                       "Delete project…"}, (d, w) -> {
                     if (w == 0) openProject(p);
                     else if (w == 1) renameProject(p);
-                    else {
+                    else if (w == 2) {
                         Projects.remove(this, p.id);
                         buildDeck();
                         Toast.makeText(this, "card removed (files untouched)",
                                 Toast.LENGTH_SHORT).show();
+                    } else {
+                        confirmDeleteProject(p);
                     }
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /**
+     * P30: "delete my projects by long pressing on them". Remove card
+     * only unpins — this DELETES: the folder and EVERY file inside it
+     * (code, notes, whatever the project holds). Three shields:
+     * the menu item is a separate entry from "Remove card", the dialog
+     * spells out the exact path and the irreversibility, and the pure
+     * ProjectDelete.safetyCheck refuses anything that could ever be more
+     * than a project (roots, mount points, the app's own dir, ancestors
+     * of it). If the folder is already gone, this degrades to removing
+     * the card — same result, no error theater.
+     */
+    private void confirmDeleteProject(Projects.P p) {
+        String guard = ProjectDelete.safetyCheck(p.path,
+                getFilesDir().getAbsolutePath());
+        if (guard != null) {
+            Toast.makeText(this, "cannot delete: " + guard,
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        File dir = new File(p.path);
+        if (!dir.isDirectory()) {                    // already gone — unpin
+            Projects.remove(this, p.id);
+            buildDeck();
+            Toast.makeText(this, "folder already gone — card removed",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final boolean serving = dir.equals(ServerService.servingDir());
+        new AlertDialog.Builder(this)
+                .setTitle("Delete " + p.name + "?")
+                .setMessage("Every file inside will be PERMANENTLY deleted:\n\n"
+                        + p.path + "\n\n"
+                        + "Code, notes, everything — this cannot be undone. "
+                        + "The card is removed too."
+                        + (serving ? "\n\nThis project is open right now — "
+                                   + "its server will be stopped first." : ""))
+                .setPositiveButton("Delete forever", (d, w) -> {
+                    Theme.haptic(deck);
+                    deleteProject(p, serving);
+                })
+                .setNegativeButton("Keep", null)
+                .show();
+    }
+
+    /** The delete itself: off-thread (a big tree must not freeze the
+     *  deck), stop-first when this is the project the server is serving,
+     *  then the guarded tree walk, then the card leaves the deck. */
+    private void deleteProject(Projects.P p, boolean serving) {
+        Toast.makeText(this, "deleting " + p.name + "…",
+                Toast.LENGTH_SHORT).show();
+        ex.execute(() -> {
+            Throwable t = Resilience.guard(() -> {
+                if (serving) {
+                    // the server holds a cwd inside the folder — stop it
+                    // BEFORE the files vanish under proot's feet
+                    ServerService.stopForDelete(this);
+                }
+                File dir = new File(p.path);
+                int n = ProjectDelete.deleteTree(dir);
+                ui.post(() -> {
+                    Projects.remove(this, p.id);
+                    buildDeck();
+                    Toast.makeText(this, n + " entries deleted — "
+                            + p.name + " is gone", Toast.LENGTH_LONG).show();
+                });
+            });
+            if (t != null) {
+                Trail.record(this, "project delete", t);
+                ui.post(() -> Toast.makeText(this,
+                        "delete failed: " + t.getMessage()
+                                + " — the card was kept",
+                        Toast.LENGTH_LONG).show());
+            }
+        });
     }
 
     private void renameProject(Projects.P p) {

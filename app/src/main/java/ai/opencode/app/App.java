@@ -81,6 +81,62 @@ public class App extends Application {
             } catch (Exception ignored) {}
             if (prev != null) prev.uncaughtException(t, e);
         });
+        // P30 upgrade migration: devices that toggled the terse style under
+        // P29 carry the app's MANAGED BLOCK inside the project's AGENTS.md —
+        // a chat style sitting in a file that git diffs and other sessions
+        // read as project rules. P30 keeps the style purely in-app, so any
+        // block we own is stripped from every known project ONCE per boot
+        // (strip is pure, idempotent, byte-preserving for user content;
+        // files without the block are never written). Off the main thread,
+        // Throwable-guarded — the migration can never delay or break boot.
+        final Thread mig = new Thread(() -> {
+            Throwable t2 = Resilience.guard(() -> stripTerseBlocks(App.this));
+            if (t2 != null) Trail.record(App.this, "p30 agents migration", t2);
+        }, "p30-agents-migration");
+        mig.setPriority(Thread.MIN_PRIORITY);
+        mig.start();
+    }
+
+    /** P30: remove the app's terse managed block from every known
+     *  project's AGENTS.md. Quiet no-op when the block is absent. Each
+     *  strip is recorded in the incident log so Diagnostics can show
+     *  exactly what the upgrade cleaned up (and that user content was
+     *  preserved). */
+    private static void stripTerseBlocks(Context c) {
+        java.util.List<Projects.P> ps = Projects.list(c);
+        for (Projects.P p : ps) {
+            if (p.path == null || p.path.isEmpty()) continue;
+            try {
+                File f = new File(p.path, "AGENTS.md");
+                if (!f.isFile() || !f.canWrite()) continue;
+                String cur = Api.readAll(new java.io.FileInputStream(f));
+                if (!TerseMode.isOn(cur)) continue;      // never touches clean files
+                String out = TerseMode.strip(cur);
+                File tmp = new File(p.path, "AGENTS.md.part");
+                try (FileOutputStream o = new FileOutputStream(tmp)) {
+                    o.write(out.getBytes("UTF-8"));
+                }
+                if (!f.delete() || !tmp.renameTo(f))
+                    throw new java.io.IOException("swap failed");
+                long mem = -1;
+                try {
+                    mem = Resilience.parseMemAvailableKb(Api.readAll(
+                            new java.io.FileInputStream("/proc/meminfo")));
+                } catch (Throwable ignored) {}
+                StringBuilder b = new StringBuilder();
+                b.append(Resilience.diagLine(System.currentTimeMillis(),
+                        "p30-migration",
+                        "stripped terse managed block from " + p.path
+                                + "/AGENTS.md (user content preserved)",
+                        mem)).append('\n');
+                File d = new File(c.getFilesDir(), "sandbox-diag.log");
+                try (OutputStream o2 = new FileOutputStream(d, true)) {
+                    o2.write(b.toString().getBytes("UTF-8"));
+                }
+            } catch (Exception ignored) {
+                // one unreadable/unwritable project never blocks the others
+            }
+        }
     }
 
     /** Currently resumed activity, or null. */

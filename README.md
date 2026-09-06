@@ -7,13 +7,14 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.29.0 — P29)
+## Install (v0.30.0 — P30)
 
-1. Grab `opencode-p29-v0.29.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p30-v0.30.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
-   sandbox → chat. **＋** adds a project. **⌘** is the command palette.
+   sandbox → chat. **＋** adds a project, **long-press** a card → Open /
+   Rename / Remove card / **Delete project**. **⌘** is the command palette.
 3. **⌘ → API keys** to paste keys; the OpenCode row (Zen + Go plans,
    console.opencode.ai) runs its 31 FREE models with no key at all.
 4. One-minute armor against Galaxy process kills: **Settings → keep alive →
@@ -21,6 +22,41 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 5. If anything ever dies: **Diagnostics → "last exits"** names the killer
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
+
+## What's in v0.30.0 (P30 — the setting that listens, the honest price line, the delete button)
+
+- **terse replies now work MID-conversation** — the field report was
+  exact: P29 wrote the toggle into the project's AGENTS.md, but opencode
+  reads that file once per session, so flipping it mid-chat changed
+  nothing (testers would call the feature broken) — and the block lived
+  inside the project folder, leaking a chat style into git diffs and
+  other sessions. Now the toggle is a pure app preference (nothing
+  written to your projects, ever) and the preference reaches the model
+  as a one-line `<system-reminder>` that rides your NEXT message in THAT
+  chat — live, one turn, no extra send, ~80 tokens once per change.
+  After /compact the session is re-told automatically. The UI says
+  exactly when it applies: "applies from your next message". Upgrading
+  strips P29's old managed block from your AGENTS.md files (user content
+  byte-preserved, logged in Diagnostics).
+- **the cost hint stopped clipping** — the price line above the input
+  was right-aligned and hard-clipped with no ellipsis, so it read like
+  it was escaping the UI ("cliping to the other side"). It now left-aligns
+  with the input well, the format is shorter
+  (`≈ 2k new · next $0.0500 · ctx 48k`), a length-bound test keeps the
+  worst case inside a 360dp screen, and the ≥50% nudge names the actual
+  button: `/compact saves`. Σ pill untouched.
+- **delete projects for real** — long-press a card → **Delete project…**:
+  a confirm dialog that spells out the exact path and the
+  irreversibility, then the folder and every file inside are gone and
+  the card leaves the deck. The guards are the feature: roots, mount
+  points, /sdcard, the app's own dir (and any ancestor of it) are
+  refused by a pure, tested checker; oversized trees abort BEFORE
+  touching a file; symlinks are unlinked, never followed; and deleting
+  the project the server is currently serving stops the server first.
+  ("Remove card" is still there and still only unpins.)
+- **feel** — the deck's long-press answers the finger with a haptic tick
+  before the action sheet pops, and the delete confirm carries its own
+  tick on "Delete forever".
 
 ## What's in v0.29.0 (P29 — no more double-open, a real photo tray, a price tag)
 
@@ -433,12 +469,22 @@ Project layout:
 
 ```
 app/src/main/java/ai/opencode/app/
-  App.java                  crash capture (last-crash.txt)          (P7)
+  App.java                  crash capture (last-crash.txt), P30 AGENTS.md
+                            migration (strips the app's old managed block)
   MainActivity.java         boot screen: unpack → server → chat     (P7)
+  HomeActivity.java         the project deck: cards, dir picker,
+                            long-press menu incl. Delete project    (P8/P30)
+  ProjectDelete.java        pure guarded recursive delete: path guards,
+                            count-first abort, symlink-safe         (P30)
   ChatActivity.java         the whole UI: transcript, ⌘ palette,
                             Build/Plan chip, collapsed reasoning +
                             tool cards, permission card, model and
                             session sheets, export                  (P7)
+  RunHub.java               run engine: sends, SSE, transcripts,
+                            live style injection (<system-reminder>) (P25/P30)
+  TerseMode.java            the terse token-saver: preference + live
+                            note + P29 managed-block strip (P29→P30)
+  CostMath.java             pure next-send pricing (the hint line)   (P29)
   KeysActivity.java         provider API keys → auth.json, custom
                             OpenAI-compatible providers             (P7)
   DiagnosticsActivity.java  server log, native shell, binary facts,
@@ -479,5 +525,8 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P9–P24 streaming polish, self-healing, native audit, flush isolation | shipped |
 | P25 runs outlive the chat (RunHub, context-depth pill, live tree) | shipped |
 | P26 evergreen: pinned live tree, back navigation, resume re-sync, catalog try-anyway, month/year caps | shipped |
-| P27 stable taps + resume-current + curated rootfs + AMOLED design system + tappable file mentions | **current** |
+| P27 stable taps + resume-current + curated rootfs + AMOLED design system + tappable file mentions | shipped |
+| P28 the P27 field report: tappable mentions, dots above composer, big-file-proof peek, faster boot | shipped |
+| P29 model-sheet double-open, photo tray, cost prediction, /compact, terse v1, feel pass | shipped |
+| P30 live setting injection (<system-reminder>), cost-hint clipping, long-press project delete | **current** |
 | Next: on-device toolchain (clang) import path | planned |

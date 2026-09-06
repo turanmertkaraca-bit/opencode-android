@@ -355,13 +355,23 @@
         <!-- P29: the cost-prediction hint — a quiet mono line that prices
              the NEXT send (typed text + tray images + the context the
              model re-reads) before the user commits to it. Filled by
-             syncCostHint(); gone when there is nothing to send. -->
+             syncCostHint(); gone when there is nothing to send.
+             P30: LEFT-aligned with the input well below it (gravity=end
+             made the line hug the far right edge — the field read it as
+             "clipping to the other side of the UI"), and ellipsize=end
+             as the last-resort clamp (maxLines=1 alone HARD-clips the
+             glyphs with no indicator; the P30 format shortening makes
+             the ellipsis unreachable in practice, this is the safety
+             net). End padding mirrors the hairline rhythm. -->
         <TextView
             android:id="@+id/costHint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="end"
+            android:gravity="start"
+            android:ellipsize="end"
             android:fontFamily="monospace"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
             android:paddingTop="6dp"
             android:textColor="@color/text_tertiary"
             android:textSize="10sp"

@@ -95,10 +95,12 @@ public class P29Test {
 
     @Test
     public void hintLine_contract() {
+        // P30 shortened the format (the field read the right-aligned
+        // longer line as "clipping"); the contract's SHAPE is unchanged:
         // nothing to send → hidden
         assertEquals("", CostMath.hintLine(0, 48_000, 0.05, true, 200_000));
         // priced send
-        assertEquals("≈ 2k new · next ≈ $0.0500 · ctx 48k",
+        assertEquals("≈ 2k new · next $0.0500 · ctx 48k",
                 CostMath.hintLine(2_000, 48_000, 0.05, true, 200_000));
         // known-free model says so instead of $0.0000
         assertEquals("≈ 2k new · free model · ctx 48k",
@@ -106,10 +108,10 @@ public class P29Test {
         // unknown price → tokens only
         assertEquals("≈ 2k new · ctx 48k",
                 CostMath.hintLine(2_000, 48_000, 0, false, 200_000));
-        // heavy window → the compact nudge (the user's "clear the context
-        // to make it cheaper")
+        // heavy window → the compact nudge, now naming the actual button
+        // (P30: /compact exists in the ⌘ palette and the Σ popover)
         String heavy = CostMath.hintLine(2_000, 120_000, 0.2, true, 200_000);
-        assertTrue(heavy.endsWith(" · compact to pay less"));
+        assertTrue(heavy.endsWith(" · /compact saves"));
     }
 
     @Test

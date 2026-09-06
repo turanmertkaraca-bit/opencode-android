@@ -160,6 +160,21 @@ public class ServerService extends Service {
         }, 1200);
     }
 
+    /**
+     * P30: stop the server and DO NOT spawn anything again — used when
+     * the project it serves is being deleted (the server's cwd must not
+     * have the floor pulled out from under proot mid-delete). Unlike
+     * restart(), the supervisor stays disarmed and servingDir is cleared
+     * so the next project open makes a clean switch. Safe from any thread.
+     */
+    public static void stopForDelete(Context c) {
+        userStop = true;
+        pendingRestart = false;
+        servingDir = null;
+        Intent stop = new Intent(c, ServerService.class).setAction(ACTION_STOP);
+        try { c.startService(stop); } catch (Exception ignored) {}
+    }
+
     public static void subscribe(Evt e) { listeners.add(e); }
     public static void unsubscribe(Evt e) { listeners.remove(e); }
     public static void subscribeEvents(EventListener e) { evtListeners.add(e); }
