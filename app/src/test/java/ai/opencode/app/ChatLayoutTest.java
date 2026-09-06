@@ -39,4 +39,42 @@ public class ChatLayoutTest {
                     a.findViewById(R.id.btnVision));
         }
     }
+
+    /** P29: the composer grew upward — the attachment tray and the cost
+     *  hint must exist and BOTH sit between the typing dots and the text
+     *  input (the tray is composerBar's FIRST child, the hint the LAST
+     *  before the input row). A regression that reorders the composer
+     *  (P28's drifting-dots lesson) fails here, not on the device. */
+    @Test
+    public void p29_composer_trayAndCostHint_declaredAboveInput() {
+        try (ActivityController<ChatActivity> ctl =
+                     Robolectric.buildActivity(ChatActivity.class)) {
+            ChatActivity a = ctl.setup().get();
+            View attachScroll = a.findViewById(R.id.attachScroll);
+            View costHint = a.findViewById(R.id.costHint);
+            View composerBar = a.findViewById(R.id.composerBar);
+            View input = a.findViewById(R.id.input);
+            View typingSlot = a.findViewById(R.id.typingSlot);
+            assertNotNull(attachScroll);
+            assertNotNull(costHint);
+            assertNotNull(composerBar);
+            assertNotNull(input);
+            assertEquals("tray hidden until an image is picked",
+                    View.GONE, attachScroll.getVisibility());
+            assertEquals("cost hint hidden until there is something to send",
+                    View.GONE, costHint.getVisibility());
+            // order in the root column: typing dots ABOVE the whole composer
+            android.view.ViewGroup root = (android.view.ViewGroup) composerBar.getParent();
+            assertTrue("typing dots above the composer",
+                    root.indexOfChild(typingSlot) < root.indexOfChild(composerBar));
+            // inside the composer: tray first, input row LAST
+            android.view.ViewGroup bar = (android.view.ViewGroup) composerBar;
+            assertEquals(attachScroll, bar.getChildAt(0));
+            View inputRow = (View) input.getParent();
+            assertEquals("the input row stays the composer's last child",
+                    bar.getChildCount() - 1, bar.indexOfChild(inputRow));
+            // and the hint sits directly ABOVE the input row
+            assertEquals(costHint, bar.getChildAt(bar.indexOfChild(inputRow) - 1));
+        }
+    }
 }

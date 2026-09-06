@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.28.0 — P28)
+## Install (v0.29.0 — P29)
 
-1. Grab `opencode-p28-v0.28.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p29-v0.29.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -21,6 +21,46 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 5. If anything ever dies: **Diagnostics → "last exits"** names the killer
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
+
+## What's in v0.29.0 (P29 — no more double-open, a real photo tray, a price tag)
+
+- **the model picker can't double-open** — the double-open was silence: a
+  tap started the catalog fetch with no feedback, so the next tap opened
+  a second dialog. Three layers now: an in-flight gate (a tap during the
+  load pops the chip and queues NOTHING), instant open from the cached
+  catalog with a background refresh that updates the OPEN sheet in place,
+  and a single-dialog guard in the sheet builder. The chip pulses
+  "loading models…" so silence is never the feedback.
+- **photos like a real chat app** — the ◉ chip multi-selects. Every
+  picked photo becomes a 64dp thumb with an ✕ in a tray above the
+  composer (add/remove with a haptic tick), and send ships ONE message
+  carrying every image as file parts — the agent sees them together, not
+  as N separate context trips. Server refuses pixels? The free vision
+  model describes EACH photo and the joined descriptions feed the agent.
+  Cap 6 per message; the composer text is the caption.
+- **the cost tag** — a quiet mono line above the input prices the NEXT
+  send live as you type: `≈ 2k new · next ≈ $0.0500 · ctx 48k`. Tokens
+  are estimated (ASCII ~4 chars/token, CJK ~1/char, images pixels/750
+  from the REAL decoded dims); the cost is the honest worst case (the
+  model re-reads the whole window; caching can only shrink the bill);
+  free models say "free model"; at ≥50% window it nudges
+  "compact to pay less". The Σ pill and the $ meter are untouched.
+- **/compact** — ⌘ palette → "Compact context (save tokens)" and a
+  ◈ Compact button in the Σ popover. POSTs `/session/{id}/summarize`
+  (route verified in the bundled binary's OpenAPI): the summary lands as
+  a normal streamed message, the window drains, history stays in
+  Sessions.
+- **terse replies (the token saver)** — the web-researched community
+  presets ("i-have-adhd", caveman: 40-65% fewer OUTPUT tokens) shipped
+  natively: ⌘ → "Turn ON terse replies (token saver)" writes a managed
+  block into the project's AGENTS.md — act first, no pleasantries, code
+  speaks, no summaries of the summary. Your own AGENTS.md content is
+  preserved byte-for-byte; OFF removes only our block.
+- **feel** — haptic ticks on the commit-y actions (send, chips, vision,
+  sessions, Σ, suggestions, attach, permission buttons) independent of
+  the animations toggle, and the input well gained the 1dp hairline every
+  other raised element already had — the one naked element in the design
+  language was the "something feels off" candidate.
 
 ## What's in v0.28.0 (P28 — the P27 field report, fixed)
 

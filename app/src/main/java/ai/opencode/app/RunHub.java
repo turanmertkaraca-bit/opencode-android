@@ -445,6 +445,17 @@ public final class RunHub implements ServerService.EventListener {
         return sel == null ? null : sel[0];
     }
 
+    /** P29: context tokens the NEXT turn re-reads — the exact numerator
+     *  the Σ pill uses (run high-water while busy, last turn otherwise).
+     *  Read-only view for the cost-prediction hint; the pill itself is
+     *  untouched. */
+    public static long ctxTokens() {
+        synchronized (LOCK) {
+            return (busy && cur.depthPeak > cur.lastAssistantTok)
+                    ? cur.depthPeak : cur.lastAssistantTok;
+        }
+    }
+
     private static String selModel() {
         String[] sel = Models.selected(appCtx);
         return sel == null ? null : sel[1];
@@ -1332,6 +1343,105 @@ public final class RunHub implements ServerService.EventListener {
         });
     }
 
+    /** P29: the multi-image send — the tray flow's network half. Every
+     *  picked photo rides ONE message (path 1: N file parts); if the
+     *  server refuses image parts, the free vision model describes EACH
+     *  photo and the joined descriptions feed the agent as one message.
+     *  Hub-owned like every send: outlives the chat screen. */
+    public static void sendWithAttachments(final List<File> files, final String text) {
+        if (files == null || files.isEmpty()) { send(text); return; }
+        if (busy || !sending.compareAndSet(false, true)) {
+            sys("wait for the current run to finish, then resend");
+            return;
+        }
+        final String cap = (text == null || text.trim().isEmpty())
+                ? (files.size() == 1 ? "what do you see here?"
+                                     : "what do you see in these " + files.size() + " images?")
+                : text.trim();
+        // one image bubble per file, in tray order
+        for (int i = 0; i < files.size(); i++) {
+            upsertImage(cur, "img" + System.currentTimeMillis() + "-" + i,
+                    null, files.get(i).getAbsolutePath(), cap, "user");
+        }
+        IO.execute(() -> {
+            try {
+                String sid = ensureSession();
+                if (sid == null) {
+                    sys("server not healthy yet — try again in a moment");
+                    return;
+                }
+                validateSelectedModel();
+                List<String> urls = new ArrayList<>();
+                for (File f : files) {
+                    urls.add(Vision.dataUrl(
+                            java.nio.file.Files.readAllBytes(f.toPath())));
+                }
+                lastUserText = cap;
+                runHadOutput = false;
+                lastPartTs = System.currentTimeMillis();
+                runSessionId = sid;               // THIS send owns busy now
+                setBusy(true);
+
+                // ---- path 1: the server's own file parts (raw pixels)
+                Api.Resp r = null;
+                for (String body : buildMultiImageBodies(cap, urls,
+                        Models.selected(appCtx), agent)) {
+                    r = Api.post("/session/" + sid + "/message", body, 300_000);
+                    if (r.ok()) break;
+                }
+                if (r != null && r.ok()) {
+                    sys("◉ " + urls.size() + (urls.size() == 1
+                            ? " image attached" : " images attached")
+                            + " — the agent sees the pixels");
+                    reconcile(r.body);
+                    H.removeCallbacks(watchdog);
+                    H.postDelayed(watchdog, 2000);
+                    return;
+                }
+
+                // ---- path 2: a FREE vision model describes each one
+                sys("◉ asking a free vision model to look…");
+                String bearer = Vision.zenKey(appCtx);
+                StringBuilder desc = new StringBuilder();
+                IOException last = null;
+                for (int i = 0; i < files.size(); i++) {
+                    byte[] bytes = java.nio.file.Files.readAllBytes(
+                            files.get(i).toPath());
+                    boolean got = false;
+                    for (int c = 0; c < Vision.CANDIDATES.length && !got; c++) {
+                        String[] m = Vision.modelAt(c);
+                        try {
+                            String d = Vision.describe(m[1], Vision.prompt(cap),
+                                    bytes, bearer, 45_000);
+                            if (files.size() > 1)
+                                desc.append("### image ").append(i + 1).append('\n');
+                            desc.append(d).append("\n\n");
+                            got = true;
+                        } catch (IOException e2) {
+                            last = e2;             // rotate to the next model
+                        }
+                    }
+                    if (!got) throw (last != null) ? last
+                            : new IOException("no model answered");
+                }
+                sys("◉ a free vision model saw " + files.size()
+                        + (files.size() == 1 ? " screenshot"
+                                             : " screenshots") + " — feeding the agent");
+                sendText(sid, cap + "\n\n[screenshot(s) shared by the user"
+                        + " · vision via free model]\n" + desc);
+            } catch (Exception e) {
+                sys("attachment send failed: " + e);
+                setBusy(false);
+            } catch (Throwable e) {
+                Trail.record(appCtx, "hub attachment send", e);
+                sys("attachment send hit an internal error — contained");
+                setBusy(false);
+            } finally {
+                sending.set(false);
+            }
+        });
+    }
+
     /** Server phrasing for a vanished model (verified P11 LIVE against
      *  v1.18.25). Fires at RUN time (HTTP 200!), so both the POST body
      *  and streamed errors must match it. */
@@ -1442,6 +1552,37 @@ public final class RunHub implements ServerService.EventListener {
         return new ArrayList<>(variants.values());
     }
 
+    /** buildBodies' sibling: text + N image file parts, same variant ladder.
+     *  P29 multi-attach: one message carries every picked photo, so the
+     *  agent sees them TOGETHER — the way a person attaches three pictures
+     *  in one bubble, not three bubbles with three trips through the
+     *  context. Pure — the JVM suite parses the parts back. */
+    static List<String> buildMultiImageBodies(String caption, List<String> dataUrls,
+                                              String[] sel, String agentMode) {
+        if (dataUrls == null || dataUrls.isEmpty())
+            return buildBodies(caption, sel, agentMode);
+        if (dataUrls.size() == 1)
+            return buildImageBodies(caption, dataUrls.get(0), sel, agentMode);
+        LinkedHashMap<String, String> variants = new LinkedHashMap<>();
+        StringBuilder files = new StringBuilder();
+        for (int i = 0; i < dataUrls.size(); i++) {
+            if (i > 0) files.append(',');
+            files.append("{\"type\":\"file\",\"mime\":\"image/jpeg\",\"url\":")
+                 .append(Json.quote(dataUrls.get(i))).append('}');
+        }
+        String text = "{\"type\":\"text\",\"text\":" + Json.quote(caption) + "}";
+        String model = sel == null ? null
+                : "\"model\":{\"providerID\":" + Json.quote(sel[0])
+                + ",\"modelID\":" + Json.quote(sel[1]) + "}";
+        String ag = "\"agent\":" + Json.quote(agentMode);
+        String parts = "\"parts\":[" + text + "," + files + "]";
+        if (model != null) variants.put("ma", "{" + model + "," + ag + "," + parts + "}");
+        if (model != null) variants.put("m", "{" + model + "," + parts + "}");
+        variants.put("a", "{" + ag + "," + parts + "}");
+        variants.put("bare", "{" + parts + "}");
+        return new ArrayList<>(variants.values());
+    }
+
     private static String ensureSession() {
         if (sessionId != null) return sessionId;
         if (!ServerService.healthy()) return null;
@@ -1485,6 +1626,50 @@ public final class RunHub implements ServerService.EventListener {
             runSessionId = null;
             setBusy(false);
             saveRunState();
+        });
+    }
+
+    /** P29: /compact — the server summarizes the session so the context
+     *  window (and every future turn's re-read cost) shrinks WITHOUT
+     *  losing the thread. Confirmed route in the bundled binary's OpenAPI:
+     *  POST /session/{id}/summarize. Body ladder mirrors send(): the
+     *  picked model first, then {} for the server default. The summary
+     *  lands as a normal streamed message, so the existing upsert
+     *  pipeline renders it and the Σ pill drains by itself — no polling,
+     *  no restart, nothing else touched. */
+    public static void compact() {
+        if (busy) {
+            sys("wait for the current run to finish, then compact");
+            return;
+        }
+        IO.execute(() -> {
+            try {
+                String sid = ensureSession();
+                if (sid == null) {
+                    sys("nothing to compact yet — send a message first");
+                    return;
+                }
+                String[] sel = Models.selected(appCtx);
+                String body = sel == null ? "{}"
+                        : "{\"providerID\":" + Json.quote(sel[0])
+                        + ",\"modelID\":" + Json.quote(sel[1]) + "}";
+                Api.Resp r = Api.post("/session/" + sid + "/summarize",
+                        body, 30_000);
+                if (!r.ok()) {
+                    r = Api.post("/session/" + sid + "/summarize", "{}", 30_000);
+                }
+                if (r.ok()) {
+                    sys("◈ compacting — the summary lands as a new message "
+                            + "and the window frees up (history stays in the session)");
+                } else {
+                    sys("compact refused · HTTP " + r.status);
+                }
+            } catch (Exception e) {
+                sys("compact failed: " + Resilience.prettyNetError(e));
+            } catch (Throwable t) {
+                Trail.record(appCtx, "hub compact", t);
+                sys("compact hit an internal error — contained");
+            }
         });
     }
 

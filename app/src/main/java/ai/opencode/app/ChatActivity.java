@@ -7,6 +7,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.widget.ImageView;
@@ -141,8 +142,32 @@ public class ChatActivity extends Activity
      *  the newest event's branch). Bounded; cleared on session resets. */
     private final java.util.Map<String, Boolean> dirState = new java.util.HashMap<>();
 
-    // ---- P17: vision ---------------------------------------------------
+    // ---- P17: vision — P29: the messenger-style ATTACHMENT TRAY ---------
+    // One picked image = one downscaled cache file + its decoded dims
+    // (for the cost estimate) + its tray thumb. Send ships them ALL in
+    // one message (RunHub.sendWithAttachments).
     private TextView btnVision;
+    private LinearLayout attachSlot;        // tray row inside the composer
+    private View attachScroll;
+    private TextView costHint;              // the next-send price line
+    /** One pending attachment: file + decoded dims. */
+    private static final class PendingImg {
+        final File file;
+        final int w, h;
+        PendingImg(File file, int w, int h) {
+            this.file = file; this.w = w; this.h = h;
+        }
+    }
+    private final List<PendingImg> pendingAttach = new ArrayList<>();
+    private final Map<String, Bitmap> attachThumbs = new HashMap<>();
+
+    // ---- P29: the model-sheet idiot guard. The field report: a tap
+    // starts the catalog load with NO feedback, so a second tap "opens the
+    // popup twice". One AtomicBoolean = only ONE fetch/one dialog ever in
+    // flight; taps during the load pulse the chip instead of queueing.
+    private final java.util.concurrent.atomic.AtomicBoolean modelsInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private ObjectAnimator chipPulse;
 
     // ---------------------------------------------------------- lifecycle
 
@@ -186,25 +211,58 @@ public class ChatActivity extends Activity
             overridePendingTransition(R.anim.fade_in, R.anim.slide_out_right);
         });
         btnSessions = findViewById(R.id.btnSessions);
-        if (btnSessions != null) btnSessions.setOnClickListener(v -> sessionsSheet());
+        if (btnSessions != null) btnSessions.setOnClickListener(v -> {
+            Theme.haptic(v);
+            sessionsSheet();
+        });
         emptyHero = findViewById(R.id.emptyHero);
         suggestBox = findViewById(R.id.suggestBox);
         btnVision = findViewById(R.id.btnVision);
-        if (btnVision != null) btnVision.setOnClickListener(v -> pickImage());
-        chipMode.setOnClickListener(v -> toggleMode());
-        chipModel.setOnClickListener(v -> modelSheet());
-        if (tvSpend != null) tvSpend.setOnClickListener(v -> spendPopover());   // P18
+        if (btnVision != null) btnVision.setOnClickListener(v -> {
+            Theme.haptic(v);
+            pickImage();
+        });
+        attachScroll = findViewById(R.id.attachScroll);
+        attachSlot = findViewById(R.id.attachSlot);
+        costHint = findViewById(R.id.costHint);
+        chipMode.setOnClickListener(v -> {
+            Theme.haptic(v);
+            toggleMode();
+        });
+        chipModel.setOnClickListener(v -> {
+            Theme.haptic(v);
+            modelSheet();
+        });
+        if (tvSpend != null) tvSpend.setOnClickListener(v -> {
+            Theme.haptic(v);
+            spendPopover();
+        });   // P18
         btnSend.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
             if (RunHub.busy()) {
                 RunHub.abort();              // P25: the ONLY abort path
             } else {
                 String q = input.getText().toString().trim();
-                if (q.isEmpty()) return;
-                input.setText("");
+                if (q.isEmpty() && pendingAttach.isEmpty()) return;
                 Theme.pop(btnSend);          // P8 micro-anim: the send button springs
-                RunHub.send(q);              // hub-owned: the run outlives this screen
+                if (!pendingAttach.isEmpty()) {
+                    List<PendingImg> ship = new ArrayList<>(pendingAttach);
+                    List<File> files = new ArrayList<>();
+                    for (PendingImg p : ship) files.add(p.file);
+                    clearAttach(false);      // tray clears; files live on for the hub
+                    input.setText("");
+                    RunHub.sendWithAttachments(files, q);   // P29: ONE message, N images
+                } else {
+                    input.setText("");
+                    RunHub.send(q);          // hub-owned: the run outlives this screen
+                }
             }
+        });
+        // P29: the price line tracks the message as it is typed.
+        input.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b2, int c) {}
+            public void onTextChanged(CharSequence s, int a, int b2, int c) {}
+            public void afterTextChanged(Editable s) { syncCostHint(); }
         });
         scroll.getViewTreeObserver().addOnScrollChangedListener(() -> {
             pinnedBottom = atBottom();
@@ -340,7 +398,10 @@ public class ChatActivity extends Activity
     }
 
     @Override public void hubSpend() {
-        ui.post(this::refreshServerUi);
+        ui.post(() -> {
+            refreshServerUi();
+            syncCostHint();        // P29: the price line tracks the live ctx depth
+        });
     }
 
     @Override public void hubTitle() {
@@ -379,13 +440,21 @@ public class ChatActivity extends Activity
         });
     }
 
-    /** P17: SAF image pick for the vision flow (no permission needed). */
+    /** P29: SAF image pick — ClipData carries EVERY picked photo; the
+     *  single-Uri fallback stays for pickers that ignore multi-select.
+     *  (No permission needed — the picker grants temporary read access.) */
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQ_IMAGE && resultCode == RESULT_OK
-                && data != null && data.getData() != null) {
-            confirmImage(data.getData());
+        if (requestCode != REQ_IMAGE || resultCode != RESULT_OK || data == null) return;
+        ClipData clip = data.getClipData();
+        if (clip != null && clip.getItemCount() > 0) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri u = clip.getItemAt(i).getUri();
+                if (u != null) addAttachFromUri(u);
+            }
+        } else if (data.getData() != null) {
+            addAttachFromUri(data.getData());
         }
     }
 
@@ -655,6 +724,7 @@ public class ChatActivity extends Activity
             c.setLayoutParams(lp);
             Theme.press(c);
             c.setOnClickListener(v -> {
+                Theme.haptic(v);
                 input.setText(idea[1]);
                 input.setSelection(idea[1].length());
                 input.requestFocus();
@@ -1504,73 +1574,181 @@ public class ChatActivity extends Activity
     }
 
     // ================================================= P17: vision / images
+    // P29 REWORK — the messenger flow the field asked for: select ONE OR
+    // MANY photos, they land as thumbs ABOVE the composer with an ✕ each,
+    // and the send button ships them all in ONE message with the typed
+    // text. The old per-image confirm sheet is gone — the composer text
+    // IS the caption, like every other chat app.
 
     private void pickImage() {
         try {
             Intent i = new Intent(Intent.ACTION_GET_CONTENT);
             i.addCategory(Intent.CATEGORY_OPENABLE);
             i.setType("image/*");
+            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);   // the whole point
             startActivityForResult(
-                    Intent.createChooser(i, "Share a screenshot with the agent"),
-                    REQ_IMAGE);
+                    Intent.createChooser(i, "Attach images"), REQ_IMAGE);
         } catch (Exception e) {
             Toast.makeText(this, "no image picker available", Toast.LENGTH_SHORT).show();
         }
     }
 
-    /** Downscale off-thread, then a tiny confirm sheet with a caption. */
-    private void confirmImage(final Uri uri) {
+    /**
+     * P29 tray intake: every picked Uri downscales off-thread, decodes its
+     * REAL post-downscale dims (the cost estimate uses actual pixels, not
+     * a guess), then joins the tray. Failures degrade to one sys line per
+     * bad image — the rest of the batch still lands.
+     */
+    private void addAttachFromUri(final Uri uri) {
         ex.execute(() -> {
             try {
                 final File jpg = Vision.downscale(this, uri);
-                ui.post(() -> {
-                    if (isFinishing() || isDestroyed()) return;
-                    LinearLayout box = new LinearLayout(this);
-                    box.setOrientation(LinearLayout.VERTICAL);
-                    int p = dp(18);
-                    box.setPadding(p, p, p, 0);
-
-                    ImageView prev = new ImageView(this);
-                    Bitmap bm = Vision.decodeBounded(jpg.getAbsolutePath(), 360);
-                    prev.setImageBitmap(bm);
-                    prev.setAdjustViewBounds(true);
-                    prev.setMaxHeight(dp(240));
-                    prev.setBackgroundResource(R.drawable.bg_code);
-                    box.addView(prev);
-
-                    final EditText cap = new EditText(this);
-                    cap.setHint("tell the agent what to look at (optional)");
-                    cap.setTextSize(14);
-                    cap.setTextColor(getColor(R.color.text_primary));
-                    cap.setHintTextColor(getColor(R.color.text_secondary));
-                    cap.setBackgroundResource(R.drawable.bg_input);
-                    cap.setSingleLine(false);
-                    cap.setMaxLines(3);
-                    box.addView(cap, new LinearLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT));
-                    ((LinearLayout.LayoutParams) cap.getLayoutParams()).topMargin = dp(12);
-
-                    new AlertDialog.Builder(this)
-                            .setTitle("Show the agent")
-                            .setView(box)
-                            .setPositiveButton("Send", (d, w) -> {
-                                String c2 = cap.getText().toString().trim();
-                                attachImage(jpg, c2);
-                            })
-                            .setNegativeButton("Cancel", null)
-                            .show();
-                });
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                BitmapFactory.decodeFile(jpg.getAbsolutePath(), o);
+                final int w = Math.max(1, o.outWidth), h = Math.max(1, o.outHeight);
+                ui.post(() -> addAttach(new PendingImg(jpg, w, h)));
             } catch (Exception e) {
                 ui.post(() -> sys("could not read that image: " + e.getMessage()));
             }
         });
     }
 
-    /** The full vision send — P25: the network half lives in RunHub now,
-     *  so an in-flight screenshot send also outlives this screen. */
-    private void attachImage(final File jpg, final String caption) {
-        RunHub.sendImage(jpg, caption);
+    /** Add to the tray (main thread). Cap enforced; duplicates skipped. */
+    private void addAttach(PendingImg p) {
+        if (isFinishing() || isDestroyed()) return;
+        if (pendingAttach.size() >= CostMath.MAX_ATTACHMENTS) {
+            Toast.makeText(this, "max " + CostMath.MAX_ATTACHMENTS
+                    + " images per message", Toast.LENGTH_SHORT).show();
+            p.file.delete();
+            return;
+        }
+        for (PendingImg q : pendingAttach) {
+            if (q.file.equals(p.file)) return;      // picker double-delivery
+        }
+        pendingAttach.add(p);
+        Theme.pop(attachSlot != null ? attachSlot : btnVision);
+        renderAttachTray();
+        syncCostHint();
+    }
+
+    /** Rebuild the tray (small N, user-action frequency — rebuild is fine;
+     *  nothing here ever runs during streaming). ✕ removes with a haptic. */
+    private void renderAttachTray() {
+        if (attachSlot == null || attachScroll == null) return;
+        attachSlot.removeAllViews();
+        for (int i = 0; i < pendingAttach.size(); i++) {
+            final PendingImg p = pendingAttach.get(i);
+            FrameLayout chip = new FrameLayout(this);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    dp(64), dp(64));
+            lp.rightMargin = dp(8);
+            chip.setLayoutParams(lp);
+
+            ImageView iv = new ImageView(this);
+            Bitmap bm = attachThumbs.get(p.file.getAbsolutePath());
+            if (bm == null) {
+                bm = Vision.decodeBounded(p.file.getAbsolutePath(), 128);
+                if (bm != null) attachThumbs.put(p.file.getAbsolutePath(), bm);
+            }
+            if (bm != null) iv.setImageBitmap(bm);
+            else iv.setImageResource(android.R.drawable.ic_menu_report_image);
+            iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            iv.setBackgroundResource(R.drawable.bg_code);
+            chip.addView(iv, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+
+            // the ✕ badge — the field's exact ask ("appear above chat with
+            // a cross sign so i can remove them")
+            TextView x = new TextView(this);
+            x.setText("✕");
+            x.setTextSize(11);
+            x.setTextColor(getColor(R.color.text_primary));
+            x.setGravity(Gravity.CENTER);
+            x.setBackgroundResource(R.drawable.bg_chip);
+            FrameLayout.LayoutParams xlp = new FrameLayout.LayoutParams(
+                    dp(20), dp(20), Gravity.TOP | Gravity.END);
+            xlp.rightMargin = dp(-6);
+            xlp.topMargin = dp(-6);
+            x.setLayoutParams(xlp);
+            x.setOnClickListener(v -> {
+                Theme.haptic(v);
+                pendingAttach.remove(p);
+                attachThumbs.remove(p.file.getAbsolutePath());
+                p.file.delete();
+                renderAttachTray();
+                syncCostHint();
+            });
+            chip.addView(x);
+            attachSlot.addView(chip);
+        }
+        attachScroll.setVisibility(pendingAttach.isEmpty()
+                ? View.GONE : View.VISIBLE);
+    }
+
+    /** Empty the tray. deleteFiles=false when the hub is about to read
+     *  them (send path); true when discarding picks. */
+    private void clearAttach(boolean deleteFiles) {
+        if (deleteFiles) for (PendingImg p : pendingAttach) p.file.delete();
+        pendingAttach.clear();
+        attachThumbs.clear();
+        renderAttachTray();
+        syncCostHint();
+    }
+
+    /**
+     * P29: the next-send price line — the user's "at least know what they
+     * are paying for so they can clear the context to make it cheaper".
+     * Math lives in CostMath (pure, pinned); this only assembles inputs:
+     * typed text + tray images + the hub's context depth + the picked
+     * model's input price. Hidden when there is nothing to send. The Σ
+     * pill is NEVER touched by this.
+     */
+    private void syncCostHint() {
+        if (costHint == null) return;
+        try {
+            String txt = input.getText().toString();
+            int n = pendingAttach.size();
+            if (txt.trim().isEmpty() && n == 0) {
+                if (costHint.getVisibility() != View.GONE)
+                    costHint.setVisibility(View.GONE);
+                return;
+            }
+            int avgW = 0, avgH = 0;
+            for (PendingImg p : pendingAttach) {
+                if (p.w > avgW) avgW = p.w;
+                if (p.h > avgH) avgH = p.h;
+            }
+            long ctx = RunHub.ctxTokens();
+            long newTok = CostMath.nextInputTokens(txt, n, avgW, avgH);
+            String[] sel = Models.selected(this);
+            boolean priceKnown = false;
+            double price = 0;
+            if (sel != null) {
+                Models.Mdl m = Models.find(Models.lastFetch(), sel[0], sel[1]);
+                if (m != null) {
+                    price = m.costIn;
+                    priceKnown = true;              // includes "known free"
+                }
+            }
+            double cost = CostMath.nextInputCost(ctx, newTok, price);
+            long limit = Models.resolveLimit(this, Models.lastFetch(),
+                    RunHub.selProviderPub(), RunHub.selModelPub());
+            String line = CostMath.hintLine(newTok, ctx, cost, priceKnown, limit);
+            if (line.isEmpty()) {
+                costHint.setVisibility(View.GONE);
+            } else {
+                costHint.setText(line);
+                if (costHint.getVisibility() != View.VISIBLE) {
+                    costHint.setVisibility(View.VISIBLE);
+                    costHint.setAlpha(0f);
+                    costHint.animate().alpha(1f).setDuration(140).start();
+                }
+            }
+        } catch (Exception e) {
+            costHint.setVisibility(View.GONE);      // a pricing hiccup never
+        }                                           // touches the composer
     }
     /** The image bubble — rounded frame, caption, tap for the big view. */
     private View buildImageView(RunHub.Row r) {
@@ -1676,6 +1854,15 @@ public class ChatActivity extends Activity
                           + (sumCost > 0 ? " · " + Resilience.fmtCost(sumCost) : "")))
                 .setMessage(m)
                 .setPositiveButton("Got it", null);
+        // P29: /compact lives where the cost question is asked. The window
+        // drains WITHOUT losing the thread — the middle ground between
+        // "keep paying" and "fresh chat".
+        if (lastTok > 0) {
+            b.setNeutralButton("◈ Compact", (d, w) -> {
+                Theme.haptic(tvSpend);
+                RunHub.compact();
+            });
+        }
         if (heavy) {
             b.setNegativeButton("＋ Fresh chat", (d, w) -> {
                 RunHub.loadSession(null);
@@ -2430,6 +2617,7 @@ public class ChatActivity extends Activity
         int p = dp(16);
         b.setPadding(p, dp(11), p, dp(11));
         b.setOnClickListener(v -> {
+            Theme.haptic(v);
             Theme.pop(b);
             if (id != null) answerPermission(id, response);
             else {
@@ -2460,9 +2648,77 @@ public class ChatActivity extends Activity
 
     // ----------------------------------------------------------- palette
 
+    // ---- P29: the terse token-saver (i-have-adhd / caveman pattern) ----
+    // The community presets cut 40-65% of output tokens with one move:
+    // the agent ACTS more and TALKS less. The app writes that instruction
+    // as a managed block into the project's AGENTS.md (opencode's own
+    // project-rules mechanism) — zero per-message overhead, survives
+    // restarts, and the user's own AGENTS.md content is preserved.
+
+    /** True when the serving project's AGENTS.md carries the managed block. */
+    private boolean terseOn() {
+        File dir = ServerService.servingDir();
+        if (dir == null) return false;
+        try {
+            return TerseMode.isOn(Api.readAll(new java.io.FileInputStream(
+                    new File(dir, "AGENTS.md"))));
+        } catch (Exception e) {
+            return false;                       // no file = off
+        }
+    }
+
+    /** Toggle the managed block in AGENTS.md (project root), preserving
+     *  all user content around it. File I/O off-thread; one sys line. */
+    private void toggleTerse() {
+        final File dir = ServerService.servingDir();
+        if (dir == null || !dir.isDirectory()) {
+            sys("terse mode needs an open project — it edits AGENTS.md there");
+            return;
+        }
+        ex.execute(() -> {
+            Throwable t = Resilience.guard(() -> {
+                final File f = new File(dir, "AGENTS.md");
+                String cur = null;
+                try {
+                    cur = Api.readAll(new java.io.FileInputStream(f));
+                } catch (Exception ignored) {}
+                final boolean on = !TerseMode.isOn(cur);
+                final String next = TerseMode.merge(cur, on);
+                try {
+                    File tmp = new File(dir, "AGENTS.md.part");
+                    try (java.io.FileOutputStream o = new java.io.FileOutputStream(tmp)) {
+                        o.write(next.getBytes("UTF-8"));
+                    }
+                    if (f.exists()) f.delete();
+                    if (!tmp.renameTo(f)) throw new IOException("rename failed");
+                    ui.post(() -> {
+                        Theme.pop(chipMode);
+                        sys(on
+                            ? "◈ terse replies ON — AGENTS.md now asks the agent to "
+                              + "act first and skip the essay (community presets cut "
+                              + "output tokens 40-65%); your next message picks it up"
+                            : "terse replies OFF — the managed block was removed "
+                              + "from AGENTS.md (your own content untouched)");
+                    });
+                } catch (IOException ioe) {
+                    Trail.record(this, "terse toggle", ioe);
+                    ui.post(() -> sys("could not update AGENTS.md: "
+                            + ioe.getMessage()));
+                }
+            });
+            if (t != null) {
+                Trail.record(this, "terse toggle", t);
+                sys("terse toggle hit an internal error — contained");
+            }
+        });
+    }
+
     private void palette() {
         final String[] cmds = {
                 "New chat", "Sessions…", "Model…", "Toggle Build / Plan",
+                "Compact context (save tokens)",
+                terseOn() ? "Turn OFF terse replies (token saver)"
+                          : "Turn ON terse replies (token saver)",
                 autoAllowOn() ? "Turn OFF unattended (auto-allow)"
                               : "Turn ON unattended (auto-allow)",
                 "Project files →", "Sandbox environment",
@@ -2526,6 +2782,11 @@ public class ChatActivity extends Activity
                 });
                 break;
             case "Toggle Build / Plan": toggleMode(); break;
+            case "Compact context (save tokens)":
+                RunHub.compact(); break;
+            case "Turn ON terse replies (token saver)":
+            case "Turn OFF terse replies (token saver)":
+                toggleTerse(); break;
             case "Turn ON unattended (auto-allow)":
             case "Turn OFF unattended (auto-allow)":
                 setAutoAllow(!autoAllowOn()); break;
@@ -2666,17 +2927,71 @@ public class ChatActivity extends Activity
     private boolean keysFromSheet;
 
     private void modelSheet() {
-        // P13: NO server gate anymore — the sheet opens regardless and shows
-        // what it sees ("server offline · bundled catalog") instead of
-        // dead-ending on a toast. The P11-era gate made the picker look
-        // broken whenever the server was still booting.
+        // P29 IDIOT-PROOFING — the field report: "if someone saw nothing
+        // happened this would cause them to click again, causing the model
+        // switch pop up to open twice." Three guards, in order:
+        //   1. IN-FLIGHT GUARD — a second tap while the catalog loads never
+        //      queues a second fetch/dialog; the chip visibly pops instead.
+        //   2. INSTANT OPEN — the last fetch is already in memory, so the
+        //      sheet opens NOW and a background refresh updates it in place
+        //      (the ↻ semantics the sheet already had). First-ever open
+        //      (nothing cached) falls to the loading chip + single fetch.
+        //   3. SINGLE DIALOG — showModels() refuses to build a second
+        //      dialog while one is showing; it refreshes the open one.
+        if (!modelsInFlight.compareAndSet(false, true)) {
+            Theme.pop(chipModel);            // "working on it" — visibly
+            return;
+        }
+        final List<Models.Prov> cached = Models.lastFetch();
+        final boolean openedFromCache = cached != null && !cached.isEmpty();
+        if (openedFromCache) {
+            showModels(cached);
+        } else {
+            chipLoading(true);
+        }
         ex.execute(() -> {
             Throwable t = Resilience.guard(() -> {
-                List<Models.Prov> provs = Models.fetch(this);
-                ui.post(() -> showModels(provs));
+                List<Models.Prov> fresh = Models.fetch(this);
+                ui.post(() -> {
+                    chipLoading(false);
+                    if (isFinishing() || isDestroyed()) return;
+                    if (openedFromCache) updateOpenModels(fresh);
+                    else showModels(fresh);
+                });
             });
             if (t != null) Trail.record(this, "model sheet", t);
+            modelsInFlight.set(false);
         });
+    }
+
+    /** P29: the chip's "the catalog is loading" state — the feedback the
+     *  missing half of the double-open bug. A gentle alpha pulse; the
+     *  normal text returns via refreshChips() when it ends. */
+    private void chipLoading(boolean on) {
+        if (chipModel == null) return;
+        if (on) {
+            chipModel.setText("loading models…");
+            if (chipPulse != null) { chipPulse.cancel(); chipPulse = null; }
+            if (Theme.motionOn(this)) {
+                chipPulse = ObjectAnimator.ofFloat(chipModel, "alpha", 1f, 0.45f);
+                chipPulse.setDuration(520);
+                chipPulse.setRepeatCount(ObjectAnimator.INFINITE);
+                chipPulse.setRepeatMode(ObjectAnimator.REVERSE);
+                chipPulse.start();
+            }
+        } else {
+            if (chipPulse != null) { chipPulse.cancel(); chipPulse = null; }
+            chipModel.setAlpha(1f);
+            refreshChips();
+        }
+    }
+
+    /** P29: refresh the ALREADY-OPEN sheet in place instead of stacking a
+     *  second dialog. If the user dismissed it meanwhile, do nothing. */
+    private void updateOpenModels(List<Models.Prov> fresh) {
+        if (modelDlg == null || !modelDlg.isShowing() || isFinishing()) return;
+        sheetProvs = fresh;
+        if (sheetRefill != null) sheetRefill.run();
     }
 
     /**
@@ -2698,6 +3013,12 @@ public class ChatActivity extends Activity
      */
     private void showModels(List<Models.Prov> provs) {
         if (isFinishing() || isDestroyed()) return;
+        // P29 guard 3: a sheet that is already showing is REFRESHED, never
+        // stacked — the double-open bug cannot survive its own race.
+        if (modelDlg != null && modelDlg.isShowing()) {
+            updateOpenModels(provs);
+            return;
+        }
         AlertDialog.Builder b = new AlertDialog.Builder(this);
         b.setTitle("Model · all providers");
         LinearLayout root = new LinearLayout(this);
