@@ -180,6 +180,19 @@ public final class Theme {
                 .setInterpolator(DECEL).start();
     }
 
+    /** P29: THE one haptic treatment — a tick on commit-y actions (send,
+     *  chip toggles, attach add/remove, compact). Deliberately independent
+     *  of the motion switch: haptics are not animation, and a dead-feeling
+     *  screen with animations off is worse than a tick. Contained: a
+     *  device without a vibrator just returns false internally. */
+    public static void haptic(View v) {
+        if (v == null) return;
+        try {
+            v.performHapticFeedback(
+                    android.view.HapticFeedbackConstants.VIRTUAL_KEY);
+        } catch (Exception ignored) {}
+    }
+
     /** Pop (overshoot) — send button, chips, mode toggles. */
     public static void pop(View v) {
         if (v == null) return;

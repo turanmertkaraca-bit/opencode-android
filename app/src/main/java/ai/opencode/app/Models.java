@@ -412,6 +412,19 @@ public final class Models {
         }
     }
 
+    /** P29: the full catalog row for (provider, id), or null — the cost
+     *  predictor reads pricing/context from here. Pure, null-safe. */
+    public static Mdl find(List<Prov> provs, String provider, String id) {
+        if (provs == null || provider == null || id == null) return null;
+        for (Prov p : provs) {
+            if (!provider.equals(p.id)) continue;
+            for (Mdl m : p.models) {
+                if (id.equals(m.id)) return m;
+            }
+        }
+        return null;
+    }
+
     /** True when (provider, id) exists AND the running server serves it.
      *  P15: back to the P12 rule — discovery (models.dev / bundled) entries
      *  do NOT pass, so validateSelectedModel() self-heals dead picks BEFORE

@@ -266,6 +266,26 @@
         android:paddingTop="8dp"
         android:paddingBottom="10dp">
 
+        <!-- P29: pending image attachments — the messenger-style tray.
+             One 64dp thumb per picked photo, an ✕ badge on each, gone
+             when empty. Filled by renderAttachTray(); the send button
+             ships every tray image in ONE message. -->
+        <HorizontalScrollView
+            android:id="@+id/attachScroll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:scrollbars="none"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:id="@+id/attachSlot"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingTop="2dp"
+                android:paddingBottom="4dp"/>
+        </HorizontalScrollView>
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -331,6 +351,22 @@
                 android:textColor="@color/accent_light"
                 android:textSize="17sp"/>
         </LinearLayout>
+
+        <!-- P29: the cost-prediction hint — a quiet mono line that prices
+             the NEXT send (typed text + tray images + the context the
+             model re-reads) before the user commits to it. Filled by
+             syncCostHint(); gone when there is nothing to send. -->
+        <TextView
+            android:id="@+id/costHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="end"
+            android:fontFamily="monospace"
+            android:paddingTop="6dp"
+            android:textColor="@color/text_tertiary"
+            android:textSize="10sp"
+            android:maxLines="1"
+            android:visibility="gone"/>
 
         <LinearLayout
             android:layout_width="match_parent"
