@@ -47,7 +47,7 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
   pinned by test: task root → open the deck explicitly, else a plain
   finish reveals it.
 - **Settings ESSENTIALS moved to the top** — the important toggles lived
-  below a scroll ("they have to scroll below to settings to see them"):
+  below a scroll, buried at the bottom of the screen:
   Interactive canvas (with a one-tap pre-typed chat hand-off), Credit
   limit, Default model, API keys, Unattended mode — now a top zone in
   their own accent-washed color family.
@@ -66,7 +66,7 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
 - **the theme change is INSTANT** — tapping a palette in Settings used to
   call `recreate()`: a whole-activity teardown + rebuild + window animation
-  — seconds of dead air ("takes a while and feels bad to wait"). The theme
+  — seconds of dead air on every switch. The theme
   now lands the same frame: save → apply → dismiss the sheet → rebuild the
   one view tree in place. The new palette is on screen before the sheet
   finishes its 180 ms slide-out.
@@ -78,11 +78,11 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
   compared the pref against the PROCESS-GLOBAL static, which Settings' own
   `apply()` had already updated — so no other screen could ever be "stale"
   and the sync never fired in the field (the source of the lingering
-  "parts of the ui is inconsistent"). The palette id now rides a
+  inconsistent-screens reports). The palette id now rides a
   per-screen decor stamp: every screen knows what it was built with,
   re-skins exactly once when the pref moves, and provably cannot loop.
-- **keys reach the sandbox by themselves** — the exact report: "the app
-  thinks i have no api key even tho it says i have it in api settings".
+- **keys reach the sandbox by themselves** — the exact report: the app
+  swearing there is no API key even though API settings shows one saved.
   Three layers fixed: (1) a CHANGED key now auto-restarts the sandbox (the
   old code only restarted for a FIRST-TIME key — an updated key left the
   running server serving the old value, so sends failed with key errors
@@ -100,7 +100,7 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
   model the server served last time stays bright and selectable, and a
   restart window can no longer flatten the catalog.
 - **the project long-press grew up** — the actions menu was the last
-  framework list box ("the same old android 4 style box"). It's the app's
+  framework list box — the grey Android-4 relic. It's the app's
   own sheet now: project name + mono path header, glyph rows (▸ Open ·
   ✎ Rename · ⌦ Remove card · ✕ Delete project… in the danger color),
   ripple + haptics, palette-owned end to end. The delete confirm shows the
@@ -198,7 +198,7 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
   byte-preserved, logged in Diagnostics).
 - **the cost hint stopped clipping** — the price line above the input
   was right-aligned and hard-clipped with no ellipsis, so it read like
-  it was escaping the UI ("cliping to the other side"). It now left-aligns
+  it was escaping the UI and spilling past the edge. It now left-aligns
   with the input well, the format is shorter
   (`≈ 2k new · next $0.0500 · ctx 48k`), a length-bound test keeps the
   worst case inside a 360dp screen, and the ≥50% nudge names the actual
@@ -254,16 +254,17 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
   sessions, Σ, suggestions, attach, permission buttons) independent of
   the animations toggle, and the input well gained the 1dp hairline every
   other raised element already had — the one naked element in the design
-  language was the "something feels off" candidate.
+  language was the one element that still felt off.
 
 ## What's in v0.28.0 (P28 — the P27 field report, fixed)
 
 P27 shipped the live card, the resume-current catch-up, AMOLED and the
-tappable mentions. The field report on P28's plate: "clicking on these
-blue file links does nothing" (the existence detection was perfect — the
-TAP was dead), "the thinking animation is in the middle now instead of
-right above the chat box", and a fair question: "sure it won't glitch
-when the file is too big?" All three are fixed, plus two lightness wins:
+tappable mentions. The field report on P28's plate: tapped file links
+doing nothing (the existence detection was perfect — the
+TAP was dead), the thinking dots drifting into the middle of the
+transcript instead of sitting right above the chat box, and a fair
+question about big-file glitches. All three are fixed, plus two
+lightness wins:
 
 - **the file links actually open now** — a ClickableSpan only ever fires
   through a movement method, and the transcript rows (selectable text,
@@ -302,7 +303,7 @@ when the file is too big?" All three are fixed, plus two lightness wins:
 
 ## What's in v0.26.0 (P26 — the evergreen release)
 
-The field verdict on P25: "stable, can handle long runs" — with a
+The field verdict on P25: stable and able to handle long runs — with a
 short list. All of it fixed here:
 
 - **the live edit tree is actually visible now** — P25 inserted it as a
@@ -326,8 +327,8 @@ short list. All of it fixed here:
   in place (never wipes), and a pull that fires before the server
   answers arms a retry that runs the moment the server flips healthy —
   event-driven, zero polling.
-- **catalog models are selectable** — "why can't I select them?" was by
-  design (the free list rotates), but a hard refusal reads like a bug.
+- **catalog models are selectable** — the hard refusal was by
+  design (the free list rotates), but it read like a bug.
   A dim "· catalog" row now taps through: the run tries it, and if the
   server truly can't serve it, the model-not-found self-heal clears the
   pick and re-sends with the server default — one honest note, no dead
@@ -485,7 +486,8 @@ every claim was run.
 ## What's in v0.18.0 (P18 — the unstoppable sandbox)
 
 - **the sandbox heals itself** — when the opencode server process dies
-  (the field report: "chat and sandbox shuts off, cold boot again"), the
+  (the field report: chat and sandbox dying on background, cold boot
+  again), the
   service now auto-restarts it in place with growing backoff (1.5 s → 4 s
   → 8 s), kills any stale port squatter first so a zombie listener can
   never wedge the respawn, and the chat stays attached: a ♻ row says
