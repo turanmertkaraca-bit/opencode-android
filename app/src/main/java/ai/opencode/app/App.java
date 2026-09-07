@@ -21,6 +21,14 @@ public class App extends Application {
     // window ("shot" command) without any capture permission.
     private static volatile android.app.Activity TOP;
 
+    // P31: when the whole app went to the background (last activity
+    // paused). 0 = foreground. The auto-hibernate watchdog reads this.
+    private static volatile long bgSince;
+
+    /** Epoch ms of the last foreground→background transition, 0 if the
+     *  app is (or came back) in the foreground. */
+    public static long bgSince() { return bgSince; }
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -34,9 +42,15 @@ public class App extends Application {
         // screen. Subscribes itself to the service's SSE feed here.
         RunHub.init(this);
         registerActivityLifecycleCallbacks(new ActivityLifecycleCallbacks() {
-            @Override public void onActivityResumed(android.app.Activity a) { TOP = a; }
+            @Override public void onActivityResumed(android.app.Activity a) {
+                TOP = a;
+                bgSince = 0;                    // P31: back in the foreground
+            }
             @Override public void onActivityPaused(android.app.Activity a) {
-                if (TOP == a) TOP = null;
+                if (TOP == a) {
+                    TOP = null;
+                    bgSince = System.currentTimeMillis();   // P31
+                }
             }
             @Override public void onActivityCreated(android.app.Activity a, android.os.Bundle b) {}
             @Override public void onActivityStarted(android.app.Activity a) {}

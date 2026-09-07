@@ -95,6 +95,15 @@
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"
             android:label="Files"/>
 
+        <!-- P31: the interactive canvas — sandboxed WebView viewer for the
+             self-contained HTML pages the agent writes on request. JS on,
+             file/content access off, nothing auto-opens. -->
+        <activity
+            android:name=".CanvasActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|density|uiMode"
+            android:label="Interactive canvas"/>
+
         <service android:name=".ServerService" android:exported="false"/>
 
         <!-- P12 keep-alive: opt-in reboot relaunch (Settings → keep alive) -->

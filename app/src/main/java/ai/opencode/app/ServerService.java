@@ -450,12 +450,37 @@ public class ServerService extends Service {
             // log stop, and what was memory then” on disk for the next report.
             boolean died = false;
             int hbTick = 0;
+            boolean hibernateAnnounced = false;
             while (RUNNING && !userStop) {
                 try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
                 if (!p.isAlive()) { died = true; break; }
                 if (++hbTick >= 15) {
                     hbTick = 0;
                     appendDiag("hb", "server up · :" + Api.PORT);
+                }
+                // P31: AUTO-HIBERNATE. App in the background + no run active
+                // (any chat) + no permission waiting + quiet past the
+                // threshold → the sandbox stops ITSELF and RAM/battery go
+                // back to the phone. Never while work is in flight — runs
+                // outlive everything, that guarantee is untouched. Reopening
+                // boots the sandbox and lands in the last chat (Resume).
+                if (!hibernateAnnounced && state == ST_HEALTHY
+                        && hibernateEnabled()) {
+                    long due = hibernateDueAt();
+                    if (due > 0 && System.currentTimeMillis() >= due) {
+                        appendDiag("hibernate", "idle in background past "
+                                + hibernateMinutes() + " min, no runs, no "
+                                + "pending permissions — stopping the sandbox "
+                                + "(chats live on disk; reopening resumes)");
+                        main.post(() -> {
+                            stopServer();
+                            setState(ST_STOPPED,
+                                    "idle sleep — saved. Open the app to resume");
+                            stopForeground(true);
+                            stopSelf();
+                        });
+                        return;   // leave the supervisor loop quietly
+                    }
                 }
                 if (state != ST_HEALTHY) {
                     try {
@@ -491,6 +516,37 @@ public class ServerService extends Service {
         }
     }
 
+    // ---- P31: auto-hibernate helpers (the pure rule lives in Hibernate)
+
+    private boolean hibernateEnabled() {
+        try {
+            return getSharedPreferences("oc", MODE_PRIVATE)
+                    .getBoolean("hibernate", true);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private int hibernateMinutes() {
+        try {
+            return getSharedPreferences("oc", MODE_PRIVATE)
+                    .getInt("hibernate_min", Hibernate.DEFAULT_MINUTES);
+        } catch (Exception e) {
+            return Hibernate.DEFAULT_MINUTES;
+        }
+    }
+
+    /** When hibernation is due (epoch ms), 0 = not due / not applicable.
+     *  The rule is pure (Hibernate.due) — the inputs are gathered here. */
+    private long hibernateDueAt() {
+        long bg = App.bgSince();
+        if (bg <= 0) return 0;
+        boolean due = Hibernate.due(bg, System.currentTimeMillis(),
+                Hibernate.minutesToMs(hibernateMinutes()),
+                RunHub.busy(), pendingPermissions() > 0);
+        return due ? System.currentTimeMillis() : 0;
+    }
+
     private static String nz(String s, String fb) {
         return (s == null || s.isEmpty()) ? fb : s;
     }
@@ -499,6 +555,31 @@ public class ServerService extends Service {
      *  P18: “no Java crash file is written” was the field blocker — now
      *  every server death leaves exit code + last output + memory pressure
      *  on disk, so the NEXT report has ground truth. */
+    /** Static twin of appendDiag for callers outside the service instance
+     *  (Settings env-reset, App crash hook). Same 24 kB head-trim. */
+    public static void appendDiagStatic(Context c, String event, String detail) {
+        try {
+            long mem = -1;
+            try {
+                String mi = Api.readAll(new java.io.FileInputStream("/proc/meminfo"));
+                mem = Resilience.parseMemAvailableKb(mi);
+            } catch (Exception ignored) {}
+            File f = new File(c.getFilesDir(), "sandbox-diag.log");
+            String line = Resilience.diagLine(System.currentTimeMillis(), event,
+                    detail, mem) + "\n";
+            if (f.length() > 24 * 1024) {
+                String old = Api.readAll(new java.io.FileInputStream(f));
+                int cut = Math.max(0, old.length() - 12 * 1024);
+                cut = old.indexOf('\n', cut);
+                if (cut > 0) line = old.substring(cut + 1) + line;
+            }
+            java.io.FileOutputStream fo = new java.io.FileOutputStream(f,
+                    f.length() <= 24 * 1024);
+            fo.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            fo.close();
+        } catch (Exception ignored) {}
+    }
+
     private void appendDiag(String event, String detail) {
         try {
             long mem = -1;

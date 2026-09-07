@@ -18,7 +18,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicBoolean;
+
 
 /**
  * P25 — the run engine. Everything that makes an agent turn REAL now
@@ -122,6 +122,10 @@ public final class RunHub implements ServerService.EventListener {
         // MsgInfo entries.
         public double costSum;
         public long tokSum;
+        /** P31: which session this transcript belongs to (null for a
+         *  fresh chat). Lets message-level errors release the right run
+         *  when several run in parallel. */
+        public String sid;
     }
 
     private static final int TRIMMED_KEY_CAP = 4096;
@@ -145,11 +149,31 @@ public final class RunHub implements ServerService.EventListener {
 
     private static volatile String sessionId;
     private static volatile String sessionTitle;
+    /**
+     * P31 — PARALLEL RUNS. The busy flag is no longer one global gate:
+     * {@code runs} holds every session with a live run (sid → last part
+     * ts), so a script can stream in one chat while the user keeps
+     * working in another. The boolean {@code busy} stays as the cheap
+     * derived "any run at all" (wake lock, hibernate gate, notifications);
+     * the per-session truth is {@link #busyFor(String)}.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> runs =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Derived any-run flag — maintained by claimRun/releaseRun. */
     private static volatile boolean busy;
-    /** The session whose run is streaming (send target). */
-    private static volatile String runSessionId;
+    /** P31: sid of the last send per session (re-arm window anchor). */
+    private static final java.util.Map<String, Long> sentAt =
+            new java.util.LinkedHashMap<String, Long>(16, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Long> e) { return size() > 64; }
+            };
+    /** P31: sid → when that session's run last ended CLEANLY (idle). */
+    private static final java.util.Map<String, Long> idledAt =
+            new java.util.LinkedHashMap<String, Long>(16, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Long> e) { return size() > 64; }
+            };
     private static volatile String agent = "build";   // Tab parity: build <-> plan
-    private static volatile long lastPartTs;
     private static volatile String lastUserText;
     private static volatile boolean runHadOutput;
     private static volatile boolean modelFixRetried;
@@ -161,10 +185,6 @@ public final class RunHub implements ServerService.EventListener {
      *  that used to sit "loading" on an empty transcript now fills
      *  itself the moment the server answers. Event-driven, zero polling. */
     private static volatile boolean replayNeeded;
-    /** P22 latch: ensureSession + model validation do network I/O before
-     *  busy flips — a double-tap must not queue two identical runs. */
-    private static final AtomicBoolean sending = new AtomicBoolean(false);
-
     /**
      * P30 — per-session "the model has been TOLD this reply style" state.
      * sessionId → the last style state announced into THAT session via a
@@ -180,6 +200,165 @@ public final class RunHub implements ServerService.EventListener {
                     return size() > 64;
                 }
             };
+
+    // ------------------------------------------------ P31: run claiming
+
+    /**
+     * Claim a run slot for sid (P31 parallel runs). The claim IS the
+     * double-tap latch AND the per-session busy state: a second send to
+     * the same session sees CLAIM_BUSY; a send to any session once three
+     * run in parallel sees CLAIM_CAP. Atomic check-and-put. Returns a
+     * RunBook.CLAIM_* code.
+     */
+    private static int claimRun(String sid) {
+        if (sid == null || sid.isEmpty()) return RunBook.CLAIM_BUSY;
+        int verdict;
+        synchronized (runs) {
+            List<String> snapshot = new ArrayList<>(runs.keySet());
+            verdict = RunBook.claim(snapshot, sid, RunBook.MAX_PARALLEL);
+            if (verdict == RunBook.CLAIM_OK)
+                runs.put(sid, System.currentTimeMillis());
+        }
+        if (verdict != RunBook.CLAIM_OK) return verdict;
+        synchronized (sentAt) { sentAt.put(sid, System.currentTimeMillis()); }
+        synchronized (LOCK) {
+            Tx t = txnFor(sid);
+            t.depthPeak = t.lastAssistantTok;   // P27: peak is per-run
+        }
+        boolean was = busy;
+        busy = true;
+        if (!was) startEditWatch();             // the shared edit feed serves every run
+        notifyBusy();
+        saveRunState();
+        return RunBook.CLAIM_OK;
+    }
+
+    /** Release sid's run slot. settle=true = the run ENDED cleanly (idle)
+     *  and must never re-arm from stale parts; false = we merely stopped
+     *  tracking it locally (abort, failed send, quiet-end watchdog). */
+    private static void releaseRun(String sid, boolean settle) {
+        if (sid == null) return;
+        runs.remove(sid);
+        if (settle) {
+            synchronized (idledAt) { idledAt.put(sid, System.currentTimeMillis()); }
+        }
+        if (runs.isEmpty()) {
+            busy = false;
+            stopEditWatch();
+            main(RunHub::settleBusyUi);
+        }
+        notifyBusy();
+        saveRunState();
+    }
+
+    /** Touch the run's liveness timestamp (every streamed part). */
+    private static void touchRun(String sid) {
+        if (sid == null) return;
+        Long prev = runs.get(sid);
+        if (prev != null) runs.put(sid, System.currentTimeMillis());
+    }
+
+    /** Snapshot views for the pure re-arm rule (RunBook.shouldRearm). */
+    private static java.util.Map<String, Long> sentAtMap() {
+        synchronized (sentAt) { return new java.util.HashMap<>(sentAt); }
+    }
+    private static java.util.Map<String, Long> idledAtMap() {
+        synchronized (idledAt) { return new java.util.HashMap<>(idledAt); }
+    }
+
+    /** P31 test hooks — the suite pins the claim rules from a clean state. */
+    static void clearRunsForTest() {
+        runs.clear();
+        busy = false;
+        synchronized (sentAt) { sentAt.clear(); }
+        synchronized (idledAt) { idledAt.clear(); }
+    }
+    static void putRunForTest(String sid) { runs.put(sid, System.currentTimeMillis()); busy = true; }
+
+    // -------------------------------------------------- P31: public state
+
+    /** True when THIS session has a live run (per-chat busy). */
+    public static boolean busyFor(String sid) {
+        return sid != null && runs.containsKey(sid);
+    }
+
+    /** The displayed (or last-displayed) session id, or null for a fresh chat. */
+    public static String displayedSession() { return sessionId; }
+
+    /** How many runs are live right now (across all sessions). */
+    public static int runningCount() { return runs.size(); }
+
+    /** True when any session OTHER than sid has a live run. */
+    public static boolean othersRunning(String sid) {
+        for (String s : runs.keySet()) if (!s.equals(sid)) return true;
+        return false;
+    }
+
+    /** P31 — the all-time credit counter (this device). Moved by the same
+     *  delta logic as the session sums, but only for LIVE assistant
+     *  messages (replays book nothing), persisted to "oc"/"spend_total"
+     *  on every change so a cap survives restarts. The CAP lives in the
+     *  "spend_cap" pref; the rules are pure (CreditLimit). */
+    private static volatile double spendTotal;
+    private static volatile boolean spendLoaded;
+
+    private static void loadSpendTotal() {
+        if (spendLoaded) return;
+        synchronized (RunHub.class) {
+            if (spendLoaded) return;
+            try {
+                String s = appCtx.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                        .getString("spend_total", null);
+                spendTotal = s == null ? 0 : Double.parseDouble(s);
+            } catch (Exception ignored) {
+                spendTotal = 0;
+            }
+            spendLoaded = true;
+        }
+    }
+
+    private static void spendDelta(double d) {
+        if (d == 0) return;
+        loadSpendTotal();
+        spendTotal = Math.max(0, spendTotal + d);   // a correction can lower it
+        try {
+            appCtx.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
+                    .putString("spend_total", String.valueOf(spendTotal)).apply();
+        } catch (Exception ignored) {}
+    }
+
+    /** All-time spend (this device) — the credit-limit numerator. */
+    public static double spendTotal() {
+        loadSpendTotal();
+        return spendTotal;
+    }
+
+    /** Manual reset (Settings → Safety). Never automatic — the user owns it. */
+    public static void resetSpendTotal() {
+        spendTotal = 0;
+        try {
+            appCtx.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
+                    .putString("spend_total", "0").apply();
+        } catch (Exception ignored) {}
+    }
+
+    /** The configured cap (0 = no limit), parsed once per read — cheap. */
+    public static double spendCap() {
+        try {
+            return CreditLimit.parseCap(appCtx
+                    .getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .getString("spend_cap", ""));
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /** The enforceable credit check — true when spending must be refused. */
+    private static boolean creditBlocked() {
+        double cap = spendCap();
+        if (cap <= 0) return false;
+        return CreditLimit.verdict(spendTotal(), cap) == CreditLimit.BLOCK;
+    }
 
     /** The terse preference — a plain app preference since P30. NEVER a
      *  file in the project (the P29 AGENTS.md block leaked into git
@@ -404,7 +583,7 @@ public final class RunHub implements ServerService.EventListener {
         if (s.busy) {
             interruptedNotePending = true;
             busy = false;                       // never boot into a wedged run
-            runSessionId = null;
+            runs.clear();                       // P31: no phantom slots either
             lastUserText = null;
             saveRunState();                     // clear the busy flag NOW
         }
@@ -469,7 +648,7 @@ public final class RunHub implements ServerService.EventListener {
     public static String ctxPillLine() {
         long last;
         synchronized (LOCK) {
-            last = (busy && cur.depthPeak > cur.lastAssistantTok)
+            last = (busyFor(sessionId) && cur.depthPeak > cur.lastAssistantTok)
                     ? cur.depthPeak : cur.lastAssistantTok;
         }
         String meter = Resilience.contextMeter(last, Models.resolveLimit(
@@ -495,7 +674,7 @@ public final class RunHub implements ServerService.EventListener {
      *  untouched. */
     public static long ctxTokens() {
         synchronized (LOCK) {
-            return (busy && cur.depthPeak > cur.lastAssistantTok)
+            return (busyFor(sessionId) && cur.depthPeak > cur.lastAssistantTok)
                     ? cur.depthPeak : cur.lastAssistantTok;
         }
     }
@@ -604,26 +783,34 @@ public final class RunHub implements ServerService.EventListener {
             if ("message.part.updated".equals(type)) {
                 Map<String, Object> part = Json.map(props, "part");
                 if (part != null) {
+                    String psid0 = Json.str(part, "sessionID");
+                    touchRun(psid0);              // P31: this run is alive NOW
                     String pt = Json.str(part, "type");
                     if (busy && ("text".equals(pt) || "reasoning".equals(pt)))
                         runHadOutput = true;
                     applyPart(part, null);
-                    // P19 self-heal: parts for the RUNNING session mean the
-                    // run is alive even if we think otherwise. Re-arm busy.
-                    String psid = Json.str(part, "sessionID");
-                    if (!busy && runSessionId != null && runSessionId.equals(psid)) {
-                        setBusy(true);
+                    // P19 self-heal, generalized (P31): parts for a session
+                    // we sent to recently — but which never cleanly idled —
+                    // mean its run is alive even if we think otherwise.
+                    // Re-arm THAT session's run (any session, not just one).
+                    String psid = psid0;
+                    if (psid != null && !busyFor(psid)
+                            && RunBook.shouldRearm(sentAtMap(), idledAtMap(),
+                                    psid, System.currentTimeMillis(),
+                                    RunBook.REARM_WINDOW_MS)) {
+                        claimRun(psid);
                         H.removeCallbacks(watchdog);
                         H.postDelayed(watchdog, 2000);
                         if (sessionId != null && !sessionId.equals(psid))
-                            sys("a run is still streaming in another session — "
-                                    + "■ stops it");
+                            sys("a run is streaming in another chat — "
+                                    + "Sessions → long-press → Stop ends it");
                     }
                 }
             } else if ("message.updated".equals(type)) {
                 Map<String, Object> minfo = Json.map(props, "info");
                 if (minfo != null) {
-                    applyMessageInfo(txnFor(Json.str(minfo, "sessionID")), minfo);
+                    applyMessageInfo(txnFor(Json.str(minfo, "sessionID")),
+                            minfo, true);          // P31: live SSE → spend counts
                 }
             } else if ("session.updated".equals(type)) {
                 Map<String, Object> info = Json.map(props, "info");
@@ -637,19 +824,25 @@ public final class RunHub implements ServerService.EventListener {
                 }
             } else if ("session.idle".equals(type)) {
                 String sid = Json.str(props, "sessionID");
-                // P25: only the RUNNING session's idle settles busy — a
-                // displayed-but-idle session must never park another
-                // session's live run.
-                if (sid == null || sid.equals(runSessionId)) {
-                    setBusy(false);
-                    runSessionId = null;      // the run truly ended
-                    saveRunState();
+                // P25→P31: a session's idle releases THAT session's run —
+                // and only that one. Other sessions' runs are untouched.
+                if (sid == null) {
+                    // defensive: an idle without a session releases all
+                    for (String s : new ArrayList<>(runs.keySet()))
+                        releaseRun(s, true);
+                } else if (busyFor(sid)) {
+                    releaseRun(sid, true);        // the run truly ended
                 }
             } else if ("session.error".equals(type)) {
                 Map<String, Object> e = Json.map(props, "error");
                 String m = e != null ? Json.str(e, "message") : null;
                 if (m == null) m = Json.findErrorText(props, 0);
                 String raw = String.valueOf(props);
+                // P31: the erroring session (best effort — some payloads
+                // carry no sid; then a lone run is unambiguous).
+                String esid = Json.str(props, "sessionID");
+                if (esid == null && runs.size() == 1)
+                    esid = runs.keySet().iterator().next();
                 if (isModelNotFound(raw + " " + m)) {
                     // P11 self-heal: run-time Model not found (the POST itself
                     // returned 200) — drop the stale pick so the NEXT send
@@ -658,16 +851,19 @@ public final class RunHub implements ServerService.EventListener {
                     err("model no longer available", "the picked model was "
                             + "removed from the server's catalog — selection "
                             + "cleared, send again (⌘ → Model to choose another)", raw);
+                    releaseRun(esid, false);
                 } else if (busy && !runHadOutput && !flakeRetried
-                        && lastUserText != null && isStreamFlake(raw + " " + m)) {
+                        && lastUserText != null && isStreamFlake(raw + " " + m)
+                        && esid != null) {
                     // P11: zen streams die with 504 idle-timeout on mobile
                     // networks; retry ONCE when nothing was rendered yet.
+                    // P31: only the erroring session's run retries, and only
+                    // when we can name it (with parallel runs a guess could
+                    // replay someone else's message into the wrong chat).
                     flakeRetried = true;
                     sys("⚠ the model stream dropped (" + nz(m, "network")
                             + ") — retrying once…");
-                    final String sid = runSessionId;
-                    if (sid != null) sendText(sid, lastUserText);
-                    else setBusy(false);
+                    sendText(esid, lastUserText);
                 } else {
                     err("session error", m, raw);
                     // P16: 401/402/api-key failures get the one line the
@@ -681,7 +877,7 @@ public final class RunHub implements ServerService.EventListener {
                                 : "⚠ key problem — this provider needs its API key "
                                   + "(⌘ → API keys). OpenCode Zen and Go keys are separate");
                     }
-                    setBusy(false);
+                    releaseRun(esid, false);
                 }
             } else if ("permission.asked".equals(type)
                     || "permission.updated".equals(type)
@@ -745,7 +941,7 @@ public final class RunHub implements ServerService.EventListener {
             if (type == null) return;
             String sid = Json.str(part, "sessionID");
             final Tx t = txnFor(sid);
-            lastPartTs = System.currentTimeMillis();
+            touchRun(sid);                      // P31: liveness per run
             String mid = Json.str(part, "messageID");
             if (mid == null) mid = "m" + Integer.toHexString(System.identityHashCode(part));
             String pid = Json.str(part, "id");
@@ -803,11 +999,15 @@ public final class RunHub implements ServerService.EventListener {
      *  session uses cur; anything else streams into (or creates) its
      *  archived Tx — visible the moment the user opens that session. */
     private static Tx txnFor(String sid) {
-        if (sid == null || sid.equals(sessionId)) return cur;
+        if (sid == null || sid.equals(sessionId)) {
+            if (cur.sid == null) cur.sid = sid;
+            return cur;
+        }
         synchronized (LOCK) {
             Tx t = archive.get(sid);
             if (t == null) {
                 t = new Tx();
+                t.sid = sid;
                 archive.put(sid, t);
             }
             evictArchive(sid);
@@ -815,13 +1015,14 @@ public final class RunHub implements ServerService.EventListener {
         }
     }
 
-    /** Shrink the archive, never evicting the queried session or a
-     *  session whose run is still streaming. */
+    /** Shrink the archive, never evicting the queried session or any
+     *  session whose run is still streaming (P31: parallel runs — the
+     *  archive must not drop a background chat that is mid-run). */
     private static void evictArchive(String protect) {
         while (archive.size() > ARCHIVE_CAP) {
             String victim = null;
             for (String k : archive.keySet()) {
-                if (!k.equals(protect) && !k.equals(runSessionId)) {
+                if (!k.equals(protect) && !runs.containsKey(k)) {
                     victim = k;
                     break;
                 }
@@ -1070,8 +1271,15 @@ public final class RunHub implements ServerService.EventListener {
     // ------------------------------------------------- message info
 
     /** message.updated / history items → token+cost bookkeeping for one
-     *  message, meta propagation onto its assistant row, error surfacing. */
+     *  message, meta propagation onto its assistant row, error surfacing.
+     *  live=true only for LIVE SSE events — replays (session open, resume
+     *  re-pull, POST reconcile) pass false so the all-time credit counter
+     *  never double-counts a cost it already recorded. */
     static void applyMessageInfo(final Tx t, Map<String, Object> info) {
+        applyMessageInfo(t, info, false);
+    }
+
+    static void applyMessageInfo(final Tx t, Map<String, Object> info, boolean live) {
         if (info == null) return;
         String mid = Json.str(info, "id");
         if (mid == null) return;
@@ -1119,6 +1327,11 @@ public final class RunHub implements ServerService.EventListener {
                 if (fTok > t.depthPeak) t.depthPeak = fTok;   // P27 high-water
             }
         }
+        // P31: the all-time credit counter moves by the same delta logic,
+        // but ONLY on live events — a replayed message (fresh MsgInfo at
+        // cost 0) would otherwise book its full cost again on every open.
+        // The delta itself is taken inside the main lambda where mi.cost
+        // is actually updated (single writer, no race).
         Map<String, Object> e = Json.map(info, "error");
         final String fErrName = e != null ? nz(Json.str(e, "name"), "error") : null;
         final String fErrMsg = e != null
@@ -1131,6 +1344,8 @@ public final class RunHub implements ServerService.EventListener {
         }
         final String fMid = mid;
         final String fMeta = meta;
+        final boolean fLive = live;
+        final boolean fAssistant = "assistant".equals(role);
         if (meta != null || e != null) main(() -> {
             boolean showError;
             synchronized (LOCK) {
@@ -1141,8 +1356,14 @@ public final class RunHub implements ServerService.EventListener {
                     // P26: move the totals by DELTA — safe for re-reported
                     // (cumulative or corrected) values, and the eviction
                     // below can never lose a cent/token already counted.
-                    t.costSum += fCost - mi.cost;
+                    double dCost = fCost - mi.cost;
+                    t.costSum += dCost;
                     t.tokSum += fTok - mi.tok;
+                    // P31: the all-time credit counter rides the SAME delta
+                    // (single writer) but only for live, assistant messages
+                    // — replays book nothing (their cost was counted when
+                    // the event first arrived).
+                    if (fLive && fAssistant) spendDelta(dCost);
                     mi.cost = fCost;
                     mi.tok = fTok;
                     mi.cacheRead = fCacheRead;   // P27: Σ popover cache line
@@ -1174,7 +1395,7 @@ public final class RunHub implements ServerService.EventListener {
             if (showError) {
                 err("✕ " + fErrName, fErrMsg == null ? "" : fErrMsg,
                         String.valueOf(info));
-                setBusy(false);
+                releaseRun(t.sid, false);
             }
         });
     }
@@ -1184,24 +1405,36 @@ public final class RunHub implements ServerService.EventListener {
     /** The send button. Full orchestration, hub-owned: the POST holds an
      *  IO thread for the whole run, so the chat screen can close freely
      *  mid-turn. The run is never aborted from here — only the user's
-     *  stop button (abort) does that. */
+     *  stop button (abort) does that.
+     *  P31: parallel runs — the guard is per-SESSION (a busy OTHER chat
+     *  no longer blocks this one, up to RunBook.MAX_PARALLEL), and the
+     *  credit limit is enforced before anything is sent. */
     public static void send(String q) {
         final String text = q == null ? "" : q.trim();
-        if (text.isEmpty() || busy || !sending.compareAndSet(false, true)) return;
+        if (text.isEmpty()) return;
+        if (creditBlocked()) {
+            sys(CreditLimit.blockLine(spendTotal(), spendCap()));
+            return;
+        }
         lastUserText = text;
         runHadOutput = false;
         IO.execute(() -> {
+            String sid = ensureSession();
+            if (sid == null) {
+                sys("server not healthy yet — try again in a moment "
+                        + "(⌘ → Restart server if it persists)");
+                return;
+            }
+            int claim = claimRun(sid);
+            if (claim != RunBook.CLAIM_OK) {
+                sys(claim == RunBook.CLAIM_BUSY
+                        ? "this chat is still running — tap ■ to stop it first"
+                        : "parallel run limit (" + RunBook.MAX_PARALLEL
+                          + ") reached — let one finish or stop it");
+                return;
+            }
             try {
-                String sid = ensureSession();
-                if (sid == null) {
-                    sys("server not healthy yet — try again in a moment "
-                            + "(⌘ → Restart server if it persists)");
-                    return;
-                }
                 validateSelectedModel();          // P11: self-heal stale picks
-                lastPartTs = System.currentTimeMillis();
-                runSessionId = sid;               // THIS send owns busy now
-                setBusy(true);
                 // P30: the terse preference rides THIS message as a
                 // <system-reminder> prefix when the session hasn't been
                 // told the current state — the mid-session toggle flip
@@ -1253,7 +1486,7 @@ public final class RunHub implements ServerService.EventListener {
                         return;
                     }
                     err("send failed · HTTP " + st, detail, raw);
-                    setBusy(false);
+                    releaseRun(sid, false);
                     return;
                 }
                 if (modelDropped)
@@ -1275,24 +1508,22 @@ public final class RunHub implements ServerService.EventListener {
                 } else if (Resilience.isBrokenPipe(e)) {
                     sys("⚠ " + Resilience.prettyNetError(e)
                             + " — the sandbox restarts itself; resend this message in a moment");
-                    setBusy(false);
+                    releaseRun(sid, false);
                 } else {
                     Trail.record(appCtx, "hub send", e);
                     sys("send failed · " + Resilience.prettyNetError(e));
-                    setBusy(false);
+                    releaseRun(sid, false);
                 }
-            } finally {
-                sending.set(false);
             }
         });
     }
 
-    /** Fire-and-track the same text again (self-heal / stream-flake retry). */
+    /** Fire-and-track the same text again (self-heal / stream-flake retry).
+     *  P31: the caller's run claim is still held — retries never re-claim. */
     private static void sendText(final String sid, final String q) {
         IO.execute(() -> {
             try {
-                lastPartTs = System.currentTimeMillis();
-                setBusy(true);
+                touchRun(sid);
                 // P30: retries wrap like first sends — the failed original
                 // never marked the session (styleMark runs on success only),
                 // so the note rides exactly when needed and never doubles.
@@ -1311,7 +1542,7 @@ public final class RunHub implements ServerService.EventListener {
                     err("retry failed · HTTP " + (r == null ? 0 : r.status),
                             r == null ? "" : Json.findErrorText(Json.parse(r.body), 0),
                             r == null ? "" : r.body);
-                    setBusy(false);
+                    releaseRun(sid, false);
                     return;
                 }
                 styleMark(sid, tp);              // P30
@@ -1327,17 +1558,18 @@ public final class RunHub implements ServerService.EventListener {
                 } else {
                     Trail.record(appCtx, "hub send retry", e);
                     sys("retry failed · " + Resilience.prettyNetError(e));
-                    setBusy(false);
+                    releaseRun(sid, false);
                 }
             }
         });
     }
 
     /** Screenshot send (the vision flow's network half). The confirm
-     *  sheet stays in the view; the run is hub-owned like every other. */
+     *  sheet stays in the view; the run is hub-owned like every other.
+     *  P31: per-session claim + credit gate, like send(). */
     public static void sendImage(File jpg, String caption) {
-        if (busy || !sending.compareAndSet(false, true)) {
-            sys("wait for the current run to finish, then resend");
+        if (creditBlocked()) {
+            sys(CreditLimit.blockLine(spendTotal(), spendCap()));
             return;
         }
         final String cap2 = (caption == null || caption.isEmpty())
@@ -1345,20 +1577,25 @@ public final class RunHub implements ServerService.EventListener {
         final String key = "img" + System.currentTimeMillis();
         upsertImage(cur, key, null, jpg.getAbsolutePath(), cap2, "user");
         IO.execute(() -> {
+            String sid = ensureSession();
+            if (sid == null) {
+                sys("server not healthy yet — try again in a moment");
+                return;
+            }
+            int claim = claimRun(sid);
+            if (claim != RunBook.CLAIM_OK) {
+                sys(claim == RunBook.CLAIM_BUSY
+                        ? "this chat is still running — tap ■ to stop it first"
+                        : "parallel run limit reached — let one finish");
+                return;
+            }
             try {
-                String sid = ensureSession();
-                if (sid == null) {
-                    sys("server not healthy yet — try again in a moment");
-                    return;
-                }
                 validateSelectedModel();
                 byte[] bytes = java.nio.file.Files.readAllBytes(jpg.toPath());
                 String dataUrl = Vision.dataUrl(bytes);
                 lastUserText = cap2;
                 runHadOutput = false;
-                lastPartTs = System.currentTimeMillis();
-                runSessionId = sid;               // THIS send owns busy now
-                setBusy(true);
+                touchRun(sid);
 
                 // ---- path 1: the server's own file part (raw pixels)
                 // P30: the style note rides the caption like any text send.
@@ -1400,16 +1637,14 @@ public final class RunHub implements ServerService.EventListener {
                 }
                 err("vision failed", last == null ? "no model answered"
                         : last.getMessage(), last == null ? "" : String.valueOf(last));
-                setBusy(false);
+                releaseRun(sid, false);
             } catch (Exception e) {
                 sys("screenshot send failed: " + e);
-                setBusy(false);
+                releaseRun(sid, false);
             } catch (Throwable e) {
                 Trail.record(appCtx, "hub screenshot send", e);
                 sys("screenshot send hit an internal error — contained");
-                setBusy(false);
-            } finally {
-                sending.set(false);
+                releaseRun(sid, false);
             }
         });
     }
@@ -1421,8 +1656,8 @@ public final class RunHub implements ServerService.EventListener {
      *  Hub-owned like every send: outlives the chat screen. */
     public static void sendWithAttachments(final List<File> files, final String text) {
         if (files == null || files.isEmpty()) { send(text); return; }
-        if (busy || !sending.compareAndSet(false, true)) {
-            sys("wait for the current run to finish, then resend");
+        if (creditBlocked()) {
+            sys(CreditLimit.blockLine(spendTotal(), spendCap()));
             return;
         }
         final String cap = (text == null || text.trim().isEmpty())
@@ -1435,12 +1670,19 @@ public final class RunHub implements ServerService.EventListener {
                     null, files.get(i).getAbsolutePath(), cap, "user");
         }
         IO.execute(() -> {
+            String sid = ensureSession();
+            if (sid == null) {
+                sys("server not healthy yet — try again in a moment");
+                return;
+            }
+            int claim = claimRun(sid);
+            if (claim != RunBook.CLAIM_OK) {
+                sys(claim == RunBook.CLAIM_BUSY
+                        ? "this chat is still running — tap ■ to stop it first"
+                        : "parallel run limit reached — let one finish");
+                return;
+            }
             try {
-                String sid = ensureSession();
-                if (sid == null) {
-                    sys("server not healthy yet — try again in a moment");
-                    return;
-                }
                 validateSelectedModel();
                 List<String> urls = new ArrayList<>();
                 for (File f : files) {
@@ -1449,9 +1691,7 @@ public final class RunHub implements ServerService.EventListener {
                 }
                 lastUserText = cap;
                 runHadOutput = false;
-                lastPartTs = System.currentTimeMillis();
-                runSessionId = sid;               // THIS send owns busy now
-                setBusy(true);
+                touchRun(sid);
 
                 // ---- path 1: the server's own file parts (raw pixels)
                 // P30: the style note rides the caption like any text send.
@@ -1508,13 +1748,11 @@ public final class RunHub implements ServerService.EventListener {
                         + " · vision via free model]\n" + desc);
             } catch (Exception e) {
                 sys("attachment send failed: " + e);
-                setBusy(false);
+                releaseRun(sid, false);
             } catch (Throwable e) {
                 Trail.record(appCtx, "hub attachment send", e);
                 sys("attachment send hit an internal error — contained");
-                setBusy(false);
-            } finally {
-                sending.set(false);
+                releaseRun(sid, false);
             }
         });
     }
@@ -1660,7 +1898,11 @@ public final class RunHub implements ServerService.EventListener {
         return new ArrayList<>(variants.values());
     }
 
-    private static String ensureSession() {
+    /** P31: parallel-safe session creation — two rapid first-sends (or two
+     *  chats created at once) must never POST two /session bodies. The
+     *  synchronized + re-check makes the second caller reuse the first's
+     *  session id instead of racing it. */
+    private static synchronized String ensureSession() {
         if (sessionId != null) return sessionId;
         if (!ServerService.healthy()) return null;
         try {
@@ -1684,25 +1926,32 @@ public final class RunHub implements ServerService.EventListener {
     }
 
     /** THE only abort path: the user's explicit stop button. Everything
-     *  else in the app watches runs; nothing else kills them. */
+     *  else in the app watches runs; nothing else kills them.
+     *  P31: aborts the DISPLAYED session's run (background runs in other
+     *  chats are stopped from Sessions → long-press → Stop). */
     public static void abort() {
-        final String sid = runSessionId != null ? runSessionId : sessionId;
-        sys("■ stop requested");
+        abortSession(sessionId);
+    }
+
+    /** Stop one session's run (displayed chat via abort(), any chat via
+     *  the Sessions sheet). The local claim is released even if the POST
+     *  fails — a stop the user asked for is never argued with. */
+    public static void abortSession(final String sid) {
+        if (sid == null) return;
+        boolean displayed = sid.equals(sessionId);
+        String note = "■ stop requested" + RunBook.stopScopeNote(runningCount(), displayed);
+        sys(note);
         IO.execute(() -> {
             try {
-                if (sid != null) {
-                    Api.Resp r = Api.call("POST", "/session/" + sid + "/abort",
-                            null, 10_000);
-                    if (!r.ok()) sys("abort returned HTTP " + r.status);
-                }
+                Api.Resp r = Api.call("POST", "/session/" + sid + "/abort",
+                        null, 10_000);
+                if (!r.ok()) sys("abort returned HTTP " + r.status);
             } catch (Exception e) {
                 sys("abort failed: " + e);
             } catch (Throwable e) {
                 Trail.record(appCtx, "hub abort", e);
             }
-            runSessionId = null;
-            setBusy(false);
-            saveRunState();
+            releaseRun(sid, false);
         });
     }
 
@@ -1715,8 +1964,12 @@ public final class RunHub implements ServerService.EventListener {
      *  pipeline renders it and the Σ pill drains by itself — no polling,
      *  no restart, nothing else touched. */
     public static void compact() {
-        if (busy) {
-            sys("wait for the current run to finish, then compact");
+        if (busyFor(sessionId)) {
+            sys("wait for this chat's run to finish, then compact");
+            return;
+        }
+        if (creditBlocked()) {
+            sys(CreditLimit.blockLine(spendTotal(), spendCap()));
             return;
         }
         IO.execute(() -> {
@@ -1758,31 +2011,14 @@ public final class RunHub implements ServerService.EventListener {
 
     // ------------------------------------------------------- busy state
 
-    private static void setBusy(boolean b) {
-        boolean was = busy;
-        busy = b;
-        if (b) {
-            // runSessionId is set by the SENDERS (send/sendImage) — never
-            // here: the P19 re-arm flips busy for a run whose session may
-            // not be the one on screen.
-            synchronized (LOCK) { cur.depthPeak = cur.lastAssistantTok; }  // P27: peak is per-run
-            if (!was) {
-                startEditWatch();
-            }
-        } else if (was) {
-            stopEditWatch();
-            main(RunHub::settleBusyUi);
-        }
-        notifyBusy();
-        if (was != b) saveRunState();
-    }
-
     /** Settle-time cleanup. P26: the live tree NO LONGER lives in the
      *  transcript — the chat hosts it as a pinned footer while the run
      *  is active, and here (run over) it disappears entirely, exactly as
      *  the field asked. What remains: the edit/write tool cards in the
      *  transcript and the files themselves in the project file manager.
-     *  Dead empty THINKING cards are purged as before (P20). */
+     *  Dead empty THINKING cards are purged as before (P20).
+     *  P31: runs when the LAST run releases — with parallel runs, the
+     *  footer lives until every chat's work is done. */
     private static void settleBusyUi() {
         liveSelPath = null;
         liveOpen = null;
@@ -1792,19 +2028,25 @@ public final class RunHub implements ServerService.EventListener {
         notifyLive();
     }
 
-    /** P19 quiet-end: the feed may die without session.idle/error; after
-     *  10 silent minutes stop claiming the run is live. This NEVER aborts
-     *  anything server-side, and P19's part re-arm can still flip busy
-     *  back on (runSessionId is kept until a real end or a new send). */
+    /** P19 quiet-end, generalized (P31): EACH run is judged by its own
+     *  freshest part — a chat that streams keeps its slot, a silent one
+     *  releases it after 10 quiet minutes. This NEVER aborts anything
+     *  server-side, and the generalized re-arm can still claim the run
+     *  back if parts arrive later without a clean idle. */
     private static final Runnable watchdog = new Runnable() {
         @Override public void run() {
             Throwable t = Resilience.guard(() -> {
-                if (busy && System.currentTimeMillis() - lastPartTs
-                        > Resilience.quietEndMs()) {
-                    setBusy(false);
-                } else if (busy) {
-                    H.postDelayed(this, 5000);
+                boolean any = false;
+                long now = System.currentTimeMillis();
+                for (java.util.Map.Entry<String, Long> en
+                        : new ArrayList<>(runs.entrySet())) {
+                    if (now - en.getValue() > Resilience.quietEndMs()) {
+                        releaseRun(en.getKey(), false);
+                    } else {
+                        any = true;
+                    }
                 }
+                if (any) H.postDelayed(this, 5000);
             });
             if (t != null) Trail.record(appCtx, "hub watchdog", t);
         }
@@ -1839,6 +2081,7 @@ public final class RunHub implements ServerService.EventListener {
                 }
                 Tx fresh = id == null ? null : archive.remove(id);
                 cur = fresh != null ? fresh : new Tx();
+                cur.sid = id;                     // P31: transcripts know their session
             }
             notifyReset();
             notifyTitle();
@@ -1977,9 +2220,8 @@ public final class RunHub implements ServerService.EventListener {
                 if (settle) main(() -> {
                     // settle ONLY the displayed session's own finished run —
                     // never park busy while a DIFFERENT session's run streams
-                    if (!busy || isFinishingGuard() || !id.equals(sessionId)) return;
-                    if (runSessionId != null && !runSessionId.equals(id)) return;
-                    setBusy(false);
+                    if (!busyFor(id) || isFinishingGuard() || !id.equals(sessionId)) return;
+                    releaseRun(id, true);
                     sys("↩ back — the run finished while you were away; "
                             + "everything it said is right here");
                 });
@@ -2024,7 +2266,8 @@ public final class RunHub implements ServerService.EventListener {
             }
             sessionId = null;
             sessionTitle = "New chat";
-            runSessionId = null;
+            runs.clear();                    // P31: the old server (and its runs) died with the switch
+            busy = false;
             lastUserText = null;
             modelFixRetried = false;
             flakeRetried = false;
@@ -2033,7 +2276,6 @@ public final class RunHub implements ServerService.EventListener {
             liveSelPath = null;
             liveOpen = null;
             if (editWatcher != null) editWatcher.stop();
-            busy = false;                    // the old server (and its run) died with the switch
             notifyReset();
             notifyTitle();
             notifyBusy();

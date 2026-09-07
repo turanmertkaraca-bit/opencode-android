@@ -34,6 +34,7 @@ public class MainActivity extends Activity implements ServerService.Evt {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         setContentView(R.layout.activity_main);
+        Theme.window(this);              // P31: palette owns the window + dialogs
         log = findViewById(R.id.tvLog);
         crash = findViewById(R.id.tvCrash);
         retry = findViewById(R.id.btnRetry);
@@ -69,11 +70,20 @@ public class MainActivity extends Activity implements ServerService.Evt {
         line("OpenCode · starting");
         // P8: pre-warm the last project's sandbox root BEFORE the server
         // spawns — opening its card later is instant (no restart).
+        // P31: the LAST SURFACE the user left wins — a chat stamps over
+        // the deck (Resume), so a cold open after a hibernation boots
+        // straight into that chat's sandbox.
         try {
-            Projects.P last = Projects.last(this);
-            if (last != null && Projects.validDir(last.path)) {
-                ServerService.setStartDir(new File(last.path));
-                line("sandbox: " + last.name);
+            String[] last = Resume.parseLastScreen(getSharedPreferences(
+                    "oc", MODE_PRIVATE).getString(Resume.KEY, null));
+            String wantPath = "chat".equals(last[0]) ? last[2] : null;
+            if (wantPath == null) {
+                Projects.P p = Projects.last(this);
+                wantPath = p != null ? p.path : null;
+            }
+            if (wantPath != null && Projects.validDir(wantPath)) {
+                ServerService.setStartDir(new File(wantPath));
+                line("sandbox: " + new File(wantPath).getName());
             }
         } catch (Exception ignored) {}
         new Thread(() -> {
@@ -136,6 +146,35 @@ public class MainActivity extends Activity implements ServerService.Evt {
         diag.setVisibility(View.GONE);
     }
 
+    /** P31: route to WHERE THE USER LEFT OFF — the last chat when a chat
+     *  screen was last paused (the hibernation promise: reopen → the same
+     *  chat, straight from disk), the deck otherwise. The chat path only
+     *  fires when the folder still exists; anything odd falls back to the
+     *  deck, never a dead end. */
+    private void routeByLastScreen() {
+        try {
+            String[] last = Resume.parseLastScreen(getSharedPreferences(
+                    "oc", MODE_PRIVATE).getString(Resume.KEY, null));
+            if ("chat".equals(last[0]) && Projects.validDir(last[2])) {
+                // keep "last opened" honest for the deck order
+                for (Projects.P p : Projects.list(this)) {
+                    if (last[2].equals(p.path)) { Projects.touch(this, p.id); break; }
+                }
+                if (ServerService.needsSwitch(new File(last[2]))) {
+                    ServerService.setStartDir(new File(last[2]));
+                }
+                Intent i = new Intent(this, ChatActivity.class);
+                i.putExtra("project", last[1]);
+                i.putExtra("path", last[2]);
+                startActivity(i);
+                finish();
+                return;
+            }
+        } catch (Exception ignored) {}
+        startActivity(new Intent(this, HomeActivity.class));
+        finish();
+    }
+
     private void goHome() {
         synchronized (this) {
             if (launched) return;
@@ -143,8 +182,7 @@ public class MainActivity extends Activity implements ServerService.Evt {
         }
         runOnUiThread(() -> {
             try {
-                startActivity(new Intent(this, HomeActivity.class));
-                finish();
+                routeByLastScreen();
             } catch (Exception e) {
                 fail("cannot open home: " + e);
             }

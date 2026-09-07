@@ -52,13 +52,14 @@ public class DiagnosticsActivity extends Activity {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(getColor(R.color.bg));
+        scroll.setBackgroundColor(Theme.cr(this, R.color.bg));
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(16);
         root.setPadding(pad, pad, pad, dp(32));
         scroll.addView(root);
         setContentView(scroll);
+        Theme.window(this);              // P31: palette owns the window + dialogs
 
         root.addView(header());
 
@@ -76,7 +77,7 @@ public class DiagnosticsActivity extends Activity {
             Toast.makeText(this, "restarting…", Toast.LENGTH_SHORT).show();
         });
         TextView r2 = chip("Stop");
-        r2.setTextColor(getColor(R.color.err));
+        r2.setTextColor(Theme.cr(this, R.color.err));
         r2.setOnClickListener(v -> {
             Intent i = new Intent(this, ServerService.class)
                     .setAction(ServerService.ACTION_STOP);
@@ -568,8 +569,8 @@ public class DiagnosticsActivity extends Activity {
         TextView t = new TextView(this);
         t.setTypeface(Typeface.MONOSPACE);
         t.setTextSize(11);
-        t.setTextColor(getColor(R.color.text_primary));
-        t.setBackgroundColor(getColor(R.color.surface));
+        t.setTextColor(Theme.cr(this, R.color.text_primary));
+        t.setBackgroundColor(Theme.cr(this, R.color.surface));
         int p = dp(10);
         t.setPadding(p, p, p, p);
         t.setTextIsSelectable(true);
@@ -584,7 +585,7 @@ public class DiagnosticsActivity extends Activity {
     private TextView text(int sizeSp, int colorRes, boolean bold) {
         TextView tv = new TextView(this);
         tv.setTextSize(sizeSp);
-        tv.setTextColor(getColor(colorRes));
+        tv.setTextColor(Theme.cr(this, colorRes));
         if (bold) tv.setTypeface(Typeface.DEFAULT_BOLD);
         return tv;
     }

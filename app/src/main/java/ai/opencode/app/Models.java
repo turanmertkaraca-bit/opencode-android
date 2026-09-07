@@ -505,4 +505,109 @@ public final class Models {
         if (i <= 0 || i == s.length() - 1) return null;
         return new String[]{s.substring(0, i), s.substring(i + 1)};
     }
+
+    // ------------------------------------------------- favorites (P31)
+
+    /**
+     * P31 — ★ Favorites. Long-press a model in the picker and it is
+     * pinned to the top of the sheet (a Favorites section before every
+     * provider), so the models you actually use are one tap away.
+     *
+     * Storage is an ordered JSON array of "providerID/modelID" strings in
+     * the "oc" prefs (key "model_favs") — insertion order = display
+     * order, oldest favorites first. Display-only state: a rotating free
+     * model losing its catalog entry hides its row but never deletes the
+     * favorite (the self-heal that clears the SELECTION must not punish
+     * pins). Pure serialization helpers are JVM-pinned in P31Test.
+     */
+    public static final int FAV_CAP = 8;
+    private static final String KEY_FAVS = "model_favs";
+
+    /** The favorites as ordered {providerID, modelID} pairs. */
+    public static List<String[]> favs(Context c) {
+        if (c == null) return new ArrayList<>();
+        try {
+            String s = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                    .getString(KEY_FAVS, null);
+            return favsFromJson(s);
+        } catch (Exception e) {
+            return new ArrayList<>();
+        }
+    }
+
+    public static boolean isFav(Context c, String provider, String id) {
+        if (provider == null || id == null) return false;
+        for (String[] f : favs(c))
+            if (provider.equals(f[0]) && id.equals(f[1])) return true;
+        return false;
+    }
+
+    /**
+     * Toggle a favorite. Returns true when the model is NOW a favorite
+     * (added), false when it was removed. Adding past the cap keeps the
+     * oldest FAV_CAP entries and refuses the new one (false, unchanged) —
+     * an honest limit instead of a silently rotated list.
+     */
+    public static boolean toggleFav(Context c, String provider, String id) {
+        if (c == null || provider == null || id == null) return false;
+        List<String[]> cur = favs(c);
+        List<String[]> next = new ArrayList<>();
+        boolean had = false;
+        for (String[] f : cur) {
+            if (provider.equals(f[0]) && id.equals(f[1])) { had = true; continue; }
+            next.add(f);
+        }
+        if (had) {
+            writeFavs(c, next);
+            return false;
+        }
+        if (next.size() >= FAV_CAP) {
+            return false;                    // cap: refused, list unchanged
+        }
+        next.add(new String[]{provider, id});
+        writeFavs(c, next);
+        return true;
+    }
+
+    private static void writeFavs(Context c, List<String[]> favs) {
+        c.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString(KEY_FAVS, favsToJson(favs)).apply();
+    }
+
+    /** Ordered list → '["p/m","p2/m2"]'. Empty list → "[]". */
+    static String favsToJson(List<String[]> favs) {
+        StringBuilder b = new StringBuilder("[");
+        boolean first = true;
+        if (favs != null) for (String[] f : favs) {
+            if (f == null || f.length < 2 || f[0] == null || f[1] == null) continue;
+            if (!first) b.append(',');
+            first = false;
+            b.append(Json.quote(f[0] + "/" + f[1]));
+        }
+        return b.append(']').toString();
+    }
+
+    /** JSON → ordered pairs; malformed entries dropped, dupes kept once,
+     *  never more than FAV_CAP. Never null. */
+    static List<String[]> favsFromJson(String j) {
+        List<String[]> out = new ArrayList<>();
+        try {
+            List<Object> arr = Json.arr(Json.parse(j));
+            if (arr != null) for (Object o : arr) {
+                if (!(o instanceof String)) continue;
+                String s = (String) o;
+                int i = s.indexOf('/');
+                if (i <= 0 || i == s.length() - 1) continue;
+                String[] pair = {s.substring(0, i), s.substring(i + 1)};
+                boolean dup = false;
+                for (String[] f : out)
+                    if (f[0].equals(pair[0]) && f[1].equals(pair[1])) { dup = true; break; }
+                if (!dup) out.add(pair);
+                if (out.size() >= FAV_CAP) break;
+            }
+        } catch (Exception ignored) {
+            // corrupt prefs → empty list, the picker still works
+        }
+        return out;
+    }
 }
