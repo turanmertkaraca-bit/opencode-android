@@ -17,8 +17,8 @@ android {
         // would move us into the W^X-restricted SELinux domain and break
         // exec() of the opencode binary from app-private storage.
         targetSdk 28
-        versionCode 35
-        versionName '0.33.0-p33'
+        versionCode 36
+        versionName '0.34.0-p34'
     }
 
     signingConfigs {

@@ -1,6 +1,6 @@
 package ai.opencode.app;
 
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.view.View;
 import android.view.ViewGroup;
 
@@ -49,7 +49,7 @@ public class P31UiTest {
 
             // long-press opens the ACTIONS menu (Open/Rename/Remove/Delete)
             // and NOT the chat
-            AlertDialog dlg = (AlertDialog) ShadowDialog.getLatestDialog();
+            Dialog dlg = (Dialog) ShadowDialog.getLatestDialog();
             assertNotNull("long press must open the actions dialog", dlg);
             assertTrue(dlg.isShowing());
         }

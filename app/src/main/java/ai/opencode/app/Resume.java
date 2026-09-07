@@ -39,4 +39,19 @@ public final class Resume {
     }
 
     private static String nz(String s) { return s == null ? "" : s; }
+
+    // ---------------------------------------------------- P34: back rule
+
+    /** Where BACK from a chat lands. BACK_STAY: plain finish() — the deck
+     *  sits below in the task and is revealed. BACK_OPEN_DECK: the chat
+     *  IS the task root (the P34 field report: after an app update the
+     *  boot routed straight into the last chat and finished the splash,
+     *  so finish() had nothing beneath it — both the system back and the
+     *  in-app ‹ closed the whole app). The deck must be opened
+     *  explicitly. Pure + JVM-pinned by P34Test. */
+    public static final int BACK_STAY = 0, BACK_OPEN_DECK = 1;
+
+    public static int backRule(boolean isTaskRoot) {
+        return isTaskRoot ? BACK_OPEN_DECK : BACK_STAY;
+    }
 }

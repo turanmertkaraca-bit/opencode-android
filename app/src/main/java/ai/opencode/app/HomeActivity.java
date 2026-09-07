@@ -2,7 +2,6 @@ package ai.opencode.app;
 
 import android.animation.ObjectAnimator;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
@@ -407,15 +406,13 @@ public class HomeActivity extends Activity implements ServerService.Evt {
 
     private void openProject(Projects.P p) {
         if (!Projects.validDir(p.path)) {
-            new AlertDialog.Builder(this)
-                    .setTitle("Folder missing")
-                    .setMessage(p.path + " is gone or unreadable. Remove the card?")
-                    .setPositiveButton("Remove", (d, w) -> {
+            Sheet.show(this, "Folder missing")
+                    .msg(p.path + " is gone or unreadable. Remove the card?")
+                    .pill("Remove", Sheet.DANGER, () -> {
                         Projects.remove(this, p.id);
                         buildDeck();
                     })
-                    .setNegativeButton("Keep", null)
-                    .show();
+                    .pill("Keep", Sheet.QUIET, null);
             return;
         }
         Projects.touch(this, p.id);
@@ -440,115 +437,44 @@ public class HomeActivity extends Activity implements ServerService.Evt {
      *  palettes and independent of framework dialog theming. */
     private void cardActions(Projects.P p) {
         try {
-            LinearLayout box = new LinearLayout(this);
-            box.setOrientation(LinearLayout.VERTICAL);
-            int pad = Theme.dp(this, 8);
-            box.setPadding(pad, Theme.dp(this, 2), pad, Theme.dp(this, 10));
-
-            // the project line — name + where it lives
-            TextView name = new TextView(this);
-            name.setText(p.name);
-            name.setTextSize(16);
-            name.setTypeface(Typeface.DEFAULT_BOLD);
-            name.setTextColor(Theme.TXT);
-            name.setSingleLine(true);
-            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            name.setPadding(Theme.dp(this, 14), Theme.dp(this, 10),
-                    Theme.dp(this, 14), Theme.dp(this, 2));
-            box.addView(name);
-            TextView path = new TextView(this);
-            path.setText(p.path);
-            path.setTypeface(Typeface.MONOSPACE);
-            path.setTextSize(11);
-            path.setTextColor(Theme.TXT_DIM);
-            path.setSingleLine(true);
-            path.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-            path.setPadding(Theme.dp(this, 14), 0, Theme.dp(this, 14), Theme.dp(this, 8));
-            box.addView(path);
-
-            final AlertDialog[] host = new AlertDialog[1];
-            sheetRow(host, box, "▸", "Open", "continue this project",
-                    Theme.ACCENT_LT, () -> openProject(p));
-            sheetRow(host, box, "✎", "Rename", "change the card's name",
-                    Theme.TXT, () -> renameProject(p));
-            sheetRow(host, box, "⌦", "Remove card", "unpin only · files stay",
+            // P34: the deck's action sheet rides the app-wide Sheet system —
+            // same rows it pioneered in P33, now bottom-anchored with the
+            // handle, the large title and the stacked-pill grammar every
+            // other box in the app speaks.
+            Sheet sh = Sheet.show(this, "Project");
+            if (!sh.showing()) throw new IllegalStateException("sheet refused");
+            sh.sub(p.name + "  ·  " + p.path);
+            sh.row("▸", "Open", "continue this project",
+                    Theme.ACCENT_LT, () -> {
+                        sh.dismiss();
+                        openProject(p);
+                    });
+            sh.row("✎", "Rename", "change the card's name",
                     Theme.TXT, () -> {
+                        sh.dismiss();
+                        renameProject(p);
+                    });
+            sh.row("⌦", "Remove card", "unpin only · files stay",
+                    Theme.TXT, () -> {
+                        sh.dismiss();
                         Projects.remove(this, p.id);
                         buildDeck();
                         Toast.makeText(this, "card removed (files untouched)",
                                 Toast.LENGTH_SHORT).show();
                     });
-            sheetRow(host, box, "✕", "Delete project…",
+            sh.row("✕", "Delete project…",
                     "permanently deletes every file inside",
-                    Theme.ERR, () -> confirmDeleteProject(p));
-
-            AlertDialog dlg = new AlertDialog.Builder(this)
-                    .setTitle("Project")
-                    .setView(box)
-                    .create();
-            host[0] = dlg;
-            Theme.skin(dlg);
-            dlg.show();
+                    Theme.ERR, () -> {
+                        sh.dismiss();
+                        confirmDeleteProject(p);
+                    });
+            sh.pill("Cancel", Sheet.QUIET, null);
         } catch (Exception e) {
             // final-version insurance: the actions sheet must never take
             // the deck down — fall back to the plain flow's first action
             Trail.record(this, "project sheet", e);
             openProject(p);
         }
-    }
-
-    /** One palette-owned action row: glyph column + label/sub column,
-     *  56dp touch target, ripple + haptic. host[0] is the owning sheet —
-     *  set before the dialog shows, dismissed on tap. */
-    private void sheetRow(AlertDialog[] host, LinearLayout box, String glyph,
-                          String label, String sub, int color, Runnable action) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(Theme.dp(this, 56));
-        row.setBackground(Theme.ripple(this, null));
-        Theme.press(row);
-
-        TextView g = new TextView(this);
-        g.setText(glyph);
-        g.setTypeface(Typeface.MONOSPACE);
-        g.setTextSize(16);
-        g.setTextColor(color);
-        g.setGravity(Gravity.CENTER);
-        g.setMinimumWidth(Theme.dp(this, 40));
-        LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        glp.leftMargin = Theme.dp(this, 8);
-        row.addView(g, glp);
-
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(Theme.dp(this, 10), Theme.dp(this, 10),
-                Theme.dp(this, 12), Theme.dp(this, 10));
-        TextView t1 = new TextView(this);
-        t1.setText(label);
-        t1.setTextSize(15);
-        t1.setTextColor(color);
-        t1.setTypeface(Typeface.DEFAULT_BOLD);
-        t1.setSingleLine(true);
-        t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        col.addView(t1);
-        TextView t2 = new TextView(this);
-        t2.setText(sub);
-        t2.setTextSize(11);
-        t2.setTextColor(Theme.TXT_DIM);
-        t2.setSingleLine(true);
-        t2.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        col.addView(t2);
-        row.addView(col, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        row.setOnClickListener(v -> {
-            Theme.haptic(row);
-            if (host[0] != null && host[0].isShowing()) host[0].dismiss();
-            action.run();
-        });
-        box.addView(row);
     }
 
     /**
@@ -583,20 +509,6 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         }
         final boolean serving = dir.equals(ServerService.servingDir());
 
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = Theme.dp(this, 20);
-        box.setPadding(pad, Theme.dp(this, 6), pad, Theme.dp(this, 12));
-
-        TextView body = new TextView(this);
-        body.setText("Every file inside will be PERMANENTLY deleted. "
-                + "Code, notes, everything — this cannot be undone. "
-                + "The card is removed too.");
-        body.setTextSize(14);
-        body.setTextColor(Theme.TXT);
-        body.setLineSpacing(Theme.dp(this, 2), 1f);
-        box.addView(body);
-
         TextView well = new TextView(this);
         well.setText(p.path);
         well.setTypeface(Typeface.MONOSPACE);
@@ -606,73 +518,26 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         int wp = Theme.dp(this, 10);
         well.setPadding(wp, wp, wp, wp);
         well.setTextIsSelectable(false);
-        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        wlp.topMargin = Theme.dp(this, 12);
-        box.addView(well, wlp);
 
+        Sheet sh = Sheet.show(this, "Delete " + p.name + "?");
+        if (!sh.showing()) return;
+        sh.msg("Every file inside will be PERMANENTLY deleted. "
+                + "Code, notes, everything — this cannot be undone. "
+                + "The card is removed too.");
+        sh.add(well);
         if (serving) {
             TextView note = new TextView(this);
             note.setText("⚠ This project is open right now — its server "
                     + "will be stopped first.");
             note.setTextSize(12);
             note.setTextColor(Theme.WARN);
-            LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            nlp.topMargin = Theme.dp(this, 10);
-            box.addView(note, nlp);
+            sh.add(note);
         }
-
-        LinearLayout btns = new LinearLayout(this);
-        btns.setOrientation(LinearLayout.HORIZONTAL);
-        btns.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        blp.topMargin = Theme.dp(this, 16);
-        final AlertDialog[] host = new AlertDialog[1];
-        btns.addView(sheetPill(host, "Keep it", Theme.outlinePill(this), Theme.TXT,
-                null), new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        dlp.leftMargin = Theme.dp(this, 10);
-        btns.addView(sheetPill(host, "Delete forever", Theme.denyPill(this), Theme.ERR,
-                () -> {
-                    Theme.haptic(deck);
-                    deleteProject(p, serving);
-                }), dlp);
-        box.addView(btns, blp);
-
-        AlertDialog dlg = new AlertDialog.Builder(this)
-                .setTitle("Delete " + p.name + "?")
-                .setView(box)
-                .create();
-        host[0] = dlg;
-        Theme.skin(dlg);
-        dlg.show();
-    }
-
-    /** A solid pill button for the P33 sheets — same shape language as
-     *  the chat's permission pills (Allow / Deny), min 44dp target. */
-    private TextView sheetPill(AlertDialog[] host, String label,
-                               android.graphics.drawable.Drawable bg,
-                               int color, Runnable action) {
-        TextView b = new TextView(this);
-        b.setText(label);
-        b.setTextSize(13);
-        b.setTypeface(Typeface.DEFAULT_BOLD);
-        b.setTextColor(color);
-        b.setBackground(bg);
-        b.setGravity(Gravity.CENTER);
-        b.setPadding(Theme.dp(this, 16), Theme.dp(this, 11),
-                Theme.dp(this, 16), Theme.dp(this, 11));
-        Theme.press(b);
-        if (action != null) b.setOnClickListener(v -> {
-            Theme.haptic(b);
-            if (host[0] != null && host[0].isShowing()) host[0].dismiss();
-            action.run();
+        sh.pill("Delete forever", Sheet.DANGER, () -> {
+            Theme.haptic(deck);
+            deleteProject(p, serving);
         });
-        return b;
+        sh.pill("Keep it", Sheet.QUIET, null);
     }
 
     /** The delete itself: off-thread (a big tree must not freeze the
@@ -708,74 +573,25 @@ public class HomeActivity extends Activity implements ServerService.Evt {
     }
 
     private void renameProject(Projects.P p) {
-        // P33: the app's own sheet — an input well + real pills, matching
-        // the actions sheet this flow now lives in (the framework input
-        // box was the last Android-4-era holdout on the deck).
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = Theme.dp(this, 20);
-        box.setPadding(pad, Theme.dp(this, 6), pad, Theme.dp(this, 12));
-
-        final EditText in = new EditText(this);
-        in.setText(p.name);
-        in.setTextSize(15);
-        in.setTextColor(Theme.TXT);
-        in.setHintTextColor(Theme.TXT_FAINT);
-        in.setSingleLine(true);
-        in.setSelection(p.name == null ? 0 : p.name.length());
-        in.setBackground(Theme.codeWell(this));
-        int ip = Theme.dp(this, 12);
-        in.setPadding(ip, ip, ip, ip);
-        box.addView(in, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        box.addView(sheetSub("The card's name only — the folder on disk "
+        // P34: the Sheet input flow — the input well + the stacked pills,
+        // the same grammar every sheet in the app speaks now.
+        final EditText in = Sheet.input(this, null, p.name, true);
+        Sheet sh = Sheet.show(this, "Rename project");
+        if (!sh.showing()) return;
+        sh.add(in);
+        sh.add(Sheet.hint(this, "The card's name only — the folder on disk "
                 + "is never touched."));
-
-        LinearLayout btns = new LinearLayout(this);
-        btns.setOrientation(LinearLayout.HORIZONTAL);
-        btns.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        blp.topMargin = Theme.dp(this, 14);
-        final AlertDialog[] host = new AlertDialog[1];
-        btns.addView(sheetPill(host, "Cancel", Theme.outlinePill(this), Theme.TXT, null),
-                new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        slp.leftMargin = Theme.dp(this, 10);
-        btns.addView(sheetPill(host, "Save", Theme.allowPill(this), Theme.ON_ACCENT,
-                () -> {
-                    List<Projects.P> ps = Projects.list(this);
-                    for (Projects.P q : ps) if (q.id.equals(p.id)) {
-                        String n = in.getText().toString().trim();
-                        q.name = n.isEmpty() ? q.name : n;
-                    }
-                    Projects.save(this, ps);
-                    buildDeck();
-                }), slp);
-        box.addView(btns, blp);
-
-        AlertDialog dlg = new AlertDialog.Builder(this)
-                .setTitle("Rename project")
-                .setView(box)
-                .create();
-        host[0] = dlg;
-        Theme.skin(dlg);
-        dlg.show();
-    }
-
-    /** The quiet helper line under a P33 sheet's main content. */
-    private TextView sheetSub(String s) {
-        TextView t = new TextView(this);
-        t.setText(s);
-        t.setTextSize(11);
-        t.setTextColor(Theme.TXT_DIM);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = Theme.dp(this, 8);
-        t.setLayoutParams(lp);
-        return t;
+        sh.pill("Save", Sheet.PRIMARY, () -> {
+            List<Projects.P> ps = Projects.list(this);
+            for (Projects.P q : ps) if (q.id.equals(p.id)) {
+                String n = in.getText().toString().trim();
+                q.name = n.isEmpty() ? q.name : n;
+            }
+            Projects.save(this, ps);
+            buildDeck();
+        });
+        sh.pill("Cancel", Sheet.QUIET, null);
+        sh.focus(in);
     }
 
     // ---------------------------------------------------------- dir picker
@@ -803,20 +619,17 @@ public class HomeActivity extends Activity implements ServerService.Evt {
 
     static final class DirDialog {
 
-        interface Show { void host(AlertDialog dlg); }
-
         void show(Activity a, File start, OnPick cb) {
             final File[] cur = new File[]{start};
             final TextView pathTv = new TextView(a);
             pathTv.setTypeface(Typeface.MONOSPACE);
             pathTv.setTextSize(11);
             pathTv.setTextColor(Theme.TXT_DIM);
-            pathTv.setPadding(Theme.dp(a, 18), Theme.dp(a, 10), Theme.dp(a, 18), Theme.dp(a, 4));
+            pathTv.setPadding(0, Theme.dp(a, 2), 0, 0);
             pathTv.setMaxLines(2);
             pathTv.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
 
             final ListView40 lv = new ListView40(a);
-            final AlertDialog[] dlgBox = new AlertDialog[1];
             Runnable[] refill = new Runnable[1];
 
             refill[0] = () -> {
@@ -842,7 +655,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
                         tv.setText(String.valueOf(rows.get(i)[0]));
                         tv.setTextSize(14);
                         tv.setTextColor(Theme.TXT);
-                        tv.setPadding(Theme.dp(a, 18), Theme.dp(a, 11), Theme.dp(a, 18), Theme.dp(a, 11));
+                        tv.setPadding(Theme.dp(a, 14), Theme.dp(a, 11), Theme.dp(a, 14), Theme.dp(a, 11));
                         return tv;
                     }
                 });
@@ -853,55 +666,39 @@ public class HomeActivity extends Activity implements ServerService.Evt {
             };
             refill[0].run();
 
-            LinearLayout head = new LinearLayout(a);
-            head.setOrientation(LinearLayout.VERTICAL);
-            TextView title = new TextView(a);
-            title.setText("Pick a project folder");
-            title.setTextSize(16);
-            title.setTypeface(Typeface.DEFAULT_BOLD);
-            title.setTextColor(Theme.TXT);
-            title.setPadding(Theme.dp(a, 18), Theme.dp(a, 16), Theme.dp(a, 18), 0);
-            head.addView(title);
-            head.addView(pathTv);
-            head.addView(lv, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, Theme.dp(a, 320)));
-            AlertDialog dlg = new AlertDialog.Builder(a)
-                    .setView(head)
-                    .setPositiveButton("Use this folder", (d, w) ->
-                            cb.picked(cur[0].getAbsolutePath()))
-                    .setNeutralButton("New folder", (d, w) ->
-                            mkDirDialog(a, cur[0], name -> {
-                                File nd = new File(cur[0], name);
-                                if (nd.mkdirs() || nd.isDirectory()) {
-                                    cur[0] = nd;
-                                    refill[0].run();
-                                } else {
-                                    Toast.makeText(a, "could not create folder",
-                                            Toast.LENGTH_SHORT).show();
-                                }
-                            }))
-                    .setNegativeButton("Cancel", null)
-                    .create();
-            Theme.skin(dlg);
-            dlg.show();
-            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Theme.ACCENT_LT);
-            dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(Theme.ACCENT_LT);
-            dlg.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(Theme.TXT_DIM);
+            // P34: the folder picker rides the Sheet system — path line,
+            // the same 320dp list, the actions as stacked pills.
+            Sheet sh = Sheet.show(a, "Pick a project folder");
+            if (!sh.showing()) return;
+            sh.add(pathTv);
+            sh.addFixed(lv, 320);
+            sh.pill("Use this folder", Sheet.PRIMARY, () ->
+                    cb.picked(cur[0].getAbsolutePath()));
+            sh.pill("New folder", Sheet.QUIET, () ->
+                    mkDirDialog(a, cur[0], name -> {
+                        File nd = new File(cur[0], name);
+                        if (nd.mkdirs() || nd.isDirectory()) {
+                            cur[0] = nd;
+                            refill[0].run();
+                        } else {
+                            Toast.makeText(a, "could not create folder",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    }));
+            sh.pill("Cancel", Sheet.QUIET, null);
         }
 
         private void mkDirDialog(Activity a, File parent, java.util.function.Consumer<String> cb) {
-            final EditText in = new EditText(a);
-            in.setHint("folder name");
-            in.setSingleLine(true);
-            new AlertDialog.Builder(a)
-                    .setTitle("New folder in " + parent.getName())
-                    .setView(in)
-                    .setPositiveButton("Create", (d, w) -> {
-                        String n = in.getText().toString().trim();
-                        if (!n.isEmpty()) cb.accept(n);
-                    })
-                    .setNegativeButton("Cancel", null)
-                    .show();
+            final EditText in = Sheet.input(a, "folder name", null, true);
+            Sheet sh = Sheet.show(a, "New folder in " + parent.getName());
+            if (!sh.showing()) return;
+            sh.add(in);
+            sh.pill("Create", Sheet.PRIMARY, () -> {
+                String n = in.getText().toString().trim();
+                if (!n.isEmpty()) cb.accept(n);
+            });
+            sh.pill("Cancel", Sheet.QUIET, null);
+            sh.focus(in);
         }
     }
 

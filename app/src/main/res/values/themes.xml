@@ -33,6 +33,15 @@
         <item name="android:windowExitAnimation">@anim/sheet_out</item>
     </style>
 
+    <!-- P34: the bottom-sheet window motion — every Sheet in the app
+         rises from the bottom edge and sinks back the same way (back
+         button and scrim taps included, since the animation rides the
+         window, not the call site). -->
+    <style name="OcSheetWindow">
+        <item name="android:windowEnterAnimation">@anim/sheet_rise_in</item>
+        <item name="android:windowExitAnimation">@anim/sheet_rise_out</item>
+    </style>
+
     <!-- fast + snappy: nothing lingers longer than ~220 ms -->
     <style name="OcWindowAnim" parent="@android:style/Animation.Activity">
         <item name="android:activityOpenEnterAnimation">@anim/slide_in_right</item>

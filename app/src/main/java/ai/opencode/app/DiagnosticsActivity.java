@@ -2,7 +2,6 @@ package ai.opencode.app;
 
 import android.app.Activity;
 import android.app.ActivityManager;
-import android.app.AlertDialog;
 import android.app.ApplicationExitInfo;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -193,6 +192,14 @@ public class DiagnosticsActivity extends Activity {
         cmd.setTextSize(14);
         cmd.setTypeface(Typeface.MONOSPACE);
         cmd.setSingleLine(true);
+        // P34: the console input joins the token system — the platform
+        // EditText wore the frozen theme colors (white ink that broke on
+        // Paper); now it is the app's input well like every other field.
+        cmd.setTextColor(Theme.TXT);
+        cmd.setHintTextColor(Theme.TXT_FAINT);
+        cmd.setBackground(Theme.codeWell(this));
+        int cp2 = Theme.dp(this, 12);
+        cmd.setPadding(cp2, cp2, cp2, cp2);
         root.addView(cmd);
         LinearLayout b3 = new LinearLayout(this);
         b3.setOrientation(LinearLayout.HORIZONTAL);
@@ -284,11 +291,10 @@ public class DiagnosticsActivity extends Activity {
     }
 
     private void confirmReunpack() {
-        new AlertDialog.Builder(this)
-                .setTitle("Re-unpack bundled agent?")
-                .setMessage("Extracts the opencode binary from the APK again "
+        Sheet.show(this, "Re-unpack bundled agent?")
+                .msg("Extracts the opencode binary from the APK again "
                         + "(use after a failed update). The server restarts.")
-                .setPositiveButton("Extract", (d, w) -> {
+                .pill("Extract", Sheet.PRIMARY, () -> {
                     ServerService.restart(this);
                     new Thread(() -> {
                         try {
@@ -307,8 +313,7 @@ public class DiagnosticsActivity extends Activity {
                         }
                     }, "oc-reunpack").start();
                 })
-                .setNegativeButton("Cancel", null)
-                .show();
+                .pill("Cancel", Sheet.QUIET, null);
     }
 
     private void runShell(String cmd, TextView out) {

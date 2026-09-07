@@ -2,7 +2,6 @@ package ai.opencode.app;
 
 import android.animation.ObjectAnimator;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -591,25 +590,22 @@ public class FilesActivity extends Activity {
             }
             final String body = head;
             ui.post(() -> {
-                AlertDialog.Builder b = new AlertDialog.Builder(this);
-                b.setTitle(f.getName());
+                // P34: the preview rides the Sheet — scrollable, copy-all
+                // stays the primary action.
                 ScrollView sv = new ScrollView(this);
                 TextView tv = new TextView(this);
                 tv.setText(body.isEmpty() ? "(empty file)" : body);
                 tv.setTextSize(12);
                 tv.setTypeface(Typeface.MONOSPACE);
                 tv.setTextColor(Theme.TXT);
-                int p = Theme.dp(this, 18);
+                int p = Theme.dp(this, 4);
                 tv.setPadding(p, p, p, p);
                 tv.setTextIsSelectable(true);
                 sv.addView(tv);
-                b.setView(sv);
-                b.setPositiveButton("copy all", (d, w) -> {
-                    copy(f.getName(), f);
-                    d.dismiss();
-                });
-                b.setNegativeButton("close", null);
-                Theme.skin(b.show());
+                Sheet.show(this, f.getName())
+                        .scroll(sv, 0.5f)
+                        .pill("copy all", Sheet.PRIMARY, () -> copy(f.getName(), f))
+                        .pill("close", Sheet.QUIET, null);
             });
         });
     }
@@ -617,47 +613,53 @@ public class FilesActivity extends Activity {
     private void actions(final File f) {
         // P31: an .html file gains "▶ interactive" — the same canvas
         // viewer the chat's tool cards open. Offered, never forced.
+        // P34: the app's own rows on the Sheet — no framework list box.
         boolean html = CanvasDoc.isRenderable(f.getAbsolutePath());
-        String[] opts = html
-                ? new String[]{"▶ interactive", "Rename", "Delete", "Copy path"}
-                : new String[]{"Rename", "Delete", "Copy path"};
-        new AlertDialog.Builder(this)
-                .setTitle(f.getName())
-                .setItems(opts, (d, w) -> {
-                    if (html && w == 0) {
+        Sheet sh = Sheet.show(this, f.getName());
+        if (!sh.showing()) return;
+        if (html) {
+            sh.row("▶", "interactive", "open in the canvas viewer",
+                    Theme.ACCENT_LT, () -> {
+                        sh.dismiss();
                         try {
                             startActivity(new Intent(this, CanvasActivity.class)
                                     .putExtra("path", f.getAbsolutePath()));
                         } catch (Exception e) {
                             toast("cannot open: " + e);
                         }
-                        return;
-                    }
-                    int i = html ? w - 1 : w;
-                    if (i == 0) rename(f);
-                    else if (i == 1) confirmDelete(f);
-                    else copy("path", f.getAbsolutePath());
-                })
-                .show();
+                    });
+        }
+        sh.row("✎", "Rename", "change the name in place", Theme.TXT,
+                () -> {
+                    sh.dismiss();
+                    rename(f);
+                });
+        sh.row("✕", "Delete", f.isDirectory()
+                        ? "the whole folder goes" : "this file goes",
+                Theme.ERR, () -> {
+                    sh.dismiss();
+                    confirmDelete(f);
+                });
+        sh.row("⑂", "Copy path", "the absolute path to the clipboard",
+                Theme.TXT_DIM, () -> {
+                    sh.dismiss();
+                    copy("path", f.getAbsolutePath());
+                });
+        sh.pill("Cancel", Sheet.QUIET, null);
     }
 
     private void newSheet() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int p = Theme.dp(this, 18);
-        box.setPadding(p, Theme.dp(this, 8), p, 0);
-        final EditText name = new EditText(this);
-        name.setHint("name");
+        final EditText name = Sheet.input(this, "name", null, true);
         name.setInputType(InputType.TYPE_CLASS_TEXT);
-        name.setSingleLine(true);
-        box.addView(name);
-        new AlertDialog.Builder(this)
-                .setTitle("Create in " + cwd.getName())
-                .setView(box)
-                .setPositiveButton("folder", (d, w) -> make(name.getText().toString(), true))
-                .setNegativeButton("file", (d, w) -> make(name.getText().toString(), false))
-                .setNeutralButton("cancel", null)
-                .show();
+        Sheet sh = Sheet.show(this, "Create in " + cwd.getName());
+        if (!sh.showing()) return;
+        sh.add(name);
+        sh.pillRow("folder", Sheet.PRIMARY,
+                () -> make(name.getText().toString(), true),
+                "file", Sheet.QUIET,
+                () -> make(name.getText().toString(), false));
+        sh.pill("cancel", Sheet.QUIET, null);
+        sh.focus(name);
     }
 
     private void make(String name, boolean dir) {
@@ -671,41 +673,32 @@ public class FilesActivity extends Activity {
     }
 
     private void rename(final File f) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int p = Theme.dp(this, 18);
-        box.setPadding(p, Theme.dp(this, 8), p, 0);
-        final EditText name = new EditText(this);
-        name.setText(f.getName());
-        name.setSingleLine(true);
-        box.addView(name);
-        new AlertDialog.Builder(this)
-                .setTitle("Rename")
-                .setView(box)
-                .setPositiveButton("ok", (d, w) -> {
-                    String n = name.getText().toString().trim();
-                    if (n.isEmpty() || n.equals(f.getName())) return;
-                    File to = new File(safe(f.getParentFile(), n));
-                    toast(f.renameTo(to) ? "renamed" : "rename failed");
-                    render();
-                })
-                .setNegativeButton("cancel", null)
-                .show();
+        final EditText name = Sheet.input(this, null, f.getName(), true);
+        Sheet sh = Sheet.show(this, "Rename");
+        if (!sh.showing()) return;
+        sh.add(name);
+        sh.pill("ok", Sheet.PRIMARY, () -> {
+            String n = name.getText().toString().trim();
+            if (n.isEmpty() || n.equals(f.getName())) return;
+            File to = new File(safe(f.getParentFile(), n));
+            toast(f.renameTo(to) ? "renamed" : "rename failed");
+            render();
+        });
+        sh.pill("cancel", Sheet.QUIET, null);
+        sh.focus(name);
     }
 
     private void confirmDelete(final File f) {
-        new AlertDialog.Builder(this)
-                .setTitle("Delete " + f.getName() + "?")
-                .setMessage(f.isDirectory()
+        Sheet.show(this, "Delete " + f.getName() + "?")
+                .msg(f.isDirectory()
                         ? "the whole folder and everything in it goes"
                         : "this file goes")
-                .setPositiveButton("delete", (d, w) -> {
+                .pill("delete", Sheet.DANGER, () -> {
                     boolean ok = f.isDirectory() ? recurseDelete(f) : f.delete();
                     toast(ok ? "deleted" : "delete failed");
                     if (ok) render();
                 })
-                .setNegativeButton("keep", null)
-                .show();
+                .pill("keep", Sheet.QUIET, null);
     }
 
     private static boolean recurseDelete(File f) {
