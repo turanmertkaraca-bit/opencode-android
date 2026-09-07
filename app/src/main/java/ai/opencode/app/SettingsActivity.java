@@ -231,8 +231,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- interface
         root.addView(Theme.sectionLabel(this, "interface"));
         LinearLayout it = section();
-        // P31: SIX palettes (OLED black stays the default) — the old
-        // AMOLED toggle became the full theme picker.
+        // P33: Graphite is the default face — the picker says so.
         it.addView(rowLink("Theme", Theme.paletteName(Theme.currentId(this))
                         + " · tap to change",
                 "\u25C9", v -> pickTheme()));
@@ -244,7 +243,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.32.0-p32 · the theme crash fixed, every screen follows the palette, swatch picker, card ink", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.33.0-p33 · instant themes (graphite default), the project action sheet, keys reach the sandbox, honest picker contrast", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -519,6 +518,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             wrap.setOrientation(LinearLayout.VERTICAL);
             int pad = Theme.dp(this, 8);
             wrap.setPadding(pad, pad, pad, pad);
+            final android.app.AlertDialog[] holder = new android.app.AlertDialog[1];
             for (int i = 0; i < Theme.PALETTES.length; i++) {
                 final String id = Theme.PALETTES[i];
                 // P32: the picker rows are REAL rows now — name on the
@@ -534,7 +534,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 t.setTextColor(on ? Theme.ACCENT_LT : Theme.TXT);
                 t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
                 t.setText((on ? "\u2713  " : "") + Theme.paletteName(id)
-                        + (id.equals("oled") ? "  \u00b7 default" : ""));
+                        + (id.equals(Theme.DEFAULT_PALETTE) ? "  \u00b7 default" : ""));
                 t.setPadding(Theme.dp(this, 18), Theme.dp(this, 13),
                         Theme.dp(this, 18), Theme.dp(this, 13));
                 row.addView(t, new LinearLayout.LayoutParams(0,
@@ -556,17 +556,42 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 Theme.press(row);
                 row.setOnClickListener(v -> {
                     Theme.haptic(v);
-                    getSharedPreferences("oc", MODE_PRIVATE).edit()
-                            .putString("theme", id).apply();
-                    Theme.apply(this);
-                    recreate();
+                    // P33: the theme lands the SAME FRAME — save + apply,
+                    // dismiss the sheet, then rebuild this screen in place
+                    // from the new tokens. The old flow called recreate(),
+                    // which tore the whole activity down and rebuilt it
+                    // with window animations — seconds of dead air the
+                    // field reported as "takes a while, feels bad". A
+                    // rebuild of ONE view tree is milliseconds: the new
+                    // palette is on screen before the sheet finishes its
+                    // 180 ms slide-out. Other open screens pick the palette
+                    // up on their next resume (per-screen syncIfNeeded).
+                    try {
+                        getSharedPreferences("oc", MODE_PRIVATE).edit()
+                                .putString("theme", id).apply();
+                        Theme.apply(this);
+                        if (holder[0] != null && holder[0].isShowing())
+                            holder[0].dismiss();
+                        setContentView(buildUi());
+                        Theme.window(this);   // chrome + retint + restamp
+                        refreshState(ServerService.getState(), null);
+                        refreshPkg();
+                    } catch (Exception e) {
+                        // final-version insurance: a failed re-skin must
+                        // never take Settings down (the P32 lesson, kept)
+                        Toast.makeText(this, "theme switch failed \u2014 logged",
+                                Toast.LENGTH_SHORT).show();
+                        ServerService.appendDiagStatic(this, "theme-apply",
+                                Resilience.traceLine(e));
+                    }
                 });
             }
-            new android.app.AlertDialog.Builder(this)
+            android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
                     .setTitle("Theme")
                     .setView(wrap)
                     .setNegativeButton("Cancel", null)
                     .show();
+            holder[0] = dlg;
         } catch (Exception e) {
             // final-version insurance: the picker failing must never take
             // Settings down (and the incident log keeps it diagnosable)

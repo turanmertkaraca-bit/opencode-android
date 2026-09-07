@@ -134,7 +134,8 @@ public class P32UiTest {
 
             // the screen is coherent with the pref — no recreate
             assertFalse(Theme.syncIfNeeded(a));
-            assertEquals(0xFF000000, Theme.BG);   // oled default untouched
+            // P33: the pref-less default is Graphite now (was oled)
+            assertEquals(0xFF0A0A0B, Theme.BG);
 
             // a theme switch happened elsewhere while this screen was open
             a.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
@@ -151,15 +152,19 @@ public class P32UiTest {
     }
 
     @Test
-    public void unknownThemePref_fallsBackToOled_withoutRecreate() {
+    public void unknownThemePref_fallsBackSanely_withoutCrash() {
         try (ActivityController<SettingsActivity> ctl =
                      Robolectric.buildActivity(SettingsActivity.class)) {
             SettingsActivity a = ctl.setup().get();
             a.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
                     .putString("theme", "garbage").apply();
-            // garbage resolves to oled on both sides — no loop, no crash
-            assertFalse(Theme.syncIfNeeded(a));
+            // garbage resolves to oled (the sanity floor) — a screen built
+            // on the graphite DEFAULT is legitimately stale now, so the
+            // reskin fires once; the pin is that the SECOND call is a
+            // no-op (no loop, no crash) and the statics are coherent.
+            Theme.syncIfNeeded(a);
             assertEquals(0xFF000000, Theme.BG);
+            assertFalse(Theme.syncIfNeeded(a));
         }
     }
 }

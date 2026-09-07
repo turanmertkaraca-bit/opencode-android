@@ -149,10 +149,46 @@ public final class Models {
             } catch (Exception ignored) {}
         }
 
+        // P33: the server wasn't heard from — last-known live flags stand
+        // (see carryLive), so a restart/boot blip can't dim the picker.
+        if (!serverOk) carryLive(lastFetch, byId);
+
         lastFetch = order(byId);
         lastSource = (serverOk ? "server" : "server offline")
                 + " · " + (catSource != null ? catSource : "no catalog");
         return lastFetch;
+    }
+
+    /**
+     * P33 pure rule — a server BLIP must not flatten the picker. When the
+     * running server did not answer (restarting after a key change, boot,
+     * hibernate wake, network hiccup), the catalog-only fetch would mark
+     * EVERY model not-live: the whole sheet went dim + "· catalog", which
+     * the field read as "p32 made everything low contrast white" — and
+     * every tap answered "no key" or refused the pick. The rule: when the
+     * server was not heard from, a model the server listed live LAST time
+     * stays live now (last-known truth beats a missing answer). A fetched
+     * answer (serverOk) never enters this path — fresh truth wins there.
+     * Never clears, never invents: models the server never served stay
+     * exactly as catalog-only.
+     */
+    static void carryLive(List<Prov> prev, Map<String, Prov> next) {
+        if (prev == null || prev.isEmpty() || next == null || next.isEmpty())
+            return;
+        Map<String, Set<String>> served = new LinkedHashMap<>();
+        for (Prov p : prev) {
+            if (p == null || p.id == null) continue;
+            Set<String> mids = new HashSet<>();
+            for (Mdl m : p.models) if (m != null && m.id != null && m.live)
+                mids.add(m.id);
+            if (!mids.isEmpty()) served.put(p.id, mids);
+        }
+        for (Prov p : next.values()) {
+            Set<String> mids = served.get(p.id);
+            if (mids == null) continue;
+            for (Mdl m : p.models)
+                if (m != null && mids.contains(m.id)) { m.live = true; p.usable = true; }
+        }
     }
 
     /** P15: usable (server-live) providers first — the P12a order that made

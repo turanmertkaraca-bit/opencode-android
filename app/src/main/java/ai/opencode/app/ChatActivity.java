@@ -3292,6 +3292,13 @@ public class ChatActivity extends Activity
      */
     private void showModels(List<Models.Prov> provs) {
         if (isFinishing() || isDestroyed()) return;
+        // P33: auth truth at OPEN time — the fetch that built these flags
+        // may be older than the user's last key save, and a sheet that
+        // calls a saved key "missing" (the "＋ key" chip, the no-key toast,
+        // the "no key yet" hint line) is the exact "app thinks I have no
+        // api key even tho it says i have it in api settings" report.
+        // auth.json is one small file — read it fresh every open.
+        for (Models.Prov pr : provs) pr.configured = AuthStore.hasKey(this, pr.id);
         // P29 guard 3: a sheet that is already showing is REFRESHED, never
         // stacked — the double-open bug cannot survive its own race.
         if (modelDlg != null && modelDlg.isShowing()) {
@@ -3477,7 +3484,7 @@ public class ChatActivity extends Activity
                         if (pr.usable && "opencode".equals(pr.id))
                             mark = "  ·  free · no key needed";   // P11 verified
                         else if (pr.usable) mark = "  ·  ready";
-                        else if (pr.configured) mark = "  ·  key saved · restarting picks it up";
+                        else if (pr.configured) mark = "  ·  key saved · the sandbox picks it up";
                         else mark = "  ·  needs its own key";
                         t.setText(pr.name + mark);
                         t.setSingleLine(true);
