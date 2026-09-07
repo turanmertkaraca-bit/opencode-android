@@ -62,6 +62,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
     @Override
     protected void onResume() {
         super.onResume();
+        Theme.syncIfNeeded(this);        // P32: a theme switch elsewhere re-skins here too
         refreshPkg();
     }
 
@@ -243,7 +244,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.31.0-p31 · parallel chats, model favorites, credit limit, interactive canvas, themes, self-hibernation", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.32.0-p32 · the theme crash fixed, every screen follows the palette, swatch picker, card ink", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -275,7 +276,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         brand.setText("OPENCODE");
         brand.setTextSize(10);
         brand.setLetterSpacing(0.2f);
-        brand.setTextColor(0xB3FFFFFF);
+        brand.setTextColor(Theme.onCard(0xB3));   // P32: palette-owned ink
         heroCard.addView(brand);
 
         LinearLayout st = new LinearLayout(this);
@@ -304,9 +305,9 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         restart.setTextColor(Theme.TXT);
         restart.setGravity(Gravity.CENTER);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x33FFFFFF);
+        bg.setColor(Theme.onCard(0x33));          // P32: palette-owned ink
         bg.setCornerRadius(Theme.dp(this, 14));
-        bg.setStroke(1, 0x55FFFFFF);
+        bg.setStroke(1, Theme.onCard(0x55));
         restart.setBackground(bg);
         LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -506,39 +507,73 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
     }
 
     private void pickTheme() {
-        String cur = Theme.currentId(this);
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.VERTICAL);
-        int pad = Theme.dp(this, 8);
-        wrap.setPadding(pad, pad, pad, pad);
-        for (int i = 0; i < Theme.PALETTES.length; i++) {
-            final String id = Theme.PALETTES[i];
-            LinearLayout row = (LinearLayout) getLayoutInflater().inflate(
-                    android.R.layout.simple_list_item_1, wrap, false);
-            TextView t = new TextView(this);
-            t.setTextSize(15);
-            boolean on = id.equals(cur);
-            t.setTextColor(on ? Theme.ACCENT_LT : Theme.TXT);
-            t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
-            t.setText((on ? "\u2713  " : "") + Theme.paletteName(id)
-                    + (id.equals("oled") ? "  \u00b7 default" : ""));
-            t.setPadding(Theme.dp(this, 18), Theme.dp(this, 13),
-                    Theme.dp(this, 18), Theme.dp(this, 13));
-            wrap.addView(t);
-            t.setBackground(Theme.ripple(this, null));
-            Theme.press(t);
-            t.setOnClickListener(v -> {
-                getSharedPreferences("oc", MODE_PRIVATE).edit()
-                        .putString("theme", id).apply();
-                Theme.apply(this);
-                recreate();
-            });
+        // P32: this dialog builder was the field crash — a dead
+        // (LinearLayout) cast of android.R.layout.simple_list_item_1 (a
+        // TextView!) threw ClassCastException on EVERY tap of the Theme
+        // row, before the sheet ever opened. The dead cast is gone, and
+        // the whole builder is contained: a failure now costs one honest
+        // toast + an incident-log line, never the app.
+        try {
+            String cur = Theme.currentId(this);
+            LinearLayout wrap = new LinearLayout(this);
+            wrap.setOrientation(LinearLayout.VERTICAL);
+            int pad = Theme.dp(this, 8);
+            wrap.setPadding(pad, pad, pad, pad);
+            for (int i = 0; i < Theme.PALETTES.length; i++) {
+                final String id = Theme.PALETTES[i];
+                // P32: the picker rows are REAL rows now — name on the
+                // left, three live swatches (bg · surface2 · accent)
+                // straight from the palette table on the right, so the
+                // user sees what they are choosing before they commit.
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                boolean on = id.equals(cur);
+                TextView t = new TextView(this);
+                t.setTextSize(15);
+                t.setTextColor(on ? Theme.ACCENT_LT : Theme.TXT);
+                t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+                t.setText((on ? "\u2713  " : "") + Theme.paletteName(id)
+                        + (id.equals("oled") ? "  \u00b7 default" : ""));
+                t.setPadding(Theme.dp(this, 18), Theme.dp(this, 13),
+                        Theme.dp(this, 18), Theme.dp(this, 13));
+                row.addView(t, new LinearLayout.LayoutParams(0,
+                        ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                int[] p = Theme.PALETTE_DATA[Theme.paletteIndex(id)];
+                int[] swatch = {p[0], p[2], p[4]};        // bg · surface2 · accent
+                for (int sc : swatch) {
+                    View dot = new View(this);
+                    GradientDrawable d = Theme.circle(sc);
+                    d.setStroke(Theme.dp(this, 1), Theme.STROKE);
+                    dot.setBackground(d);
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                            Theme.dp(this, 14), Theme.dp(this, 14));
+                    lp.rightMargin = Theme.dp(this, 7);
+                    row.addView(dot, lp);
+                }
+                wrap.addView(row);
+                row.setBackground(Theme.ripple(this, null));
+                Theme.press(row);
+                row.setOnClickListener(v -> {
+                    Theme.haptic(v);
+                    getSharedPreferences("oc", MODE_PRIVATE).edit()
+                            .putString("theme", id).apply();
+                    Theme.apply(this);
+                    recreate();
+                });
+            }
+            new android.app.AlertDialog.Builder(this)
+                    .setTitle("Theme")
+                    .setView(wrap)
+                    .setNegativeButton("Cancel", null)
+                    .show();
+        } catch (Exception e) {
+            // final-version insurance: the picker failing must never take
+            // Settings down (and the incident log keeps it diagnosable)
+            Toast.makeText(this, "theme picker failed \u2014 logged", Toast.LENGTH_SHORT).show();
+            ServerService.appendDiagStatic(this, "theme-picker",
+                    Resilience.traceLine(e));
         }
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Theme")
-                .setView(wrap)
-                .setNegativeButton("Cancel", null)
-                .show();
     }
 
     /** P31: the environment factory reset — honest dialog, guarded wipe,

@@ -89,6 +89,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
     @Override
     protected void onResume() {
         super.onResume();
+        Theme.syncIfNeeded(this);        // P32: a theme switch elsewhere re-skins here too
         int st = ServerService.getState();
         if ((st == ServerService.ST_IDLE || st == ServerService.ST_STOPPED
                 || st == ServerService.ST_EXITED) && !ServerService.pendingRestart()
@@ -251,7 +252,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         TextView tag = new TextView(this);
         tag.setText("P R O J E C T");
         tag.setTextSize(9);
-        tag.setTextColor(0xB3FFFFFF);
+        tag.setTextColor(Theme.onCard(0xB3));   // P32: palette-owned ink
         tag.setLetterSpacing(0.18f);
         // P27 clipping audit: letterspaced caps carry trailing advance —
         // matching end padding so the last glyph never kisses the edge.
@@ -272,7 +273,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         path.setText(p.path);
         path.setTypeface(Typeface.MONOSPACE);
         path.setTextSize(11);
-        path.setTextColor(0xB8FFFFFF);
+        path.setTextColor(Theme.onCard(0xB8));  // P32: palette-owned ink
         path.setMaxLines(2);
         path.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
         path.setPadding(0, Theme.dp(this, 6), 0, 0);
@@ -283,7 +284,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
         View div = new View(this);
-        div.setBackgroundColor(0x30FFFFFF);
+        div.setBackgroundColor(Theme.onCard(0x30));  // P32: palette-owned ink
         card.addView(div, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 1));
 

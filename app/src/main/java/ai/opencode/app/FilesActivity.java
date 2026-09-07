@@ -111,6 +111,7 @@ public class FilesActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        Theme.syncIfNeeded(this);        // P32: a theme switch elsewhere re-skins here too
         render();
         if (liveOn) startWatching();
         consumePendingOpen();

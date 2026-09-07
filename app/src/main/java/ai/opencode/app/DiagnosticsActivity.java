@@ -232,6 +232,7 @@ public class DiagnosticsActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        Theme.syncIfNeeded(this);        // P32: a theme switch elsewhere re-skins here too
         running = true;
         ui.post(refresher);
     }
