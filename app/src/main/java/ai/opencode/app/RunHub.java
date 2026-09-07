@@ -200,6 +200,20 @@ public final class RunHub implements ServerService.EventListener {
                     return size() > 64;
                 }
             };
+    /**
+     * P35 — per-session render-note state: FALSE = the agent wrote an
+     * .html page in THIS session and the next send must carry the
+     * render-check note; TRUE = the note was delivered (marked on send
+     * success only, exactly like styleMark). Absent = no HTML activity
+     * in the session → no tokens spent. LRU-capped at 64 like styleTold.
+     */
+    private static final java.util.Map<String, Boolean> renderTold =
+            new java.util.LinkedHashMap<String, Boolean>(16, 0.75f, false) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Boolean> e) {
+                    return size() > 64;
+                }
+            };
 
     // ------------------------------------------------ P31: run claiming
 
@@ -973,9 +987,11 @@ public final class RunHub implements ServerService.EventListener {
                 case "tool":
                     upsertTool(t, toolRow(key, part));
                     captureEditFocus(part);
+                    noteHtmlWrite(t, part);        // P35: arm the render note
                     break;
                 case "patch":
                     upsertTool(t, patchRow(key, part));
+                    noteHtmlPatch(t, part);        // P35: .html inside a patch too
                     break;
                 case "file": {                       // image parts → bubbles
                     String mime = Json.str(part, "mime");
@@ -1260,6 +1276,54 @@ public final class RunHub implements ServerService.EventListener {
         }
     }
 
+    /** P35: the agent wrote/edited an .html page in THIS session — arm
+     *  the render note so the next send teaches the verification loop
+     *  (needsNote FALSE = armed; styleMark-style TRUE on delivery). */
+    private static void noteHtmlWrite(Tx t, Map<String, Object> part) {
+        try {
+            if (t == null) return;
+            String tool = Json.str(part, "tool");
+            if (tool == null) return;
+            Map<String, Object> state = Json.map(part, "state");
+            if (state == null) state = part;
+            Map<String, Object> in = Json.map(state, "input");
+            if (in == null) return;
+            String abs = resolveAgainstRoot(
+                    firstStr(in, "path", "filePath", "file"));
+            if (abs != null && CanvasDoc.isRenderable(abs))
+                synchronized (renderTold) { renderTold.put(t.sid, Boolean.FALSE); }
+        } catch (Exception ignored) {
+            // a malformed tool part must never take the feed down
+        }
+    }
+
+    /** P35: patch parts list whole files — arm on any .html among them. */
+    private static void noteHtmlPatch(Tx t, Map<String, Object> part) {
+        try {
+            if (t == null) return;
+            List<Object> files = Json.list(part, "files");
+            if (files == null) return;
+            for (Object f : files) {
+                String abs = resolveAgainstRoot(
+                        f == null ? null : String.valueOf(f));
+                if (abs != null && CanvasDoc.isRenderable(abs)) {
+                    synchronized (renderTold) { renderTold.put(t.sid, Boolean.FALSE); }
+                    return;
+                }
+            }
+        } catch (Exception ignored) {
+            // a malformed tool part must never take the feed down
+        }
+    }
+
+    /** Absolute path for a (possibly sandbox-relative) tool path. */
+    private static String resolveAgainstRoot(String path) {
+        if (path == null || path.isEmpty()) return null;
+        File f = new File(path);
+        if (f.isAbsolute()) return f.getAbsolutePath();
+        return editRoot == null ? null : new File(editRoot, path).getAbsolutePath();
+    }
+
     private static String firstStr(Map<String, Object> m, String... keys) {
         for (String k : keys) {
             String v = Json.str(m, k);
@@ -1444,9 +1508,21 @@ public final class RunHub implements ServerService.EventListener {
                 final boolean tp = tersePref();
                 final Boolean told;
                 synchronized (styleTold) { told = styleTold.get(sid); }
+                // P35: after the agent wrote an .html page in THIS session,
+                // the next send carries the render-check note once — the
+                // verification loop taught at the moment it matters. A
+                // down endpoint sends no note (never teach a door that
+                // does not open).
+                final Boolean rTold;
+                synchronized (renderTold) { rTold = renderTold.get(sid); }
+                final String rNote = RenderCheck.needsNote(rTold)
+                        ? RenderCheck.note(RenderServer.port(),
+                                           RenderServer.token())
+                        : null;
+                String wire = TerseMode.wrap(text, tp, told);
+                if (rNote != null) wire = rNote + "\n\n" + wire;
                 List<String> bodies = buildBodies(
-                        TerseMode.wrap(text, tp, told),
-                        Models.selected(appCtx), agent);
+                        wire, Models.selected(appCtx), agent);
                 Api.Resp r = null;
                 boolean modelDropped = false;
                 for (int i = 0; i < bodies.size(); i++) {
@@ -1493,6 +1569,8 @@ public final class RunHub implements ServerService.EventListener {
                     sys("note: the server ignored the picked model for this "
                             + "message — it answered with its default model");
                 styleMark(sid, tp);              // P30: this session is in sync now
+                if (rNote != null)               // P35: note delivered — once
+                    synchronized (renderTold) { renderTold.put(sid, Boolean.TRUE); }
                 reconcile(r.body);
                 H.removeCallbacks(watchdog);
                 H.postDelayed(watchdog, 2000);
@@ -1698,7 +1776,16 @@ public final class RunHub implements ServerService.EventListener {
                 final boolean tp = tersePref();
                 final Boolean told;
                 synchronized (styleTold) { told = styleTold.get(sid); }
-                final String wireCap = TerseMode.wrap(cap, tp, told);
+                // P35: the render note rides image sends the same as text.
+                final Boolean rTold;
+                synchronized (renderTold) { rTold = renderTold.get(sid); }
+                final String rNote = RenderCheck.needsNote(rTold)
+                        ? RenderCheck.note(RenderServer.port(),
+                                           RenderServer.token())
+                        : null;
+                String wire0 = TerseMode.wrap(cap, tp, told);
+                final String wireCap = (rNote != null)
+                        ? rNote + "\n\n" + wire0 : wire0;
                 Api.Resp r = null;
                 for (String body : buildMultiImageBodies(wireCap, urls,
                         Models.selected(appCtx), agent)) {
@@ -1710,6 +1797,8 @@ public final class RunHub implements ServerService.EventListener {
                             ? " image attached" : " images attached")
                             + " — the agent sees the pixels");
                     styleMark(sid, tp);          // P30
+                    if (rNote != null)           // P35: note delivered — once
+                        synchronized (renderTold) { renderTold.put(sid, Boolean.TRUE); }
                     reconcile(r.body);
                     H.removeCallbacks(watchdog);
                     H.postDelayed(watchdog, 2000);

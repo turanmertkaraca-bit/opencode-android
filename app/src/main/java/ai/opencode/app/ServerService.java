@@ -298,6 +298,7 @@ public class ServerService extends Service {
         File cwd = (startDir != null && startDir.isDirectory())
                 ? startDir : Binaries.homeDir(this);
         servingDir = cwd;
+        RenderServer.setRoot(cwd);   // P35: the render endpoint serves THIS root
         // P26: tell the hub which root this server owns — a DECK SWITCH
         // lands here as a different root and the hub resets to a fresh
         // chat instead of POSTing into a session this server never had.
@@ -332,6 +333,13 @@ public class ServerService extends Service {
         int attempts = 0;                   // consecutive auto-restarts
 
         startSse();   // ONE SSE owner thread for every spawn of this service
+
+        // P35: the render endpoint — the browser the agent can use. It is
+        // the APP's own loopback server (token-gated, one POST /render
+        // route), independent of the opencode child's lifecycle: a render
+        // check never races a sandbox restart. Idempotent per process;
+        // respawns and deck switches only refresh the served root.
+        RenderServer.ensureStarted(this, cwd, this::appendDiag);
 
         while (RUNNING && !userStop) {
             if (attempts > 0) {
@@ -871,6 +879,7 @@ public class ServerService extends Service {
         Thread r = runner;
         if (r != null) r.interrupt();
         releaseWakeLock();
+        RenderServer.stop();   // P35: the endpoint dies with the service
         agentActive = false;
     }
 

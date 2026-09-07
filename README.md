@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.34.0 — P34)
+## Install (v0.35.0 — P35)
 
-1. Grab `opencode-p34-v0.34.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p35-v0.35.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -54,7 +54,44 @@ the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
 
-## What's in v0.34.0 (P34 — one surface for every box, a deck that always catches you)
+## What's in v0.35.0 (P35 — the agent's eyes: write, render-check, fix, then show)
+
+- **the loop closed** — the agent could write code and run it, but it
+  could not LOOK at a page it wrote: the sandbox has no browser, tool
+  results are text, and the canvas was a one-way window — the render
+  existed only for the user. P35 gives it eyes.
+- **the browser the sandbox could never carry** — no 300 MB chromium in
+  the rootfs, nothing that gambles the sandbox's size or stability: the
+  app already ships a full web engine (the canvas viewer's WebView), so
+  THAT renders offscreen and the agent drives it with one curl from the
+  sandbox (loopback-only, token-gated, one route). The reply is JSON:
+  verdict pass|fail, every console error, a DOM outline (elements,
+  buttons, links, inputs, canvases, horizontal overflow), layout
+  notes, and — when asked — a one-paragraph visual description of the
+  page via the free vision ladder (keyless, same as photos).
+- **the verification loop, taught at the moment it matters** — the P30
+  lesson stands (no AGENTS.md blocks: they leak into git and go stale
+  mid-session). Instead the ⌘ canvas ask carries the loop itself —
+  write the page, render-check it, fix every console error, re-run
+  until the verdict is pass, only then call it done — and after any
+  .html write/edit/patch in a chat, the next message in THAT chat rides
+  one <system-reminder> note teaching the same check (once per
+  session, success-marked, zero tokens when no HTML was written).
+- **the quiet check mark** — the ▶ interactive chips (tool cards and
+  the Files menu) grow a state: · ✓ checked when the last render check
+  passed, · ⚠ issues when it failed. Nothing opens by itself; the user
+  still taps — they just tap pages the agent already verified.
+- **containment everywhere** — one render at a time, a 20 s hard
+  watchdog, the path guard (canonical: .. and symlinks cannot walk out
+  of the project, 3 MB cap like the canvas), file + network access off
+  in the render WebView (external loads are refused AND reported), a
+  per-boot token gating the endpoint, and a dead render process is a
+  report line — never a crash.
+- P35Test pins the path guard, the verdict rule, the report caps and
+  shape, the note arming rule and the check-state LRU; the suite runs
+  green end to end.
+
+## What was in v0.34.0 (P34 — one surface for every box, a deck that always catches you)
 
 - **every box in the app grew up** — the audit found 41 framework alert
   boxes across 9 files (the Credit limit editor and the Interactive canvas
@@ -719,8 +756,9 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P30 live setting injection (<system-reminder>), cost-hint clipping, long-press project delete | shipped |
 | P32 the final polish: theme crash fixed, whole-app palette sync, frozen colors retired, swatch picker | shipped |
 | P33 the final version: instant themes, Graphite default, keys reach the sandbox, honest picker, project sheet | shipped |
-| P34 one surface for every box (41 framework boxes → Sheets), back always catches you, Settings ESSENTIALS top zone, Pixel-style credit editor | **current** |
-| Next: P35 | reserved |
+| P34 one surface for every box (41 framework boxes → Sheets), back always catches you, Settings ESSENTIALS top zone, Pixel-style credit editor | shipped |
+| P35 the agent's eyes: localhost render endpoint (the browser the agent can use), write → render-check → fix → present loop, quiet ✓ chips | **current** |
+| Next: P36 | reserved |
 
 ## Credits
 

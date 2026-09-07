@@ -618,7 +618,9 @@ public class FilesActivity extends Activity {
         Sheet sh = Sheet.show(this, f.getName());
         if (!sh.showing()) return;
         if (html) {
-            sh.row("▶", "interactive", "open in the canvas viewer",
+            sh.row("▶", "interactive"
+                            + RenderCheck.chipSuffix(f.getAbsolutePath()),
+                    "open in the canvas viewer",
                     Theme.ACCENT_LT, () -> {
                         sh.dismiss();
                         try {
