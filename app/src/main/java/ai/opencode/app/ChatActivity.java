@@ -2,7 +2,6 @@ package ai.opencode.app;
 
 import android.animation.ObjectAnimator;
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
@@ -205,14 +204,24 @@ public class ChatActivity extends Activity
                     && ServerService.needsSwitch(new File(path))) {
                 ServerService.switchTo(this, new File(path));
             }
+            // P34: the Settings → Essentials → Interactive canvas hand-off
+            // lands here pre-typed (the ask sheet opens once the screen is up)
+            final String ask = in.getStringExtra("askCanvas");
+            if (ask != null) ui.postDelayed(() -> {
+                if (!isFinishing() && !isDestroyed()) canvasDialog(ask);
+            }, 350);
         }
 
         findViewById(R.id.btnPalette).setOnClickListener(v -> palette());
-        // P10: visible back affordance — chat → project deck, easier navigation
+        // P10: visible back affordance — chat → project deck. P34: ALWAYS.
+        // The update-launch path boots straight into the last chat and
+        // finishes the splash, which used to make the chat the task root:
+        // finish() then had nothing beneath it and BOTH backs closed the
+        // whole app (the field report). The pure back rule sends the deck
+        // explicitly in exactly that case.
         findViewById(R.id.btnBack).setOnClickListener(v -> {
             Theme.pop(v);
-            finish();
-            overridePendingTransition(R.anim.fade_in, R.anim.slide_out_right);
+            leaveToDeck();
         });
         btnSessions = findViewById(R.id.btnSessions);
         if (btnSessions != null) btnSessions.setOnClickListener(v -> {
@@ -332,13 +341,13 @@ public class ChatActivity extends Activity
         // bright/ready without closing and reopening the picker.
         if (keysFromSheet) {
             keysFromSheet = false;
-            if (modelDlg != null && modelDlg.isShowing() && !isFinishing()
+            if (modelDlg != null && modelDlg.showing() && !isFinishing()
                     && !isDestroyed()) {
                 ex.execute(() -> {
                     Throwable t = Resilience.guard(() -> {
                         List<Models.Prov> fresh = Models.fetch(ChatActivity.this);
                         ui.post(() -> {
-                            if (modelDlg == null || !modelDlg.isShowing()) return;
+                            if (modelDlg == null || !modelDlg.showing()) return;
                             sheetProvs = fresh;
                             if (sheetRefill != null) sheetRefill.run();
                             Toast.makeText(ChatActivity.this,
@@ -394,9 +403,26 @@ public class ChatActivity extends Activity
     }
 
     /** P26: back takes the same journey as the ‹ button — chat → project
-     *  deck (the app never dumps the user on the launcher mid-journey). */
+     *  deck (the app never dumps the user on the launcher mid-journey).
+     *  P34: true at EVERY depth — when this chat is the task root (the
+     *  update-launch restore), the deck is opened explicitly instead of
+     *  finish() exiting the app. Pure decision in Resume.backRule, pinned
+     *  by P34Test. */
     @Override
     public void onBackPressed() {
+        leaveToDeck();
+    }
+
+    /** The one back journey: reveal the deck below, or open it when this
+     *  screen is all the task holds. */
+    private void leaveToDeck() {
+        try {
+            if (Resume.backRule(isTaskRoot()) == Resume.BACK_OPEN_DECK) {
+                startActivity(new Intent(this, HomeActivity.class));
+            }
+        } catch (Exception ignored) {
+            // a broken deck open must never trap the user — finish anyway
+        }
         finish();
         overridePendingTransition(R.anim.fade_in, R.anim.slide_out_right);
     }
@@ -1860,10 +1886,9 @@ public class ChatActivity extends Activity
         big.setImageBitmap(bm);
         big.setAdjustViewBounds(true);
         big.setPadding(0, dp(12), 0, 0);
-        new AlertDialog.Builder(this)
-                .setView(big)
-                .setPositiveButton("Close", null)
-                .show();
+        Sheet.show(this, "Image")
+                .add(big)
+                .pill("Close", Sheet.QUIET, null);
     }
 
     /** P18/P25: tap the Σ pill → what this number actually is. The pill
@@ -1915,30 +1940,28 @@ public class ChatActivity extends Activity
         String verdict = Resilience.contextVerdict(lastTok);
         boolean heavy = limit > 0 ? lastTok * 100 / limit >= 50 : lastTok >= 50_000;
         if (!verdict.isEmpty()) m.append(verdict).append("\n");
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle("Σ " + (Resilience.contextMeter(lastTok, limit).isEmpty()
+        Sheet s = Sheet.show(this, "Σ " + (Resilience.contextMeter(lastTok, limit).isEmpty()
                         ? Resilience.fmtCost(sumCost)
                         : Resilience.contextMeter(lastTok, limit)
                           + (sumCost > 0 ? " · " + Resilience.fmtCost(sumCost) : "")))
-                .setMessage(m)
-                .setPositiveButton("Got it", null);
+                .msg(m.toString());
         // P29: /compact lives where the cost question is asked. The window
         // drains WITHOUT losing the thread — the middle ground between
         // "keep paying" and "fresh chat".
-        if (lastTok > 0) {
-            b.setNeutralButton("◈ Compact", (d, w) -> {
+        if (lastTok > 0 && s.showing()) {
+            s.pill("◈ Compact", Sheet.PRIMARY, () -> {
                 Theme.haptic(tvSpend);
                 RunHub.compact();
             });
         }
-        if (heavy) {
-            b.setNegativeButton("＋ Fresh chat", (d, w) -> {
+        if (heavy && s.showing()) {
+            s.pill("＋ Fresh chat", Sheet.QUIET, () -> {
                 RunHub.loadSession(null);
                 sys("＋ fresh chat — the context (and per-turn cost) just reset; "
                         + "the old chat is still in Sessions");
             });
         }
-        Theme.skin(b.show());
+        s.pill("Got it", Sheet.QUIET, null);
     }
 
     private void sys(String s) {
@@ -2395,14 +2418,12 @@ public class ChatActivity extends Activity
                     t2.setPadding(0, dp(3), 0, 0);
                     c.addView(t2);
                 }
-                c.setOnClickListener(v -> new AlertDialog.Builder(this)
-                        .setTitle(r.text.toString())
-                        .setMessage(r.output.toString())
-                        .setPositiveButton("Copy", (d, w) -> {
+                c.setOnClickListener(v -> Sheet.show(this, r.text.toString())
+                        .msg(r.output.toString())
+                        .pill("Copy", Sheet.PRIMARY, () -> {
                             copyText(r.output.toString(), "error");
                         })
-                        .setNegativeButton("Close", null)
-                        .show());
+                        .pill("Close", Sheet.QUIET, null));
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -2798,28 +2819,70 @@ public class ChatActivity extends Activity
                 "Expand all cards", "Collapse all cards",
                 "Copy last response", "Export chat to Downloads",
                 "Share chat as Markdown"};
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("⌘ commands");
+        // P34: the ⌘ sheet is a Sheet — and the Interactive canvas is
+        // PINNED as a featured accent row at the top (the field: "some
+        // feutures like that interactive html thingy isnt as seable by
+        // the user they have to scroll below"). While the filter is
+        // empty the row leads; typing hides it so the filter results
+        // stand alone. The command stays in the list too — two doors,
+        // one destination.
+        final Sheet sh = Sheet.show(this, "⌘ commands");
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
         int p = dp(16);
-        wrap.setPadding(p, dp(8), p, dp(8));
-        final EditText filter = new EditText(this);
-        filter.setHint("filter…");
+        wrap.setPadding(p, dp(4), p, dp(8));
+        TextView featured = new TextView(this);
+        featured.setText("✦  Interactive canvas");
+        featured.setTextSize(14);
+        featured.setTypeface(Typeface.DEFAULT_BOLD);
+        featured.setTextColor(Theme.ACCENT_LT);
+        featured.setGravity(Gravity.CENTER_VERTICAL);
+        featured.setBackground(Theme.suggestPill(this));
+        int fp = dp(14);
+        featured.setPadding(fp, dp(11), fp, dp(11));
+        Theme.press(featured);
+        featured.setOnClickListener(v -> {
+            sh.dismiss();
+            canvasDialog();
+        });
+        wrap.addView(featured, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        final EditText filter = Sheet.input(this, "filter…", null, true);
         filter.setTextSize(14);
-        filter.setSingleLine(true);
-        wrap.addView(filter);
+        LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        flp.topMargin = dp(10);
+        wrap.addView(filter, flp);
         final ListView lv = new ListView(this);
         final List<String> visible = new ArrayList<>();
-        final android.widget.ArrayAdapter<String> ad = new android.widget.ArrayAdapter<>(
-                this, android.R.layout.simple_list_item_1, visible);
+        // P34: rows paint from the LIVE tokens (Theme.cr) — the platform
+        // simple_list_item_1 resolved textColorPrimary from the activity
+        // theme (build-time-frozen OLED white), so on the Paper palette
+        // the command rows were white-on-paper. The model/sessions sheets
+        // already painted through text() → Theme.cr; the commands list
+        // now speaks the same palette-correct language.
+        final android.widget.BaseAdapter ad = new android.widget.BaseAdapter() {
+            public int getCount() { return visible.size(); }
+            public Object getItem(int i) { return visible.get(i); }
+            public long getItemId(int i) { return i; }
+            public View getView(int i, View cv, ViewGroup parent) {
+                TextView tv = (cv instanceof TextView)
+                        ? (TextView) cv : new TextView(ChatActivity.this);
+                tv.setText(visible.get(i));
+                tv.setTextSize(14);
+                tv.setTextColor(Theme.cr(ChatActivity.this, R.color.text_primary));
+                int pad = dp(14);
+                tv.setPadding(pad, dp(10), pad, dp(10));
+                return tv;
+            }
+        };
         lv.setAdapter(ad);
         wrap.addView(lv, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(380)));
-        b.setView(wrap);
-        final AlertDialog dlg = b.create();
+        sh.add(wrap);
         Runnable refill = () -> {
             String q = filter.getText().toString().toLowerCase(Locale.US);
+            featured.setVisibility(q.isEmpty() ? View.VISIBLE : View.GONE);
             visible.clear();
             for (String c : cmds) if (c.toLowerCase(Locale.US).contains(q)) visible.add(c);
             ad.notifyDataSetChanged();
@@ -2831,11 +2894,10 @@ public class ChatActivity extends Activity
         });
         refill.run();
         lv.setOnItemClickListener((parent, v, pos, id2) -> {
-            dlg.dismiss();
+            sh.dismiss();
             runCommand(visible.get(pos));
         });
-        Theme.skin(dlg);
-        dlg.show();
+        sh.focus(filter);
     }
 
     private void runCommand(String cmd) {
@@ -2892,33 +2954,46 @@ public class ChatActivity extends Activity
      *  for it, the app carries the request as a normal message that tells
      *  the model exactly what a self-contained page must look like. The
      *  tool is OFFERED, never forced: nothing runs unless the user opens
-     *  the ▶ chip or this command. */
+     *  the ▶ chip, the ⌘ featured row, or this command. P34: presented on
+     *  the Sheet system (the grey platform box from the field screenshot
+     *  is gone); validation failure keeps the sheet open, exactly like
+     *  the old dialog did. */
     private void canvasDialog() {
-        final EditText in = new EditText(this);
-        in.setHint("what should the interactive page explain?");
+        canvasDialog(null);
+    }
+
+    /** P34: the Settings hand-off — Essentials → Interactive canvas
+     *  opens THIS chat pre-typed (extra "askCanvas"), so the feature is
+     *  one tap from the top of Settings, not a scavenger hunt. */
+    private void canvasDialog(String preset) {
+        // a preset (the Settings hand-off) wins only when it says something;
+        // otherwise the ask starts from whatever the composer already holds
+        String initial = (preset != null && !preset.trim().isEmpty())
+                ? preset : input.getText().toString().trim();
+        final EditText in = Sheet.input(this,
+                "what should the interactive page explain?", initial, false);
         in.setTextSize(14);
-        String typed = input.getText().toString().trim();
-        if (!typed.isEmpty()) in.setText(typed);
-        new AlertDialog.Builder(this)
-                .setTitle("✦ Interactive canvas")
-                .setMessage("The agent writes a self-contained HTML page (inline "
+        final Sheet sh = Sheet.show(this, "✦ Interactive canvas")
+                .msg("The agent writes a self-contained HTML page (inline "
                         + "CSS/JS, no external resources) to " + CanvasDoc.FILE_NAME
                         + " in the project. When the tool card shows, tap "
                         + "\u25B6 interactive to open it.")
-                .setView(in)
-                .setPositiveButton("Explain it", (d, w) -> {
-                    String topic = in.getText().toString().trim();
-                    if (topic.isEmpty()) {
-                        Toast.makeText(this, "give it a topic first",
-                                Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                    input.setText("");
-                    RunHub.sys(CanvasDoc.sentNote());
-                    RunHub.send(CanvasDoc.prompt(topic));
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+                .add(in);
+        if (!sh.showing()) return;
+        sh.pillKeep("Explain it", Sheet.PRIMARY, (s) -> {
+            String topic = in.getText().toString().trim();
+            if (topic.isEmpty()) {
+                Toast.makeText(this, "give it a topic first",
+                        Toast.LENGTH_SHORT).show();
+                return;                       // the sheet stays, like the old dialog
+            }
+            s.dismiss();
+            input.setText("");
+            RunHub.sys(CanvasDoc.sentNote());
+            RunHub.send(CanvasDoc.prompt(topic));
+        });
+        sh.pill("Cancel", Sheet.QUIET, null);
+        sh.focus(in);
     }
 
     /** Open a written page in the sandboxed viewer. */
@@ -2940,23 +3015,22 @@ public class ChatActivity extends Activity
     private int findPos = -1;
 
     /** Find in chat: scans the transcript, jumps match to match. The
-     *  model stays untouched — this is a pure view-side search. */
+     *  model stays untouched — this is a pure view-side search. P34:
+     *  on the Sheet; the sheet stays open across jumps (as the old
+     *  dialog did) so a tap on Find next keeps the query. */
     private void findInChat() {
-        final EditText in = new EditText(this);
-        in.setHint("search this conversation…");
+        final EditText in = Sheet.input(this, "search this conversation…", null, true);
         in.setTextSize(14);
-        in.setSingleLine(true);
-        new AlertDialog.Builder(this)
-                .setTitle("Find in chat")
-                .setView(in)
-                .setPositiveButton("Find first", (d, w) -> {
-                    findHits = scanChat(in.getText().toString());
-                    findPos = -1;
-                    findJumpNext();
-                })
-                .setNeutralButton("Find next", (d, w) -> findJumpNext())
-                .setNegativeButton("Cancel", null)
-                .show();
+        final Sheet sh = Sheet.show(this, "Find in chat").add(in);
+        if (!sh.showing()) return;
+        sh.pillKeep("Find first", Sheet.PRIMARY, (s) -> {
+            findHits = scanChat(in.getText().toString());
+            findPos = -1;
+            findJumpNext();
+        });
+        sh.pillKeep("Find next", Sheet.QUIET, (s) -> findJumpNext());
+        sh.pill("Cancel", Sheet.QUIET, null);
+        sh.focus(in);
     }
 
     /** Row indexes matching the query (case-insensitive, all row kinds). */
@@ -3097,10 +3171,8 @@ public class ChatActivity extends Activity
 
     private void showSessions(List<SessRow> listS) {
         if (isFinishing() || isDestroyed()) return;
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("Sessions");
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
+        final Sheet sh = Sheet.show(this, "Sessions");
+        if (!sh.showing()) return;
         ListView lv = new ListView(this);
         List<Object[]> items = new ArrayList<>(); // [titleLine, timeLine, SessRow|null]
         items.add(new Object[]{"＋  New chat", "start over — the old chats stay here", null});
@@ -3134,12 +3206,9 @@ public class ChatActivity extends Activity
                 return box;
             }
         });
-        root.addView(lv, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(420)));
-        b.setView(root);
-        final AlertDialog dlg = b.create();
+        sh.addFixed(lv, 420);
         lv.setOnItemClickListener((parent, v, pos, id3) -> {
-            dlg.dismiss();
+            sh.dismiss();
             Object[] it = items.get(pos);
             if (it[2] == null) RunHub.loadSession(null);
             else RunHub.loadSession(((SessRow) it[2]).id);
@@ -3151,37 +3220,42 @@ public class ChatActivity extends Activity
             // P31: a running session can be stopped right from the sheet —
             // the only other stop is the ■ button in its own chat.
             boolean running = RunHub.busyFor(s.id);
-            java.util.List<String> opts = new ArrayList<>(java.util.Arrays
-                    .asList(running
-                            ? new String[]{"Open", "Stop the run", "Delete"}
-                            : new String[]{"Open", "Delete"}));
-            new AlertDialog.Builder(this)
-                    .setTitle(s.title)
-                    .setItems(opts.toArray(new String[0]), (d, w) -> {
-                        String picked = opts.get(w);
-                        if ("Open".equals(picked)) {
-                            dlg.dismiss();
-                            RunHub.loadSession(s.id);
-                        } else if ("Stop the run".equals(picked)) {
-                            dlg.dismiss();
-                            RunHub.abortSession(s.id);
-                        } else {
-                            confirmDelete(s);
-                        }
-                    })
-                    .setNegativeButton("Cancel", null)
-                    .show();
+            sessionActions(sh, s, running);
             return true;
         });
-        Theme.skin(dlg);
-        dlg.show();
+    }
+
+    /** P34: one session's actions — the app's own rows (Open / Stop the
+     *  run when it's running / Delete in the danger wash), the deck's
+     *  long-press sheet language, no framework list box. */
+    private void sessionActions(Sheet parent, SessRow s, boolean running) {
+        Sheet acts = Sheet.show(this, s.title);
+        if (!acts.showing()) return;
+        acts.row("▸", "Open", "load this conversation", Theme.ACCENT_LT, () -> {
+            acts.dismiss();
+            parent.dismiss();
+            RunHub.loadSession(s.id);
+        });
+        if (running) {
+            acts.row("■", "Stop the run", "the transcript stays", Theme.WARN, () -> {
+                acts.dismiss();
+                parent.dismiss();
+                RunHub.abortSession(s.id);
+            });
+        }
+        acts.row("✕", "Delete", "removes this session's transcript",
+                Theme.ERR, () -> {
+                    acts.dismiss();
+                    parent.dismiss();
+                    confirmDelete(s);
+                });
+        acts.pill("Cancel", Sheet.QUIET, null);
     }
 
     private void confirmDelete(SessRow s) {
-        new AlertDialog.Builder(this)
-                .setTitle("Delete session?")
-                .setMessage(s.title)
-                .setPositiveButton("Delete", (d, w) -> ex.execute(() -> {
+        Sheet.show(this, "Delete session?")
+                .msg(s.title)
+                .pill("Delete", Sheet.DANGER, () -> ex.execute(() -> {
                     try {
                         Api.Resp r = Api.call("DELETE", "/session/" + s.id, null, 10_000);
                         if (!r.ok()) sys("delete failed · HTTP " + r.status);
@@ -3190,8 +3264,7 @@ public class ChatActivity extends Activity
                         sys("delete failed: " + e);
                     }
                 }))
-                .setNegativeButton("Cancel", null)
-                .show();
+                .pill("Cancel", Sheet.QUIET, null);
     }
 
     // ------------------------------------------------------------ models
@@ -3199,7 +3272,7 @@ public class ChatActivity extends Activity
     // P16: the sheet keeps LIVE references so a key added from inside it
     // (＋ key chip → KeysActivity → back) refreshes the rows in place —
     // no more close/reopen to see "OpenCode Go · ready".
-    private android.app.AlertDialog modelDlg;
+    private Sheet modelDlg;
     private List<Models.Prov> sheetProvs;
     private Runnable sheetRefill;
     private TextView sheetHint;
@@ -3268,7 +3341,7 @@ public class ChatActivity extends Activity
     /** P29: refresh the ALREADY-OPEN sheet in place instead of stacking a
      *  second dialog. If the user dismissed it meanwhile, do nothing. */
     private void updateOpenModels(List<Models.Prov> fresh) {
-        if (modelDlg == null || !modelDlg.isShowing() || isFinishing()) return;
+        if (modelDlg == null || !modelDlg.showing() || isFinishing()) return;
         sheetProvs = fresh;
         if (sheetRefill != null) sheetRefill.run();
     }
@@ -3301,16 +3374,18 @@ public class ChatActivity extends Activity
         for (Models.Prov pr : provs) pr.configured = AuthStore.hasKey(this, pr.id);
         // P29 guard 3: a sheet that is already showing is REFRESHED, never
         // stacked — the double-open bug cannot survive its own race.
-        if (modelDlg != null && modelDlg.isShowing()) {
+        if (modelDlg != null && modelDlg.showing()) {
             updateOpenModels(provs);
             return;
         }
-        AlertDialog.Builder b = new AlertDialog.Builder(this);
-        b.setTitle("Model · all providers");
+        // P34: the model catalog rides the Sheet system — same bottom panel
+        // as every other box, 82% tall for the catalog columns.
+        final Sheet sh = Sheet.show(this, "Model · all providers");
+        if (!sh.showing()) return;
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int p = dp(16);
-        root.setPadding(p, dp(8), p, 0);
+        root.setPadding(p, dp(4), p, 0);
 
         // P15 header: live counts + data source, then the search well.
         LinearLayout srcRow = new LinearLayout(this);
@@ -3351,10 +3426,9 @@ public class ChatActivity extends Activity
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(srcRow);
 
-        final EditText search = new EditText(this);
-        search.setHint("search " + countModels(provs) + " models…");
+        final EditText search = Sheet.input(this,
+                "search " + countModels(provs) + " models…", null, true);
         search.setTextSize(14);
-        search.setSingleLine(true);
         root.addView(search);
 
         final ListView lv = new ListView(this);
@@ -3368,24 +3442,14 @@ public class ChatActivity extends Activity
         hint.setPadding(dp(4), dp(8), dp(4), dp(10));
         root.addView(hint);
         sheetHint = hint;
-        b.setView(root);
-        final AlertDialog dlg = b.create();
-        Theme.skin(dlg);
-        dlg.show();
-        android.view.Window w = dlg.getWindow();
-        if (w != null) {
-            // P16 DeX: a full-bleed 88% sheet looks wrong on a desktop-sized
-            // window — cap the width like the desktop opencode column.
-            int wm = ViewGroup.LayoutParams.MATCH_PARENT;
-            if (getResources().getDisplayMetrics().widthPixels >= Theme.dp(this, 720))
-                wm = Theme.dp(this, 760);
-            w.setLayout(wm,
-                    (int) (getResources().getDisplayMetrics().heightPixels * 0.88));
-        }
-        modelDlg = dlg;
+        // P34: 82% tall inside the bottom sheet (the old window was 88%,
+        // but the sheet carries its own handle + title chrome). The DeX
+        // width cap is built into Sheet itself.
+        sh.tall(root, 0.82f);
+        modelDlg = sh;
         sheetProvs = provs;
-        dlg.setOnDismissListener(d -> {
-            if (modelDlg == dlg) {
+        sh.onDismiss(() -> {
+            if (modelDlg == sh) {
                 modelDlg = null;
                 sheetRefill = null;
                 sheetProvs = null;
@@ -3634,7 +3698,7 @@ public class ChatActivity extends Activity
                                 + "falls back to the default automatically");
                         sheetHint.setTextColor(Theme.cr(this, R.color.accent_light));
                     }
-                    dlg.dismiss();
+                    sh.dismiss();
                 } else {
                     // P16: say WHICH key — Zen and Go are separate, and that
                     // distinction is the whole P16 key fix. Without a key the
@@ -3665,7 +3729,7 @@ public class ChatActivity extends Activity
                     + "model → " + pr.id + "/" + m.id
                     + (m.free ? " (free)" : ""),
                     Toast.LENGTH_LONG).show();
-            dlg.dismiss();
+            sh.dismiss();
         });
     }
 

@@ -1,7 +1,6 @@
 package ai.opencode.app;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -150,61 +149,52 @@ public class KeysActivity extends Activity {
     }
 
     private void keyDialog(String id, String name) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(20);
-        box.setPadding(p, dp(8), p, 0);
-        final EditText input = new EditText(this);
-        input.setHint("API key (" + hintFor(id) + ")");
+        final EditText input = Sheet.input(this, "API key (" + hintFor(id) + ")",
+                null, true);
         input.setTextSize(14);
         input.setTypeface(Typeface.MONOSPACE);
-        input.setSingleLine(true);
-        box.addView(input);
-        TextView warn = text(12, R.color.text_secondary, false);
-        warn.setText("Leave empty and press SAVE to remove the stored key.");
-        warn.setPadding(0, dp(8), 0, 0);
-        box.addView(warn);
-
-        new AlertDialog.Builder(this)
-                .setTitle(name + " (" + id + ")")
-                .setView(box)
-                .setPositiveButton("Save", (d, w) -> {
-                    // P16: a FIRST-TIME key changes what /config/providers
-                    // can offer (opencode-go is invisible to the server until
-                    // its key exists) — restart so the provider goes live
-                    // immediately instead of waiting for a manual one.
-                    // P33: the SAME is true for a CHANGED key — the field
-                    // report was exact: "the app thinks i have no api key
-                    // even tho it says i have it in api settings". The old
-                    // server process kept the OLD key in memory (or knew of
-                    // no key at all) and answered every send with key
-                    // errors, while this screen happily showed the new one
-                    // saved. Whenever the stored value actually changes,
-                    // the sandbox now re-loads it automatically.
-                    String previous = storedKey(id);
-                    String entered = input.getText().toString().trim();
-                    boolean first = previous == null;
-                    boolean changed = previous == null
-                            ? !entered.isEmpty()
-                            : !previous.equals(entered);
-                    try {
-                        AuthStore.setApiKey(this, id, input.getText().toString());
-                        if (first || changed) {
-                            ServerService.restart(this);
-                            Toast.makeText(this, entered.isEmpty()
-                                    ? "key removed — restarting the sandbox"
-                                    : "saved — applying to the sandbox…",
-                                    Toast.LENGTH_LONG).show();
-                        } else {
-                            Toast.makeText(this, "saved", Toast.LENGTH_SHORT).show();
-                        }
-                    } catch (Exception e) {
-                        Toast.makeText(this, "save failed: " + e, Toast.LENGTH_LONG).show();
-                    }
-                    refresh();
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        Sheet sh = Sheet.show(this, name + " (" + id + ")");
+        if (!sh.showing()) return;
+        sh.add(input);
+        sh.add(Sheet.hint(this,
+                "Leave empty and press SAVE to remove the stored key."));
+        sh.pill("Save", Sheet.PRIMARY, () -> {
+            // P16: a FIRST-TIME key changes what /config/providers
+            // can offer (opencode-go is invisible to the server until
+            // its key exists) — restart so the provider goes live
+            // immediately instead of waiting for a manual one.
+            // P33: the SAME is true for a CHANGED key — the field
+            // report was exact: "the app thinks i have no api key
+            // even tho it says i have it in api settings". The old
+            // server process kept the OLD key in memory (or knew of
+            // no key at all) and answered every send with key
+            // errors, while this screen happily showed the new one
+            // saved. Whenever the stored value actually changes,
+            // the sandbox now re-loads it automatically.
+            String previous = storedKey(id);
+            String entered = input.getText().toString().trim();
+            boolean first = previous == null;
+            boolean changed = previous == null
+                    ? !entered.isEmpty()
+                    : !previous.equals(entered);
+            try {
+                AuthStore.setApiKey(this, id, input.getText().toString());
+                if (first || changed) {
+                    ServerService.restart(this);
+                    Toast.makeText(this, entered.isEmpty()
+                            ? "key removed — restarting the sandbox"
+                            : "saved — applying to the sandbox…",
+                            Toast.LENGTH_LONG).show();
+                } else {
+                    Toast.makeText(this, "saved", Toast.LENGTH_SHORT).show();
+                }
+            } catch (Exception e) {
+                Toast.makeText(this, "save failed: " + e, Toast.LENGTH_LONG).show();
+            }
+            refresh();
+        });
+        sh.pill("Cancel", Sheet.QUIET, null);
+        sh.focus(input);
     }
 
     /** The key string currently stored for a provider (null = none). */
@@ -250,91 +240,87 @@ public class KeysActivity extends Activity {
     }
 
     private void githubDialog() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(20);
-        box.setPadding(p, dp(8), p, 0);
-        final EditText input = new EditText(this);
-        input.setHint("github_pat_… / ghp_…  (leave empty to remove)");
+        final EditText input = Sheet.input(this,
+                "github_pat_… / ghp_…  (leave empty to remove)", null, true);
         input.setTextSize(14);
         input.setTypeface(Typeface.MONOSPACE);
-        input.setSingleLine(true);
-        box.addView(input);
-        TextView guide = text(12, R.color.text_secondary, false);
-        guide.setText("Create a FINE-GRAINED token limited to\n"
+        Sheet sh = Sheet.show(this, "Agent GitHub token");
+        if (!sh.showing()) return;
+        sh.add(input);
+        sh.add(Sheet.hint(this,
+                "Create a FINE-GRAINED token limited to\n"
                 + "turanmertkaraca-bit/opencode-android →\n"
                 + "Contents: Read and write. Nothing else.\n\n"
                 + "github.com/settings/personal-access-tokens/new\n\n"
                 + "It becomes GH_TOKEN in the sandbox so the AI can analyze "
                 + "and push new versions. In Debian it can `apt install git` "
                 + "and commit right away. A scoped token keeps a runaway "
-                + "tool from touching anything else.");
-        guide.setPadding(0, dp(8), 0, 0);
-        box.addView(guide);
-        new AlertDialog.Builder(this)
-                .setTitle("Agent GitHub token")
-                .setView(box)
-                .setPositiveButton("Save", (d, w) -> {
-                    String v = input.getText().toString().trim();
-                    getSharedPreferences("oc", MODE_PRIVATE).edit()
-                            .putString("gh_token", v.isEmpty() ? null : v)
-                            .apply();
-                    Toast.makeText(this, v.isEmpty() ? "token removed"
-                            : "saved — active in new sandbox shells", Toast.LENGTH_SHORT).show();
-                    // P33: the row updates IN PLACE — recreate() here was a
-                    // whole-activity teardown for one line of masked text,
-                    // the same "feels bad" wait the theme switch had.
-                    githubSlot.removeAllViews();
-                    githubSlot.addView(githubRow());
-                    refresh();
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+                + "tool from touching anything else."));
+        sh.pill("Save", Sheet.PRIMARY, () -> {
+            String v = input.getText().toString().trim();
+            getSharedPreferences("oc", MODE_PRIVATE).edit()
+                    .putString("gh_token", v.isEmpty() ? null : v)
+                    .apply();
+            Toast.makeText(this, v.isEmpty() ? "token removed"
+                    : "saved — active in new sandbox shells", Toast.LENGTH_SHORT).show();
+            // P33: the row updates IN PLACE — recreate() here was a
+            // whole-activity teardown for one line of masked text,
+            // the same "feels bad" wait the theme switch had.
+            githubSlot.removeAllViews();
+            githubSlot.addView(githubRow());
+            refresh();
+        });
+        sh.pill("Cancel", Sheet.QUIET, null);
+        sh.focus(input);
     }
 
     private void customDialog() {
+        // P34: the custom-provider form on the Sheet — five labeled input
+        // wells, the same stack the rest of the app speaks.
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(20);
-        box.setPadding(p, dp(8), p, 0);
+        int gap = Theme.dp(this, 8);
         final EditText eId = field(box, "id (lowercase, e.g. myprovider)");
         final EditText eName = field(box, "display name (e.g. My Provider)");
         final EditText eUrl = field(box, "base URL (e.g. https://openrouter.ai/api/v1)");
         final EditText eKey = field(box, "API key (optional here)");
         final EditText eModel = field(box, "default model id (optional, e.g. anthropic/claude-3.5-sonnet)");
-        new AlertDialog.Builder(this)
-                .setTitle("Custom provider")
-                .setView(box)
-                .setPositiveButton("Add", (d, w) -> {
-                    try {
-                        AuthStore.addCustomProvider(this,
-                                eId.getText().toString(),
-                                eName.getText().toString(),
-                                eUrl.getText().toString(),
-                                eKey.getText().toString(),
-                                eModel.getText().toString());
-                        // P33: the sandbox picks new providers up by itself —
-                        // "restart server to load it" was another step the
-                        // user had to know about (and another "why is my
-                        // provider not there" dead end when skipped).
-                        ServerService.restart(this);
-                        Toast.makeText(this,
-                                "provider added — applying to the sandbox…",
-                                Toast.LENGTH_LONG).show();
-                        refresh();
-                    } catch (Exception e) {
-                        Toast.makeText(this, "failed: " + e, Toast.LENGTH_LONG).show();
-                    }
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        for (int i = 1; i < box.getChildCount(); i++) {
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams)
+                    box.getChildAt(i).getLayoutParams();
+            lp.topMargin = gap;
+            box.getChildAt(i).setLayoutParams(lp);
+        }
+        Sheet sh = Sheet.show(this, "Custom provider");
+        if (!sh.showing()) return;
+        sh.scroll(box, 0.6f);
+        sh.pill("Add", Sheet.PRIMARY, () -> {
+            try {
+                AuthStore.addCustomProvider(this,
+                        eId.getText().toString(),
+                        eName.getText().toString(),
+                        eUrl.getText().toString(),
+                        eKey.getText().toString(),
+                        eModel.getText().toString());
+                // P33: the sandbox picks new providers up by itself —
+                // "restart server to load it" was another step the
+                // user had to know about (and another "why is my
+                // provider not there" dead end when skipped).
+                ServerService.restart(this);
+                Toast.makeText(this,
+                        "provider added — applying to the sandbox…",
+                        Toast.LENGTH_LONG).show();
+                refresh();
+            } catch (Exception e) {
+                Toast.makeText(this, "failed: " + e, Toast.LENGTH_LONG).show();
+            }
+        });
+        sh.pill("Cancel", Sheet.QUIET, null);
+        sh.focus(eId);
     }
 
     private EditText field(LinearLayout box, String hint) {
-        EditText e = new EditText(this);
-        e.setHint(hint);
-        e.setTextSize(14);
-        e.setSingleLine(true);
+        EditText e = Sheet.input(this, hint, null, true);
         box.addView(e);
         return e;
     }

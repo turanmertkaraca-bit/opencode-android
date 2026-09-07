@@ -1,6 +1,6 @@
 package ai.opencode.app;
 
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
@@ -125,7 +125,7 @@ public class P33UiTest {
             View open = clickableOf(themeRow);
             assertNotNull(open);
             open.performClick();
-            AlertDialog dlg = (AlertDialog) ShadowDialog.getLatestDialog();
+            Dialog dlg = (Dialog) ShadowDialog.getLatestDialog();
             assertNotNull(dlg);
             assertTrue(dlg.isShowing());
 
@@ -169,7 +169,7 @@ public class P33UiTest {
             // open the picker — the Graphite row is checked AND labeled
             TextView themeRow = findText(decorOf(a), "Theme");
             clickableOf(themeRow).performClick();
-            AlertDialog dlg = (AlertDialog) ShadowDialog.getLatestDialog();
+            Dialog dlg = (Dialog) ShadowDialog.getLatestDialog();
             assertNotNull(dlg);
             TextView row = findText(dlg.getWindow().getDecorView(), "Graphite");
             assertNotNull(row);

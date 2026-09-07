@@ -102,21 +102,51 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- HERO: server card
         root.addView(heroCard());
 
+        // ---- P34: ESSENTIALS — the make-it-work cluster, at the TOP in
+        // its own accent-washed family (the field: "important settings
+        // stay at top of the settings screen with a difrent color pallet
+        // so its easyer to use and see"). The accent-tinted cards cannot
+        // be mistaken for the neutral infrastructure sections below, and
+        // the four rows cover the features the user actually reaches for.
+        root.addView(Theme.sectionLabel(this, "essentials"));
+        root.addView(essentialCard("✦", "Interactive canvas",
+                "the agent explains with live HTML pages — ask from any chat",
+                v -> canvasFromSettings()));
+        root.addView(cardGap());
+        root.addView(essentialCard("Ⓡ", "Credit limit", creditLimitSub(),
+                v -> creditDialog()));
+        root.addView(cardGap());
+        root.addView(essentialCard("◆", "Default model",
+                Models.selected(this) == null ? "auto (server default)"
+                        : Models.selected(this)[0] + " / " + Models.selected(this)[1],
+                v -> pickModel()));
+        root.addView(cardGap());
+        root.addView(essentialCard("⚿", "API keys",
+                "paste keys · import auth.json · custom endpoints",
+                v -> startActivity(new Intent(this, KeysActivity.class))));
+        root.addView(cardGap());
+        boolean autoAllow = getSharedPreferences("oc", MODE_PRIVATE)
+                .getBoolean("auto_allow", false);
+        root.addView(essentialCard("◈", "Unattended mode",
+                autoAllow ? "ON — the agent approves its own tool calls"
+                          : "OFF — approve every tool call yourself",
+                v -> {
+                    android.content.SharedPreferences.Editor ed =
+                            getSharedPreferences("oc", MODE_PRIVATE).edit();
+                    ed.putBoolean("auto_allow",
+                            !getSharedPreferences("oc", MODE_PRIVATE)
+                                    .getBoolean("auto_allow", false));
+                    ed.apply();
+                    Toast.makeText(this, "unattended mode "
+                            + (getSharedPreferences("oc", MODE_PRIVATE)
+                            .getBoolean("auto_allow", false) ? "ON" : "OFF"),
+                            Toast.LENGTH_SHORT).show();
+                    rebuildUi();
+                }));
+
         // ---- agent
         root.addView(Theme.sectionLabel(this, "agent"));
         LinearLayout mk = section();
-        mk.addView(rowLink("Default model",
-                Models.selected(this) == null ? "auto (server default)"
-                        : Models.selected(this)[0] + " / " + Models.selected(this)[1],
-                "◆", v -> pickModel()));
-        mk.addView(divider());
-        mk.addView(rowLink("API keys", "paste keys · import auth.json · endpoints",
-                "⚿", v -> startActivity(new Intent(this, KeysActivity.class))));
-        mk.addView(divider());
-        // P14: unattended mode — the agent answers its own approval requests
-        mk.addView(switchRow("Unattended mode (auto-allow)", "auto_allow",
-                "agent approves its own tool calls — leave it running hands-free"));
-        mk.addView(divider());
         mk.addView(rowLink("Agent GitHub access",
                 getSharedPreferences("oc", MODE_PRIVATE).getString("gh_token", null) != null
                         ? "token saved — the AI can clone · commit · push"
@@ -214,12 +244,9 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 "▤", v -> showIncidentLog()));
         root.addView(ka);
 
-        // ---- P31: safety (the credit limit)
-        root.addView(Theme.sectionLabel(this, "safety"));
-        LinearLayout sf = section();
-        sf.addView(rowLink("Credit limit", creditLimitSub(),
-                "\u24BA", v -> creditDialog()));
-        root.addView(sf);
+        // ---- P31: safety — P34: the credit limit lives in ESSENTIALS now
+        // (it IS the safety feature; burying it five sections deep was the
+        // field's discoverability report)
 
         // ---- projects
         root.addView(Theme.sectionLabel(this, "projects"));
@@ -243,7 +270,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.33.0-p33 · instant themes (graphite default), the project action sheet, keys reach the sandbox, honest picker contrast", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.34.0-p34 · one Sheet system for every box, back always lands on the deck, essentials on top", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -260,6 +287,136 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             Theme.enter(root.getChildAt(i), i * 45L);
         }
         return scroll;
+    }
+
+    // ------------------------------------------------------ P34 essentials
+
+    /** Rebuild the whole settings tree in place (the file's established
+     *  pattern for state changes that repaint several rows). */
+    private void rebuildUi() {
+        root.removeAllViews();
+        setContentView(buildUi());
+    }
+
+    /** The 8dp breathing room between essential cards. */
+    private View cardGap() {
+        View g = new View(this);
+        g.setLayoutParams(new LinearLayout.LayoutParams(1, Theme.dp(this, 8)));
+        return g;
+    }
+
+    /** ONE accent-washed card — the "different color pallet" the field
+     *  asked for: ACCENT_BG fill, accent hairline, an accent icon disc
+     *  and accent-tinted title. Unmistakably separate from the neutral
+     *  SURFACE infrastructure cards below, on every palette including
+     *  Paper (tokens are palette-owned). */
+    private LinearLayout essentialCard(String glyph, String title,
+                                       String sub, View.OnClickListener oc) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Theme.ACCENT_BG);
+        bg.setCornerRadius(Theme.dp(this, 16));
+        bg.setStroke(Theme.dp(this, 1), (Theme.ACCENT & 0x00FFFFFF) | 0x55000000);
+        card.setBackground(Theme.ripple(this, bg));
+        card.setPadding(Theme.dp(this, 16), Theme.dp(this, 13),
+                Theme.dp(this, 16), Theme.dp(this, 13));
+        card.setClickable(true);
+        card.setOnClickListener(v -> {
+            Theme.haptic(v);
+            if (oc != null) oc.onClick(v);
+        });
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout discWrap = new FrameLayout(this);
+        View disc = new View(this);
+        disc.setBackground(Theme.circle(Theme.TINT_ACCENT));
+        discWrap.addView(disc, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        TextView g = new TextView(this);
+        g.setText(glyph);
+        g.setTextSize(13);
+        g.setTextColor(Theme.ACCENT_LT);
+        g.setGravity(Gravity.CENTER);
+        discWrap.addView(g, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER));
+        LinearLayout.LayoutParams dwlp = new LinearLayout.LayoutParams(
+                Theme.dp(this, 26), Theme.dp(this, 26));
+        dwlp.rightMargin = Theme.dp(this, 10);
+        head.addView(discWrap, dwlp);
+
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextSize(15);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setTextColor(Theme.ACCENT_LT);
+        t.setSingleLine(true);
+        t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        head.addView(t, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        card.addView(head);
+
+        TextView s = new TextView(this);
+        s.setText(sub);
+        s.setTextSize(11);
+        s.setTextColor(Theme.TXT_DIM);
+        s.setSingleLine(true);
+        s.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = Theme.dp(this, 4);
+        slp.leftMargin = Theme.dp(this, 36);
+        card.addView(s, slp);
+        return card;
+    }
+
+    /** P34: Essentials → Interactive canvas. The explainer sheet with the
+     *  ONE-TAP hand-off: opens the last project's chat with the ask
+     *  pre-typed (the askCanvas extra), so the feature the field called
+     *  invisible is reachable from the very top of Settings. */
+    private void canvasFromSettings() {
+        Sheet sh = Sheet.show(this, "✦ Interactive canvas");
+        if (!sh.showing()) return;
+        sh.msg("The agent writes a self-contained HTML page — sliders, "
+                + "buttons, live visuals — to " + CanvasDoc.FILE_NAME
+                + " in the project, and you open it right in the app. "
+                + "Ask for one from any chat.");
+        sh.pill("Open chat & ask", Sheet.PRIMARY, () -> {
+            try {
+                String name = null, path = null;
+                String[] last = Resume.parseLastScreen(getSharedPreferences(
+                        "oc", MODE_PRIVATE).getString(Resume.KEY, null));
+                if ("chat".equals(last[0]) && Projects.validDir(last[2])) {
+                    name = last[1];
+                    path = last[2];
+                } else {
+                    Projects.P p = Projects.last(this);
+                    if (p != null) { name = p.name; path = p.path; }
+                }
+                if (path == null || !Projects.validDir(path)) {
+                    Toast.makeText(this,
+                            "open a project first — the canvas rides a chat",
+                            Toast.LENGTH_LONG).show();
+                    return;
+                }
+                if (!ServerService.pendingRestart()
+                        && ServerService.needsSwitch(new File(path))) {
+                    ServerService.switchTo(this, new File(path));
+                }
+                Intent i = new Intent(this, ChatActivity.class);
+                i.putExtra("project", name);
+                i.putExtra("path", path);
+                i.putExtra("askCanvas", " ");
+                startActivity(i);
+            } catch (Exception e) {
+                Toast.makeText(this, "cannot open chat: " + e,
+                        Toast.LENGTH_SHORT).show();
+            }
+        });
+        sh.pill("Close", Sheet.QUIET, null);
     }
 
     // ------------------------------------------------------------ hero
@@ -434,20 +591,25 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         String[] labels = new String[Hibernate.MINUTE_CHOICES.length];
         for (int i = 0; i < labels.length; i++)
             labels[i] = Hibernate.MINUTE_CHOICES[i] + " minutes";
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Hibernate after")
-                .setItems(labels, (d, w) -> {
-                    getSharedPreferences("oc", MODE_PRIVATE).edit()
-                            .putInt("hibernate_min", Hibernate.MINUTE_CHOICES[w])
-                            .apply();
-                    Toast.makeText(this, "sandbox sleeps after "
-                            + Hibernate.MINUTE_CHOICES[w] + " idle minutes "
-                            + "in the background", Toast.LENGTH_SHORT).show();
-                    root.removeAllViews();
-                    setContentView(buildUi());
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        // P34: the picker rides the Sheet — one app-wide presentation.
+        Sheet sh = Sheet.show(this, "Hibernate after");
+        if (!sh.showing()) return;
+        sh.sub("how long the app idles in the background before the "
+                + "sandbox stops itself (a reopen restores your chat)");
+        for (int i = 0; i < labels.length; i++) {
+            final int minutes = Hibernate.MINUTE_CHOICES[i];
+            sh.row("◑", labels[i], null, Theme.TXT, () -> {
+                sh.dismiss();
+                getSharedPreferences("oc", MODE_PRIVATE).edit()
+                        .putInt("hibernate_min", minutes)
+                        .apply();
+                Toast.makeText(this, "sandbox sleeps after "
+                        + minutes + " idle minutes "
+                        + "in the background", Toast.LENGTH_SHORT).show();
+                rebuildUi();
+            });
+        }
+        sh.pill("Cancel", Sheet.QUIET, null);
     }
 
     private String creditLimitSub() {
@@ -463,46 +625,72 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
     }
 
     private void creditDialog() {
-        final EditText in = new EditText(this);
-        in.setHint("cap in dollars, e.g. 5 or 5.50 \u2014 empty = no limit");
-        in.setTextSize(14);
-        in.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        // P34: the Pixel-style editor the field asked for ("a slider
+        // wouldn't make sense — you wouldn't know the price range — so a
+        // direct input is necessary but it still feels old"). The number
+        // input stays the source of truth; quick-cap chips cover the
+        // common choices, the amount field is big and calm, validation
+        // is INLINE (the old toast kept the dialog up but showed
+        // nothing), and Save/Reset are stacked full-width pills.
         double cur = RunHub.spendCap();
-        if (cur > 0) in.setText(String.format(java.util.Locale.US, "%g", cur));
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Credit limit")
-                .setMessage("All-time spend on this device: "
-                        + CreditLimit.fmt(RunHub.spendTotal()) + "\n\n"
-                        + "When total spending reaches the cap, every send is "
-                        + "refused until you raise or clear it. The counter "
-                        + "tracks what the app actually observed; reset it if "
-                        + "you already paid elsewhere.")
-                .setView(in)
-                .setPositiveButton("Save", (d, w) -> {
-                    double v = CreditLimit.parseCap(in.getText().toString());
-                    if (v < 0) {
-                        Toast.makeText(this, "that is not a dollar amount "
-                                + "(example: 5 or 5.50)", Toast.LENGTH_LONG).show();
-                        return;
-                    }
-                    getSharedPreferences("oc", MODE_PRIVATE).edit()
-                            .putString("spend_cap", v <= 0 ? ""
-                                    : String.valueOf(v)).apply();
-                    Toast.makeText(this, v <= 0 ? "credit limit cleared"
-                            : "credit limit set to " + CreditLimit.fmt(v),
-                            Toast.LENGTH_SHORT).show();
-                    root.removeAllViews();
-                    setContentView(buildUi());
-                })
-                .setNeutralButton("Reset spend counter", (d, w) -> {
-                    RunHub.resetSpendTotal();
-                    Toast.makeText(this, "spend counter zeroed",
-                            Toast.LENGTH_SHORT).show();
-                    root.removeAllViews();
-                    setContentView(buildUi());
-                })
-                .setNegativeButton("Cancel", null)
-                .show();
+        final EditText in = Sheet.input(this,
+                "cap in dollars, e.g. 5 or 5.50 \u2014 empty = no limit",
+                cur > 0 ? String.format(java.util.Locale.US, "%g", cur) : "",
+                true);
+        in.setTextSize(18);
+        in.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        final TextView err = new TextView(this);
+        err.setTextSize(12);
+        err.setTextColor(Theme.ERR);
+        err.setPadding(0, Theme.dp(this, 6), 0, 0);
+        in.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            public void onTextChanged(CharSequence s, int a, int b, int c) {
+                if (err.length() > 0) err.setText("");   // typing clears the error
+            }
+            public void afterTextChanged(android.text.Editable s) {}
+        });
+
+        final Sheet sh = Sheet.show(this, "Credit limit");
+        if (!sh.showing()) return;
+        sh.sub("All-time spend on this device: "
+                + CreditLimit.fmt(RunHub.spendTotal()));
+        sh.msg("When total spending reaches the cap, every send is "
+                + "refused until you raise or clear it. The counter "
+                + "tracks what the app actually observed; reset it if "
+                + "you already paid elsewhere.");
+        sh.add(in);
+        sh.add(err);
+        sh.add(Sheet.chipRow(this, CreditLimit.QUICK_CAPS,
+                java.util.Collections.singleton(CreditLimit.CAP_NONE),
+                v -> {
+                    err.setText("");
+                    in.setText(v == CreditLimit.CAP_NONE
+                            ? "" : CreditLimit.chipLabel(v).replace("$", ""));
+                }));
+        sh.pillKeep("Save", Sheet.PRIMARY, (s) -> {
+            double v = CreditLimit.parseCap(in.getText().toString());
+            if (v < 0) {
+                err.setText("that is not a dollar amount (example: 5 or 5.50)");
+                return;                       // the sheet stays, error inline
+            }
+            s.dismiss();
+            getSharedPreferences("oc", MODE_PRIVATE).edit()
+                    .putString("spend_cap", v <= 0 ? ""
+                            : String.valueOf(v)).apply();
+            Toast.makeText(this, v <= 0 ? "credit limit cleared"
+                    : "credit limit set to " + CreditLimit.fmt(v),
+                    Toast.LENGTH_SHORT).show();
+            rebuildUi();
+        });
+        sh.pill("Reset spend counter", Sheet.QUIET, () -> {
+            RunHub.resetSpendTotal();
+            Toast.makeText(this, "spend counter zeroed",
+                    Toast.LENGTH_SHORT).show();
+            rebuildUi();
+        });
+        sh.pill("Cancel", Sheet.QUIET, null);
+        sh.focus(in);
     }
 
     private void pickTheme() {
@@ -516,9 +704,9 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             String cur = Theme.currentId(this);
             LinearLayout wrap = new LinearLayout(this);
             wrap.setOrientation(LinearLayout.VERTICAL);
-            int pad = Theme.dp(this, 8);
+            int pad = Theme.dp(this, 4);
             wrap.setPadding(pad, pad, pad, pad);
-            final android.app.AlertDialog[] holder = new android.app.AlertDialog[1];
+            final Sheet[] holder = new Sheet[1];
             for (int i = 0; i < Theme.PALETTES.length; i++) {
                 final String id = Theme.PALETTES[i];
                 // P32: the picker rows are REAL rows now — name on the
@@ -570,7 +758,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                         getSharedPreferences("oc", MODE_PRIVATE).edit()
                                 .putString("theme", id).apply();
                         Theme.apply(this);
-                        if (holder[0] != null && holder[0].isShowing())
+                        if (holder[0] != null && holder[0].showing())
                             holder[0].dismiss();
                         setContentView(buildUi());
                         Theme.window(this);   // chrome + retint + restamp
@@ -586,12 +774,14 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                     }
                 });
             }
-            android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
-                    .setTitle("Theme")
-                    .setView(wrap)
-                    .setNegativeButton("Cancel", null)
-                    .show();
-            holder[0] = dlg;
+            // P34: the theme picker rides the Sheet — and the sheet itself
+            // dismisses BEFORE the rebuild, so its own window never has to
+            // outlive the palette swap that repainted its host.
+            Sheet sh = Sheet.show(this, "Theme");
+            if (!sh.showing()) return;
+            sh.add(wrap);
+            sh.pill("Cancel", Sheet.QUIET, null);
+            holder[0] = sh;
         } catch (Exception e) {
             // final-version insurance: the picker failing must never take
             // Settings down (and the incident log keeps it diagnosable)
@@ -601,7 +791,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         }
     }
 
-    /** P31: the environment factory reset — honest dialog, guarded wipe,
+    /** P31: the environment factory reset — honest sheet, guarded wipe,
      *  optional immediate Debian reinstall. */
     private void confirmEnvReset() {
         StringBuilder msg = new StringBuilder("WILL be wiped (re-extracted from "
@@ -609,12 +799,10 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         for (String n : EnvironmentReset.targetNames()) msg.append(" \u2022 ").append(n).append('\n');
         msg.append("\nSTAYS exactly as it is:\n");
         for (String n : EnvironmentReset.keptNames()) msg.append(" \u2022 ").append(n).append('\n');
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Reset sandbox environment?")
-                .setMessage(msg.toString())
-                .setPositiveButton("Reset", (d, w) -> runEnvReset())
-                .setNegativeButton("Cancel", null)
-                .show();
+        Sheet.show(this, "Reset sandbox environment?")
+                .msg(msg.toString())
+                .pill("Reset", Sheet.DANGER, () -> runEnvReset())
+                .pill("Cancel", Sheet.QUIET, null);
     }
 
     private void runEnvReset() {
@@ -629,22 +817,20 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 ServerService.appendDiagStatic(this, "env-reset",
                         "environment reset \u2014 " + n + " entries wiped "
                                 + "(keys/chats/settings kept)");
-                ui.post(() -> new android.app.AlertDialog.Builder(this)
-                        .setTitle("Environment reset")
-                        .setMessage(n + " entries wiped. Reinstall the Debian "
+                ui.post(() -> Sheet.show(this, "Environment reset")
+                        .msg(n + " entries wiped. Reinstall the Debian "
                                 + "environment now (takes a minute), or let it "
                                 + "happen on demand later? The Lite toolkit "
                                 + "reinstalls itself on the next launch either way.")
-                        .setPositiveButton("Reinstall now", (d2, w2) -> {
+                        .pill("Reinstall now", Sheet.PRIMARY, () -> {
                             ServerService.restart(this);
                             installDebian();
                         })
-                        .setNegativeButton("Later", (d2, w2) -> {
+                        .pill("Later", Sheet.QUIET, () -> {
                             ServerService.restart(this);
                             Toast.makeText(this, "environment will rebuild on demand",
                                     Toast.LENGTH_SHORT).show();
-                        })
-                        .show());
+                        }));
             });
             if (t != null) {
                 Trail.record(this, "env reset", t);
@@ -659,32 +845,33 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         prog.setTypeface(Typeface.MONOSPACE);
         prog.setTextSize(12);
         prog.setTextColor(Theme.TXT);
-        prog.setPadding(Theme.dp(this, 20), Theme.dp(this, 12),
-                Theme.dp(this, 20), Theme.dp(this, 12));
+        prog.setPadding(Theme.dp(this, 4), Theme.dp(this, 8),
+                Theme.dp(this, 4), Theme.dp(this, 8));
         prog.setText("starting…");
-        android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
-                .setTitle("Debian environment")
-                .setView(prog)
-                .setNegativeButton("Run in background", (d, w) ->
-                        Toast.makeText(this, "installing in background…",
-                                Toast.LENGTH_SHORT).show())
-                .show();
-        final android.app.AlertDialog fDlg = dlg;
+        // P34: the progress rides the Sheet; the quiet pill flips to
+        // "Close" when the watcher thread sees the install finish
+        // (the old code mutated the framework button).
+        final Sheet sh = Sheet.show(this, "Debian environment");
+        if (!sh.showing()) return;
+        sh.add(prog);
+        final TextView bgPill = sh.pillView("Run in background", Sheet.QUIET,
+                () -> Toast.makeText(this, "installing in background…",
+                        Toast.LENGTH_SHORT).show());
+        sh.add(bgPill);
         new Thread(() -> Debian.install(this, msg -> ui.post(() -> {
             if (isFinishing() || isDestroyed()) return;
             prog.setText(msg);
         })), "oc-debian").start();
         // the thread finishes when install does; poll for completion to
-        // enable the Done button state refresh without blocking the user
+        // enable the Close state refresh without blocking the user
         new Thread(() -> {
             while (true) {
                 try { Thread.sleep(1500); } catch (InterruptedException e) { return; }
                 boolean done = Debian.extracted(this);
                 ui.post(() -> {
                     refreshDebian();
-                    if (done && fDlg != null && fDlg.isShowing() && !isFinishing())
-                        fDlg.getButton(android.app.AlertDialog.BUTTON_NEGATIVE)
-                                .setText("Close");
+                    if (done && sh.showing() && !isFinishing())
+                        bgPill.setText("Close");
                 });
                 if (done) return;
             }
@@ -695,11 +882,8 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
      *  Debian env report (kernel · user · os · tools · storage · project)
      *  and also verifies the dirs proot needs actually exist. */
     private void runEnvCheck() {
-        android.app.AlertDialog waiting = new android.app.AlertDialog.Builder(this)
-                .setTitle("Environment")
-                .setMessage("checking…")
-                .setCancelable(false)
-                .show();
+        Sheet waiting = Sheet.show(this, "Environment");
+        if (waiting.showing()) waiting.msg("checking…");
         new Thread(() -> {
             // dir audit — the exact paths the field report called out
             java.io.File deb = Debian.dir(this);
@@ -712,28 +896,23 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                     + "\nDownload bind   : " + (dl.isDirectory() ? "ok" : "not visible");
             final String rep = dirs + "\n\n" + Debian.envReport(this);
             ui.post(() -> {
-                try {
-                    waiting.dismiss();
-                } catch (Exception ignored) {}
-                new android.app.AlertDialog.Builder(this)
-                        .setTitle("Environment")
-                        .setMessage(rep)
-                        .setPositiveButton("copy", (d, w) -> {
+                waiting.dismiss();
+                Sheet.show(this, "Environment")
+                        .msg(rep)
+                        .pill("copy", Sheet.PRIMARY, () -> {
                             ClipboardManager cm =
                                     (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                             cm.setPrimaryClip(ClipData.newPlainText("env", rep));
                             Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show();
                         })
-                        .setNegativeButton("close", null)
-                        .show();
+                        .pill("close", Sheet.QUIET, null);
             });
         }).start();
     }
 
     private void envExplain() {
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Two environments")
-                .setMessage(
+        Sheet.show(this, "Two environments")
+                .msg(
                         "LITE (always active)\n"
                       + "Static busybox + the Alpine layer. Agent shells run "
                       + "natively — `pkg install python3 git nodejs gcc …` "
@@ -746,8 +925,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                       + "The installer probes proot first — if this device "
                       + "can't run it, the Lite shell stays active and "
                       + "nothing breaks.")
-                .setPositiveButton("Got it", null)
-                .show();
+                .pill("Got it", Sheet.QUIET, null);
     }
 
     // -------------------------------------------------------- keep alive
@@ -821,12 +999,20 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             body = "No incidents recorded — the sandbox has not died since "
                     + "this build was installed. \u2713";
         }
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Sandbox incident log")
-                .setMessage("each line: timestamp \u00b7 event \u00b7 detail \u00b7 free memory\n\n"
-                        + body)
-                .setPositiveButton("Close", null)
-                .show();
+        // P34: scrollable on the Sheet — a long log used to overflow the
+        // framework box with no way to reach the top.
+        TextView tv = new TextView(this);
+        tv.setTextSize(12);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setTextColor(Theme.TXT);
+        tv.setLineSpacing(Theme.dp(this, 1), 1f);
+        tv.setText("each line: timestamp \u00b7 event \u00b7 detail \u00b7 free memory\n\n"
+                + body);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(tv);
+        Sheet.show(this, "Sandbox incident log")
+                .scroll(sv, 0.55f)
+                .pill("Close", Sheet.QUIET, null);
     }
 
     private void openNotifSettings() {
@@ -840,9 +1026,8 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
     }
 
     private void samsungGuide() {
-        new android.app.AlertDialog.Builder(this)
-                .setTitle("Samsung keep-alive")
-                .setMessage(
+        Sheet.show(this, "Samsung keep-alive")
+                .msg(
                         "Galaxy phones are the most aggressive at killing "
                       + "background apps. For unattended agent runs:\n\n"
                       + "1. Settings → Device care → Battery → Background "
@@ -856,14 +1041,13 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                       + "that IS the keep-alive signal.\n\n"
                       + "With those four, the agent keeps working with the "
                       + "screen off.")
-                .setPositiveButton("Open battery settings", (d, w) -> {
+                .pill("Open battery settings", Sheet.PRIMARY, () -> {
                     try {
                         startActivity(new Intent(
                                 Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
                     } catch (Exception ignored) {}
                 })
-                .setNegativeButton("Close", null)
-                .show();
+                .pill("Close", Sheet.QUIET, null);
     }
 
     // ---------------------------------------------------------- model
@@ -884,22 +1068,20 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         if (isFinishing() || isDestroyed()) return;
         int total = 0;
         for (Models.Prov p : provs) total += p.models.size();
-        android.app.AlertDialog.Builder b = new android.app.AlertDialog.Builder(this);
-        b.setTitle("Default model · " + total + " available");
+        // P34: the default-model picker rides the Sheet system.
+        final Sheet sh = Sheet.show(this, "Default model · " + total + " available");
+        if (!sh.showing()) return;
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(16);
-        box.setPadding(p, dp(8), p, 0);
-        final EditText search = new EditText(this);
-        search.setHint("search provider or model…");
+        int p = dp(4);
+        box.setPadding(p, 0, p, 0);
+        final EditText search = Sheet.input(this, "search provider or model…", null, true);
         search.setTextSize(14);
-        search.setSingleLine(true);
         box.addView(search);
         final android.widget.ListView lv = new android.widget.ListView(this);
-        box.addView(lv, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(430)));
-        b.setView(box);
-        final android.app.AlertDialog dlg = b.create();
+        sh.add(box);
+        sh.addFixed(lv, 430);
+        sh.focus(search);
 
         final List<Object[]> items = new ArrayList<>();
         Runnable refill = () -> {
@@ -976,11 +1158,9 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             Models.Mdl m = (Models.Mdl) it[2];
             Models.save(this, pr.id, m.id);
             try { AuthStore.setDefaultModel(this, pr.id, m.id); } catch (Exception ignored) {}
-            dlg.dismiss();
+            sh.dismiss();
             recreate();
         });
-        Theme.skin(dlg);
-        dlg.show();
     }
 
     // ---------------------------------------------------------- doctor
@@ -995,13 +1175,17 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         tv.setTypeface(Typeface.MONOSPACE);
         tv.setTextSize(12);
         tv.setTextColor(Theme.TXT);
-        tv.setPadding(Theme.dp(this, 20), Theme.dp(this, 12), Theme.dp(this, 20), Theme.dp(this, 12));
+        tv.setPadding(Theme.dp(this, 4), Theme.dp(this, 8), Theme.dp(this, 4), Theme.dp(this, 8));
         tv.setText("checking…");
-        android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(this)
-                .setTitle("Sandbox doctor")
-                .setView(tv)
-                .setPositiveButton("Done", null)
-                .show();
+        // P34: the doctor rides the Sheet — one TextView installed at
+        // show-time and updated in place, per check, so progress is
+        // visible even on slow probes (the P11 lesson kept).
+        ScrollView sv = new ScrollView(this);
+        sv.addView(tv);
+        final Sheet sh = Sheet.show(this, "Sandbox doctor");
+        if (!sh.showing()) return;
+        sh.scroll(sv, 0.55f);
+        sh.pill("Done", Sheet.QUIET, null);
         new Thread(() -> {
             StringBuilder sb = new StringBuilder();
             java.util.function.Consumer<String> checking = msg -> ui.post(() -> {

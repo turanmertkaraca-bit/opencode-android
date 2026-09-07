@@ -1,8 +1,8 @@
 package ai.opencode.app;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.Intent;
+import android.graphics.Typeface;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.ScrollView;
@@ -213,18 +213,28 @@ public class MainActivity extends Activity implements ServerService.Evt {
             txt = "(unreadable: " + e + ")";
         }
         final String body = txt;
-        new AlertDialog.Builder(this)
-                .setTitle("Crash report")
-                .setMessage(body.length() > 4000 ? body.substring(0, 4000) + "\n…(full text in Diagnostics)" : body)
-                .setPositiveButton("Copy", (d, w) -> {
+        // P34: the crash report rides the Sheet — the full text stays
+        // scrollable and Copy remains the primary action.
+        TextView bodyTv = new TextView(this);
+        bodyTv.setText(txt.length() > 4000
+                ? txt.substring(0, 4000) + "\n…(full text in Diagnostics)" : txt);
+        bodyTv.setTextSize(12);
+        bodyTv.setTypeface(Typeface.MONOSPACE);
+        bodyTv.setTextColor(Theme.TXT);
+        int bp = Theme.dp(this, 4);
+        bodyTv.setPadding(bp, bp, bp, bp);
+        ScrollView sv = new ScrollView(this);
+        sv.addView(bodyTv);
+        Sheet.show(this, "Crash report")
+                .scroll(sv, 0.45f)
+                .pill("Copy", Sheet.PRIMARY, () -> {
                     android.content.ClipboardManager cm =
                             (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                     cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", body));
                     Toast.makeText(this, "copied", Toast.LENGTH_SHORT).show();
                 })
-                .setNeutralButton("Delete", (d, w) -> { f.delete(); crash.setVisibility(View.GONE); })
-                .setNegativeButton("Close", null)
-                .show();
+                .pill("Delete", Sheet.DANGER, () -> { f.delete(); crash.setVisibility(View.GONE); })
+                .pill("Close", Sheet.QUIET, null);
     }
 
     // ---------------------------------------------------- service events

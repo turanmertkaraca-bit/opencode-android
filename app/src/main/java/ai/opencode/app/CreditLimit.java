@@ -18,6 +18,19 @@ public final class CreditLimit {
     /** Sanity ceiling — a fat-fingered "50000" is legal, "99999999" is not. */
     public static final double CAP_MAX = 100_000.0;
 
+    /** P34: the quick-pick presets in the new credit-limit sheet — the
+     *  Pixel-style answer to "a slider wouldn't make sense, you wouldn't
+     *  know the price range": tap a common cap, or type an exact one.
+     *  The sentinel CAP_NONE renders as "no limit". JVM-pinned. */
+    public static final double[] QUICK_CAPS = {5, 10, 25, 50, 100, -1};
+    /** The sentinel inside QUICK_CAPS meaning "clear the cap". */
+    public static final double CAP_NONE = -1;
+
+    /** The chip label for a quick-cap value ("$25" / "no limit"). */
+    public static String chipLabel(double v) {
+        return v == CAP_NONE ? "no limit" : fmt(v);
+    }
+
     /**
      * Parse the cap the user typed. Returns:
      *   0  → no limit (empty/null input),

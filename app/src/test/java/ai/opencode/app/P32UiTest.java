@@ -1,6 +1,6 @@
 package ai.opencode.app;
 
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
@@ -85,7 +85,7 @@ public class P32UiTest {
             assertNotNull("the row must be clickable", clickable);
             clickable.performClick();
 
-            AlertDialog dlg = (AlertDialog) ShadowDialog.getLatestDialog();
+            Dialog dlg = (Dialog) ShadowDialog.getLatestDialog();
             assertNotNull("tapping Theme must open the picker dialog", dlg);
             assertTrue(dlg.isShowing());
 
@@ -105,7 +105,7 @@ public class P32UiTest {
             View open = clickableOf(themeRow);
             assertNotNull(open);
             open.performClick();
-            AlertDialog dlg = (AlertDialog) ShadowDialog.getLatestDialog();
+            Dialog dlg = (Dialog) ShadowDialog.getLatestDialog();
             assertNotNull(dlg);
 
             TextView paper = findText(dlg.getWindow().getDecorView(), "Paper");

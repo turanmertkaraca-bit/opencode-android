@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P34 sheet motion: the panel rises from the bottom edge, decel, 210 ms. -->
+<translate xmlns:android="http://schemas.android.com/apk/res/android"
+    android:fromYDelta="100%p" android:toYDelta="0"
+    android:duration="210" android:interpolator="@android:anim/decelerate_interpolator"/>
