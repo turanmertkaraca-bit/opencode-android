@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.33.0 — P33, the final version)
+## Install (v0.34.0 — P34)
 
-1. Grab `opencode-p33-v0.33.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p34-v0.34.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -27,7 +27,42 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
 
-## What's in v0.33.0 (P33 — the final version: themes land instantly, Graphite is the face, keys reach the sandbox, the picker tells the truth)
+## What's in v0.34.0 (P34 — one surface for every box, a deck that always catches you)
+
+- **every box in the app grew up** — the audit found 41 framework alert
+  boxes across 9 files (the Credit limit editor and the Interactive canvas
+  ask among them — the grey Android-4 platform box from the field
+  screenshots). Every one is now the app's own Sheet: bottom-anchored
+  28 dp panel, grab handle, large title, stacked full-width pills,
+  palette-correct by construction on all six themes, slide-up/down motion
+  on every open AND dismiss (back / scrim / pill), swipe-away header,
+  manual IME + nav insets, the motion switch honored, and a dead-flag
+  no-op so a sheet can never take a screen down. Zero framework boxes
+  remain.
+- **back from a chat ALWAYS lands on the deck** — the field report: after
+  an update the app spawned straight into the playground chat, and both
+  the hardware back and the in-app back closed the app instead of opening
+  the project deck (the restore had made the chat the task root —
+  `finish()` had nothing beneath it). The back rule is now pure and
+  pinned by test: task root → open the deck explicitly, else a plain
+  finish reveals it.
+- **Settings ESSENTIALS moved to the top** — the important toggles lived
+  below a scroll ("they have to scroll below to settings to see them"):
+  Interactive canvas (with a one-tap pre-typed chat hand-off), Credit
+  limit, Default model, API keys, Unattended mode — now a top zone in
+  their own accent-washed color family.
+- **the credit-limit editor is Pixel-style** — a big amount field,
+  $5–$100 + no-limit quick chips, inline validation that keeps the sheet
+  open and clears as you type, Save/Reset stacked pills. The direct
+  number input stays — a slider cannot know the price range the user is
+  willing to give.
+- **the polish sweep** — the ⌘ sheet pins a featured canvas row; ⌘ list
+  rows and the Diagnostics shell input now paint from live tokens (they
+  wore frozen white on Paper before).
+- P34Test pins the back rule, the chip round-trips and the resume
+  format; 300 JVM tests green; zero framework boxes remain.
+
+## What was in v0.33.0 (P33 — the final version: themes land instantly, Graphite is the face, keys reach the sandbox, the picker tells the truth)
 
 - **the theme change is INSTANT** — tapping a palette in Settings used to
   call `recreate()`: a whole-activity teardown + rebuild + window animation
@@ -653,5 +688,17 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P29 model-sheet double-open, photo tray, cost prediction, /compact, terse v1, feel pass | shipped |
 | P31 parallel chats, model favorites, credit limit, interactive canvas, six themes, auto-hibernate | shipped |
 | P30 live setting injection (<system-reminder>), cost-hint clipping, long-press project delete | shipped |
-| P32 the final polish: theme crash fixed, whole-app palette sync, frozen colors retired, swatch picker | **current — final** |
-| Next: on-device toolchain (clang) import path | dropped (P32 is final) |
+| P32 the final polish: theme crash fixed, whole-app palette sync, frozen colors retired, swatch picker | shipped |
+| P33 the final version: instant themes, Graphite default, keys reach the sandbox, honest picker, project sheet | shipped |
+| P34 one surface for every box (41 framework boxes → Sheets), back always catches you, Settings ESSENTIALS top zone, Pixel-style credit editor | **current** |
+| Next: P35 | reserved |
+
+## Credits
+
+**[@turanmertkaraca-bit](https://github.com/turanmertkaraca-bit) — Founder & Project Lead**
+
+Ran development end to end: spec'd every feature, called every design
+decision, tested every build in the field, and shipped 34 releases
+(P0 → P34).
+
+Developed with AI assistance under their direction.
