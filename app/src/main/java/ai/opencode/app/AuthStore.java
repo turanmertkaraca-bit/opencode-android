@@ -106,9 +106,31 @@ public final class AuthStore {
         }
     }
 
-    /** True when at least one provider entry exists. */
+    /** True when at least one provider entry exists — in auth.json OR as
+     *  a custom provider with an inline apiKey in opencode.json (P33: the
+     *  "no API key yet" subtitle must not nag a user whose only key lives
+     *  in a custom provider's options — the belt-and-braces write covers
+     *  most cases, but hand-imported configs carry options-only keys). */
     public static boolean hasAnyKey(Context c) {
-        return !readAuth(c).isEmpty();
+        if (!readAuth(c).isEmpty()) return true;
+        return configHasEmbeddedKey(readConfig(c));
+    }
+
+    /** P33 pure rule: does this opencode.json config declare at least one
+     *  provider with a non-empty options.apiKey? JVM-pinned. */
+    public static boolean configHasEmbeddedKey(Map<String, Object> cfg) {
+        if (cfg == null) return false;
+        Map<String, Object> provs = Json.map(cfg, "provider");
+        if (provs == null) return false;
+        for (Object o : provs.values()) {
+            Map<String, Object> p = Json.obj(o);
+            if (p == null) continue;
+            Map<String, Object> opts = Json.map(p, "options");
+            if (opts == null) continue;
+            String k = Json.str(opts, "apiKey");
+            if (k != null && !k.trim().isEmpty()) return true;
+        }
+        return false;
     }
 
     /** True when this provider has an entry. */

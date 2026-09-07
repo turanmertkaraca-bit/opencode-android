@@ -3,4 +3,7 @@
 <resources>
     <item name="psuRoot" type="id"/>
     <item name="psuList" type="id"/>
+    <!-- P33: the decor tag carrying the palette id a screen was built with
+         (Theme.stampApplied / appliedIdOf — the per-screen stale check). -->
+    <item name="oc_palette_applied" type="id"/>
 </resources>

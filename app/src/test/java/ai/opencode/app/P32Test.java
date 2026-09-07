@@ -209,10 +209,17 @@ public class P32Test {
     }
 
     @Test
-    public void sixPalettes_stillShip_andOledIsStillTheDefault() {
+    public void sixPalettes_stillShip_andGraphiteIsTheDefault() {
         assertEquals(6, Theme.PALETTES.length);
         assertEquals("oled", Theme.PALETTES[0]);
         assertEquals(0, Theme.paletteIndex(null));
         assertEquals(0, Theme.paletteIndex("unheard-of"));
+        // P33: the user picked Graphite as the face of the app — the
+        // DEFAULT moved from oled to graphite (pref-less devices only;
+        // an explicit choice always wins). Unknown ids still fall back
+        // to index 0 — the sanity floor, not the default face.
+        assertEquals("graphite", Theme.DEFAULT_PALETTE);
+        assertEquals("midnight", Theme.defaultId(true));
+        assertEquals("graphite", Theme.defaultId(false));
     }
 }

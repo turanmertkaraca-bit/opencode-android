@@ -28,6 +28,7 @@ import java.util.Map;
 public class KeysActivity extends Activity {
 
     private LinearLayout list;
+    private LinearLayout githubSlot;
 
     @Override
     protected void onResume() {
@@ -52,8 +53,10 @@ public class KeysActivity extends Activity {
         root.addView(header());
         TextView note = text(13, R.color.text_secondary, false);
         note.setText("Paste an API key for any provider you use. Keys are "
-                + "stored in the app's private auth.json and picked up on "
-                + "your next message — no restart needed.\n\n"
+                + "stored in the app's private auth.json — the sandbox "
+                + "reloads them by itself the moment a key is saved, "
+                + "changed or imported, so the picker and your next "
+                + "message see them immediately.\n\n"
                 + "P16, verified against the catalog: OpenCode ZEN and "
                 + "OpenCode GO are SEPARATE providers with SEPARATE keys — "
                 + "both issued at console.opencode.ai, but they are NOT "
@@ -76,7 +79,10 @@ public class KeysActivity extends Activity {
         // P12: the GitHub key the AGENT uses — separate from model providers.
         // Stored in prefs, exported as GH_TOKEN into Debian/sandbox shells.
         root.addView(section("Agent GitHub access"));
-        root.addView(githubRow());
+        githubSlot = new LinearLayout(this);
+        githubSlot.setOrientation(LinearLayout.VERTICAL);
+        githubSlot.addView(githubRow());
+        root.addView(githubSlot);
 
         root.addView(section("Custom endpoint (OpenAI-compatible)"));
         LinearLayout custom = row("＋ Add custom endpoint",
@@ -165,15 +171,30 @@ public class KeysActivity extends Activity {
                 .setPositiveButton("Save", (d, w) -> {
                     // P16: a FIRST-TIME key changes what /config/providers
                     // can offer (opencode-go is invisible to the server until
-                    // its key exists) — restart once so the provider goes
-                    // live immediately instead of waiting for a manual one.
-                    boolean first = !AuthStore.hasKey(this, id);
+                    // its key exists) — restart so the provider goes live
+                    // immediately instead of waiting for a manual one.
+                    // P33: the SAME is true for a CHANGED key — the field
+                    // report was exact: "the app thinks i have no api key
+                    // even tho it says i have it in api settings". The old
+                    // server process kept the OLD key in memory (or knew of
+                    // no key at all) and answered every send with key
+                    // errors, while this screen happily showed the new one
+                    // saved. Whenever the stored value actually changes,
+                    // the sandbox now re-loads it automatically.
+                    String previous = storedKey(id);
+                    String entered = input.getText().toString().trim();
+                    boolean first = previous == null;
+                    boolean changed = previous == null
+                            ? !entered.isEmpty()
+                            : !previous.equals(entered);
                     try {
                         AuthStore.setApiKey(this, id, input.getText().toString());
-                        if (first) {
+                        if (first || changed) {
                             ServerService.restart(this);
-                            Toast.makeText(this, "saved — restarting server so "
-                                    + name + " goes live", Toast.LENGTH_LONG).show();
+                            Toast.makeText(this, entered.isEmpty()
+                                    ? "key removed — restarting the sandbox"
+                                    : "saved — applying to the sandbox…",
+                                    Toast.LENGTH_LONG).show();
                         } else {
                             Toast.makeText(this, "saved", Toast.LENGTH_SHORT).show();
                         }
@@ -184,6 +205,16 @@ public class KeysActivity extends Activity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /** The key string currently stored for a provider (null = none). */
+    private String storedKey(String id) {
+        Object entry = AuthStore.readAuth(this).get(id);
+        if (entry instanceof Map) {
+            Object k = ((Map<?, ?>) entry).get("key");
+            if (k instanceof String && !((String) k).isEmpty()) return (String) k;
+        }
+        return null;
     }
 
     private String hintFor(String id) {
@@ -250,7 +281,12 @@ public class KeysActivity extends Activity {
                             .apply();
                     Toast.makeText(this, v.isEmpty() ? "token removed"
                             : "saved — active in new sandbox shells", Toast.LENGTH_SHORT).show();
-                    recreate();
+                    // P33: the row updates IN PLACE — recreate() here was a
+                    // whole-activity teardown for one line of masked text,
+                    // the same "feels bad" wait the theme switch had.
+                    githubSlot.removeAllViews();
+                    githubSlot.addView(githubRow());
+                    refresh();
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
@@ -277,7 +313,13 @@ public class KeysActivity extends Activity {
                                 eUrl.getText().toString(),
                                 eKey.getText().toString(),
                                 eModel.getText().toString());
-                        Toast.makeText(this, "provider added — restart server to load it",
+                        // P33: the sandbox picks new providers up by itself —
+                        // "restart server to load it" was another step the
+                        // user had to know about (and another "why is my
+                        // provider not there" dead end when skipped).
+                        ServerService.restart(this);
+                        Toast.makeText(this,
+                                "provider added — applying to the sandbox…",
                                 Toast.LENGTH_LONG).show();
                         refresh();
                     } catch (Exception e) {
@@ -318,7 +360,11 @@ public class KeysActivity extends Activity {
             Binaries.copyFromUri(this, uri, tmp);
             AuthStore.importAuth(this, tmp);
             tmp.delete();
-            Toast.makeText(this, "auth.json merged", Toast.LENGTH_SHORT).show();
+            // P33: an imported auth.json may carry entirely different
+            // credentials — the running server must re-read it, by itself.
+            ServerService.restart(this);
+            Toast.makeText(this, "auth.json merged — applying to the sandbox…",
+                    Toast.LENGTH_LONG).show();
             refresh();
         } catch (Exception e) {
             Toast.makeText(this, "import failed: " + e, Toast.LENGTH_LONG).show();

@@ -86,8 +86,13 @@ public final class Theme {
 
     // ---------------------------------------------------- P31 palettes ----
 
-    /** Palette ids, in menu order. "oled" is the DEFAULT (the user set
-     *  it: pure black first). Fields per entry (order matters):
+    /** P33: the DEFAULT face of the app — the user picked Graphite ("the
+     *  graphite theme is cool make it default"). This is the palette a
+     *  fresh install (or a wiped theme pref) lands on; a device that has
+     *  ever picked a theme keeps its choice. */
+    public static final String DEFAULT_PALETTE = "graphite";
+
+    /** Palette ids, in menu order. Fields per entry (order matters):
      *  BG SURFACE SURFACE2 STROKE ACCENT ACCENT_LT ACCENT_BG
      *  TXT TXT_DIM TXT_FAINT OK ERR WARN ON_ACCENT
      *  TINT_ACCENT TINT_OK TINT_DANGER ON_DISC RIM_USER ICON_DISC
@@ -181,14 +186,26 @@ public final class Theme {
      *  paper steps on light). Initialized AFTER GRAD_DATA (static order). */
     public static int[][] CARD_GRADS = gradTable("oled");
 
-    /** The current palette id (defaults: legacy "amoled" flag → oled/midnight). */
+    /** P33 pure rule for the default: a device with NO theme pref lands
+     *  on Graphite (the new default face); the only honored legacy carve-
+     *  out is an explicit pre-P31 "not AMOLED" choice, which keeps Midnight
+     *  (that was a deliberate toggle, not an absence of taste). JVM-pinned. */
+    public static String defaultId(boolean legacyNotAmoled) {
+        return legacyNotAmoled ? "midnight" : DEFAULT_PALETTE;
+    }
+
+    /** The current palette id: the "theme" pref, else the P33 default
+     *  (Graphite) with the legacy amoled carve-out honored. The old
+     *  boolean meant "AMOLED black on" (true = the pre-P31 default face);
+     *  an explicit OFF was a deliberate "not near-black" choice, which is
+     *  the only case that keeps Midnight. */
     public static String currentId(Context c) {
         String t = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
                 .getString("theme", null);
         if (t == null) {
             boolean amoled = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
                     .getBoolean("amoled", true);
-            return amoled ? "oled" : "midnight";
+            return defaultId(!amoled);   // an explicit OFF was a real choice
         }
         return t;
     }
@@ -259,9 +276,38 @@ public final class Theme {
             a.getTheme().applyStyle(sheetStyle(paletteIndex(currentId(a))), true);
             // and remap every static XML color in the inflated tree
             retint(w.getDecorView());
+            // P33: stamp the palette THIS screen was built with on its own
+            // decor. The stale check below used to compare the pref against
+            // the PROCESS-GLOBAL currentIdStatic — which Settings' own
+            // apply() had already updated, so no other screen could ever
+            // be "stale" and the whole-app sync never fired in the field
+            // (the user's P33 report: parts of the app still wore the old
+            // theme). The stamp makes the comparison per-screen.
+            stampApplied(a);
         } catch (Exception ignored) {
             // a window-level nit must never take a screen down
         }
+    }
+
+    /** The decor tag this screen's palette id lives under. */
+    private static final int APPLIED_TAG = R.id.oc_palette_applied;
+
+    /** Record the palette id the given activity was last (re)built with. */
+    static void stampApplied(android.app.Activity a) {
+        try {
+            a.getWindow().getDecorView().setTag(APPLIED_TAG, currentIdStatic);
+        } catch (Throwable ignored) {}
+    }
+
+    /** The palette id the activity was last built with (the stamp; a
+     *  screen that never got one — or a non-activity context — falls back
+     *  to the process-wide id, the pre-P33 behavior). */
+    public static String appliedIdOf(android.app.Activity a) {
+        try {
+            Object t = a.getWindow().getDecorView().getTag(APPLIED_TAG);
+            if (t instanceof String) return (String) t;
+        } catch (Throwable ignored) {}
+        return currentIdStatic;
     }
 
     /** R.style of the sheet presentation for a palette index. */
@@ -428,8 +474,15 @@ public final class Theme {
         return paletteIndex(prefId) != paletteIndex(appliedId);
     }
 
-    /** Stale check against the live pref + the palette this process last
-     *  applied (the pure core above, wired to real state). */
+    /** Stale check against the live pref + THE PALETTE THIS SCREEN WAS
+     *  BUILT WITH (P33: per-activity stamp — the process-global static
+     *  was already updated by whoever switched the theme, so the old
+     *  wiring could never see this screen as stale). */
+    public static boolean isStale(android.app.Activity a) {
+        return isStale(currentId(a), appliedIdOf(a));
+    }
+
+    /** Non-activity contexts have no stamp — fall back to the process id. */
     public static boolean isStale(Context c) {
         return isStale(currentId(c), currentIdStatic);
     }
@@ -450,11 +503,14 @@ public final class Theme {
         } catch (Throwable e) {
             return false;           // apply failed: stay coherent, no half state
         }
+        // P33: restamp BEFORE the recreate — if recreate is refused (rare
+        // device states) the next resume must not see this screen stale
+        // again and loop; the statics are already the new palette.
+        stampApplied(a);
         try {
             a.recreate();
         } catch (Throwable ignored) {
-            // recreate refused (rare device states) — the statics are
-            // already new, so the next natural rebuild picks them up
+            // recreate refused — the restamp above already ended the story
         }
         return true;
     }

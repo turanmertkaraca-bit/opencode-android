@@ -7,23 +7,80 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.32.0 — P32, final)
+## Install (v0.33.0 — P33, the final version)
 
-1. Grab `opencode-p32-v0.32.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p33-v0.33.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
-   sandbox → chat. **＋** adds a project, **long-press** a card → Open /
-   Rename / Remove card / **Delete project**. **⌘** is the command palette (interactive canvas, find in chat, share).
-3. **⌘ → API keys** to paste keys; the OpenCode row (Zen + Go plans,
-   console.opencode.ai) runs its 31 FREE models with no key at all.
+   sandbox → chat. **＋** adds a project, **long-press** a card → the project
+   sheet (Open / Rename / Remove card / **Delete project** — the app's own
+   palette-owned presentation now, not a system box). **⌘** is the command
+   palette (interactive canvas, find in chat, share).
+3. **⌘ → API keys** to paste keys; the sandbox reloads them BY ITSELF the
+   moment a key is saved, changed or imported — the picker and your next
+   message see them immediately, no manual restart. The OpenCode row (Zen +
+   Go plans, console.opencode.ai) runs its 31 FREE models with no key at all.
 4. One-minute armor against Galaxy process kills: **Settings → keep alive →
    Battery optimization — exempt ✓**, plus Device care → Never sleeping apps.
 5. If anything ever dies: **Diagnostics → "last exits"** names the killer
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
 
-## What's in v0.32.0 (P32 — the final polish: the theme crash, fixed; every screen follows the palette)
+## What's in v0.33.0 (P33 — the final version: themes land instantly, Graphite is the face, keys reach the sandbox, the picker tells the truth)
+
+- **the theme change is INSTANT** — tapping a palette in Settings used to
+  call `recreate()`: a whole-activity teardown + rebuild + window animation
+  — seconds of dead air ("takes a while and feels bad to wait"). The theme
+  now lands the same frame: save → apply → dismiss the sheet → rebuild the
+  one view tree in place. The new palette is on screen before the sheet
+  finishes its 180 ms slide-out.
+- **Graphite is the default face** — the user picked it ("the graphite
+  theme is cool make it default"). Fresh installs (and pref-less devices)
+  come up in Graphite; an explicit theme choice always wins; the picker's
+  "· default" label moved with the crown.
+- **the whole-app palette sync actually works now** — P32's `syncIfNeeded`
+  compared the pref against the PROCESS-GLOBAL static, which Settings' own
+  `apply()` had already updated — so no other screen could ever be "stale"
+  and the sync never fired in the field (the source of the lingering
+  "parts of the ui is inconsistent"). The palette id now rides a
+  per-screen decor stamp: every screen knows what it was built with,
+  re-skins exactly once when the pref moves, and provably cannot loop.
+- **keys reach the sandbox by themselves** — the exact report: "the app
+  thinks i have no api key even tho it says i have it in api settings".
+  Three layers fixed: (1) a CHANGED key now auto-restarts the sandbox (the
+  old code only restarted for a FIRST-TIME key — an updated key left the
+  running server serving the old value, so sends failed with key errors
+  while API settings showed the new key saved); (2) the model sheet re-reads
+  auth.json at open, so a saved key can never be called "missing" by a
+  stale fetch; (3) the "no API key yet" hint also counts custom providers
+  whose key lives inline in opencode.json. Importing auth.json and adding
+  a custom endpoint apply the same way — no manual restart to forget.
+- **the picker contrast is honest again** — "p31 showed the models i cant
+  select low contrast white while the ones i do have acces to white...
+  p32 made everything low contrast white": when the running server didn't
+  answer (boot, a key-change restart, hibernate wake), the fetch marked
+  EVERY model catalog-only and the whole sheet went dim. The pure
+  `carryLive` rule keeps last-known live truth through a server blip — a
+  model the server served last time stays bright and selectable, and a
+  restart window can no longer flatten the catalog.
+- **the project long-press grew up** — the actions menu was the last
+  framework list box ("the same old android 4 style box"). It's the app's
+  own sheet now: project name + mono path header, glyph rows (▸ Open ·
+  ✎ Rename · ⌦ Remove card · ✕ Delete project… in the danger color),
+  ripple + haptics, palette-owned end to end. The delete confirm shows the
+  exact path in a code well with Keep it / Delete forever pills, and the
+  rename flow matches. Same shields as P30 underneath (safetyCheck,
+  stop-first-when-serving, off-thread walk).
+- **smoothness sweep** — the theme-change recreate and the GitHub-token
+  save recreate are both gone (in-place updates); the model sheet keeps
+  its instant-open; the deck, transcript and Σ pill keep their pinned
+  rhythms. Nothing new was added — polish only, as asked.
+- 291 JVM tests green (16 new: carryLive rules, embedded-key detection,
+  the graphite default, per-screen stamp + one-shot reskin, the in-place
+  theme change pinned by decor identity, and the model-sheet auth re-read).
+
+## What was in v0.32.0 (P32 — the final polish: the theme crash, fixed; every screen follows the palette)
 
 - **the theme crash** — "pressing the theme change button causes a
   crash": P31's picker dead-cast `simple_list_item_1` (a TextView!) to
