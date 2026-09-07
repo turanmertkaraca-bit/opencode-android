@@ -59,7 +59,7 @@ public class P27BindTest {
         set("sessionId", "sess-1");
         set("sessionTitle", "test");
         set("busy", false);
-        set("runSessionId", null);
+        RunHub.clearRunsForTest();
         set("lastUserText", null);
     }
 
@@ -151,7 +151,10 @@ public class P27BindTest {
 
     @Test
     public void pill_holdsTheRunHighWater_thenSettlesExact() throws Exception {
-        set("busy", true);
+        // P31: the pill's high-water reads the DISPLAYED session's run —
+        // claim one for it instead of poking the derived flag.
+        set("sessionId", "sess-pill");
+        RunHub.putRunForTest("sess-pill");
         RunHub.Tx t = RunHub.tx();
         // a big turn reports its usage…
         RunHub.applyMessageInfo(t, obj("id", "mA", "role", "assistant",
@@ -163,7 +166,7 @@ public class P27BindTest {
         String midRun = RunHub.ctxPillLine();
         assertTrue("mid-run pill keeps the peak: " + midRun, midRun.contains("47k"));
 
-        set("busy", false);
+        RunHub.clearRunsForTest();
         String settled = RunHub.ctxPillLine();
         assertTrue("settled pill shows the exact last turn: " + settled,
                 settled.contains("20k"));

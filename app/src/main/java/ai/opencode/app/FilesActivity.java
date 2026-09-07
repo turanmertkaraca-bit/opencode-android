@@ -98,6 +98,7 @@ public class FilesActivity extends Activity {
         root.setPadding(pad, Theme.dp(this, 14), pad, Theme.dp(this, 40));
         scroll.addView(root);
         setContentView(scroll);
+        Theme.window(this);              // P31: palette owns the window + dialogs
     }
 
     /** P16 DeX: centered content column on wide windows. */
@@ -607,18 +608,33 @@ public class FilesActivity extends Activity {
                     d.dismiss();
                 });
                 b.setNegativeButton("close", null);
-                b.show();
+                Theme.skin(b.show());
             });
         });
     }
 
     private void actions(final File f) {
-        String[] opts = {"Rename", "Delete", "Copy path"};
+        // P31: an .html file gains "▶ interactive" — the same canvas
+        // viewer the chat's tool cards open. Offered, never forced.
+        boolean html = CanvasDoc.isRenderable(f.getAbsolutePath());
+        String[] opts = html
+                ? new String[]{"▶ interactive", "Rename", "Delete", "Copy path"}
+                : new String[]{"Rename", "Delete", "Copy path"};
         new AlertDialog.Builder(this)
                 .setTitle(f.getName())
                 .setItems(opts, (d, w) -> {
-                    if (w == 0) rename(f);
-                    else if (w == 1) confirmDelete(f);
+                    if (html && w == 0) {
+                        try {
+                            startActivity(new Intent(this, CanvasActivity.class)
+                                    .putExtra("path", f.getAbsolutePath()));
+                        } catch (Exception e) {
+                            toast("cannot open: " + e);
+                        }
+                        return;
+                    }
+                    int i = html ? w - 1 : w;
+                    if (i == 0) rename(f);
+                    else if (i == 1) confirmDelete(f);
                     else copy("path", f.getAbsolutePath());
                 })
                 .show();

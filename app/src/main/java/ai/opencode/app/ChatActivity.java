@@ -77,6 +77,8 @@ public class ChatActivity extends Activity
 
     // P8: which project sandbox this chat is attached to (from the deck)
     private String projectName;
+    /** P31: the project folder this chat serves (hibernate-resume anchor). */
+    private String projectPath;
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     /**
@@ -175,6 +177,7 @@ public class ChatActivity extends Activity
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         setContentView(R.layout.activity_chat);
+        Theme.window(this);              // P31: palette owns the window + dialogs
         list = findViewById(R.id.list);
         scroll = findViewById(R.id.scroll);
         liveSlot = findViewById(R.id.liveSlot);
@@ -196,6 +199,7 @@ public class ChatActivity extends Activity
         if (in != null) {
             projectName = in.getStringExtra("project");
             String path = in.getStringExtra("path");
+            projectPath = path;
             if (path != null && Projects.validDir(path)
                     && !ServerService.pendingRestart()
                     && ServerService.needsSwitch(new File(path))) {
@@ -239,8 +243,8 @@ public class ChatActivity extends Activity
         });   // P18
         btnSend.setOnClickListener(v -> {
             v.performHapticFeedback(android.view.HapticFeedbackConstants.VIRTUAL_KEY);
-            if (RunHub.busy()) {
-                RunHub.abort();              // P25: the ONLY abort path
+            if (RunHub.busyFor(RunHub.displayedSession())) {
+                RunHub.abort();              // P25: the ONLY abort path (P31: this chat's run)
             } else {
                 String q = input.getText().toString().trim();
                 if (q.isEmpty() && pendingAttach.isEmpty()) return;
@@ -320,7 +324,8 @@ public class ChatActivity extends Activity
         // button, the status line, the typing dots AND the live footer
         // all hang off this one call (they used to initialize only on a
         // busy CHANGE, so re-entering mid-run showed a stale ↑ button).
-        applyBusyUi(RunHub.busy());
+        applyBusyUi(RunHub.busyFor(RunHub.displayedSession()));
+        syncBackgroundRunsNote();
         // P16: returning from API keys with the model sheet open → refresh
         // the rows IN PLACE, so the provider whose key was just added goes
         // bright/ready without closing and reopening the picker.
@@ -365,6 +370,17 @@ public class ChatActivity extends Activity
     @Override
     protected void onPause() {
         RunHub.unbindUi(this);
+        // P31: the hibernate-resume anchor — "the user was HERE". Stamped
+        // on pause so the last surface the user left wins; MainActivity
+        // reads it after an idle hibernation (or any cold open) and drops
+        // the user straight back into this chat.
+        try {
+            if (projectPath != null && !projectPath.isEmpty()) {
+                getSharedPreferences("oc", MODE_PRIVATE).edit()
+                        .putString(Resume.KEY,
+                                Resume.chatValue(projectName, projectPath)).apply();
+            }
+        } catch (Exception ignored) {}
         // P15: drop pending paint work with the unbind — the flush would
         // fire into a detached view tree on return (harmless but wasteful).
         ui.removeCallbacks(flushPaints);
@@ -394,7 +410,11 @@ public class ChatActivity extends Activity
     }
 
     @Override public void hubBusy(boolean b) {
-        applyBusyUi(b);
+        // P31: b = ANY run; the chat's own UI (■ button, dots) follows the
+        // DISPLAYED session's run — a background chat must not turn this
+        // screen's send button into a stop button.
+        applyBusyUi(RunHub.busyFor(RunHub.displayedSession()));
+        syncBackgroundRunsNote();
     }
 
     @Override public void hubSpend() {
@@ -714,7 +734,7 @@ public class ChatActivity extends Activity
             c.setText(idea[0]);
             c.setTextSize(13);
             c.setTypeface(Typeface.DEFAULT_BOLD);
-            c.setTextColor(getColor(R.color.accent_light));
+            c.setTextColor(Theme.cr(this, R.color.accent_light));
             c.setBackgroundResource(R.drawable.bg_suggest);
             int p = dp(14);
             c.setPadding(p, dp(11), p, dp(11));   // P25: taller touch target
@@ -855,7 +875,10 @@ public class ChatActivity extends Activity
 
     private void syncTyping() {
         if (typing == null) return;
-        int vis = RunHub.busy() ? View.VISIBLE : View.GONE;
+        // P31: the dots answer the DISPLAYED chat's run — a script
+        // streaming in a background session must not look like this chat
+        // is thinking.
+        int vis = RunHub.busyFor(RunHub.displayedSession()) ? View.VISIBLE : View.GONE;
         if (typing.getVisibility() != vis) {
             typing.setVisibility(vis);
             if (vis == View.VISIBLE) {
@@ -935,7 +958,7 @@ public class ChatActivity extends Activity
     private void refreshChips() {
         boolean plan = "plan".equals(RunHub.agent());
         chipMode.setText(plan ? "Plan" : "Build");
-        chipMode.setTextColor(getColor(plan ? R.color.accent_light : R.color.ok));
+        chipMode.setTextColor(Theme.cr(this, plan ? R.color.accent_light : R.color.ok));
         String[] sel = Models.selected(this);
         chipModel.setText(sel == null ? "model ▾" : sel[1]);
     }
@@ -948,14 +971,14 @@ public class ChatActivity extends Activity
             btnSend.setText("■");
             btnSend.setTextSize(16);
             btnSend.setBackgroundResource(R.drawable.bg_stop);
-            btnSend.setTextColor(getColor(R.color.err));
+            btnSend.setTextColor(Theme.cr(this, R.color.err));
             tvStatus.setVisibility(View.VISIBLE);
             tvStatus.setText("working — tap ■ to stop");
         } else {
             btnSend.setText("↑");
             btnSend.setTextSize(22);
             btnSend.setBackgroundResource(R.drawable.bg_send);
-            btnSend.setTextColor(getColor(R.color.on_accent));
+            btnSend.setTextColor(Theme.cr(this, R.color.on_accent));
             tvStatus.setVisibility(View.GONE);
         }
         syncTyping();
@@ -1395,8 +1418,41 @@ public class ChatActivity extends Activity
         if (!AuthStore.hasAnyKey(this) && st == ServerService.ST_HEALTHY) {
             s += " · no API key yet — ⌘ → API keys";
         }
+        String runsNote = backgroundRunsNote();
+        if (!runsNote.isEmpty()) s += runsNote;
+        String capNote = creditCapNote();
+        if (!capNote.isEmpty()) s += capNote;
         tvSub.setText(s);
         syncVeil(st);
+    }
+
+    /** P31: "a script is running in another chat" — honest subtitle note
+     *  whenever parallel runs exist beyond the displayed one. Empty when
+     *  none. */
+    private String backgroundRunsNote() {
+        String sid = RunHub.displayedSession();
+        if (!RunHub.othersRunning(sid)) return "";
+        return " · ▶ running in another chat (Sessions)";
+    }
+
+    /** P31: the credit limit rides the subtitle when it matters — a
+     *  WARN-colored nudge at ≥80%, the hard stop line at 100%. Empty
+     *  when no cap is set or spending is well under it. */
+    private String creditCapNote() {
+        double cap = RunHub.spendCap();
+        if (cap <= 0) return "";
+        double spent = RunHub.spendTotal();
+        int v = CreditLimit.verdict(spent, cap);
+        if (v == CreditLimit.OK) return "";
+        return v == CreditLimit.BLOCK
+                ? " · ⛔ credit limit reached — Settings → Safety"
+                : " · ⚠ " + CreditLimit.stateLine(spent, cap);
+    }
+
+    /** Subtitle only repaints on hub events — parallel run starts/stops
+     *  fire hubBusy, so this is the repaint hook (called from hubBusy). */
+    private void syncBackgroundRunsNote() {
+        ui.post(this::refreshServerUi);
     }
 
     // ================================================= P25: live edit tree
@@ -1550,7 +1606,7 @@ public class ChatActivity extends Activity
 
         TextView g = (TextView) row.getChildAt(0);
         g.setText(EditPulse.glyph(e.action));
-        g.setTextColor(getColor("del".equals(e.action)
+        g.setTextColor(Theme.cr(this, "del".equals(e.action)
                 ? R.color.err : R.color.text_secondary));
 
         TextView p = (TextView) row.getChildAt(1);
@@ -1664,7 +1720,7 @@ public class ChatActivity extends Activity
             TextView x = new TextView(this);
             x.setText("✕");
             x.setTextSize(11);
-            x.setTextColor(getColor(R.color.text_primary));
+            x.setTextColor(Theme.cr(this, R.color.text_primary));
             x.setGravity(Gravity.CENTER);
             x.setBackgroundResource(R.drawable.bg_chip);
             FrameLayout.LayoutParams xlp = new FrameLayout.LayoutParams(
@@ -1844,6 +1900,17 @@ public class ChatActivity extends Activity
              .append("provider's cache (billed at the discounted rate) — ")
              .append("caching is on and working.\n\n");
         }
+        // P31: the credit limit, where the money talk already lives.
+        double cap = RunHub.spendCap();
+        if (cap > 0) {
+            m.append("Credit limit: ").append(CreditLimit.stateLine(
+                    RunHub.spendTotal(), cap)).append(" (all-time, this device")
+             .append(" — set or clear it in Settings → Safety).\n\n");
+        } else if (RunHub.spendTotal() > 0) {
+            m.append("All-time spend on this device: ")
+             .append(CreditLimit.fmt(RunHub.spendTotal()))
+             .append(" (no credit limit set — Settings → Safety).\n\n");
+        }
         String verdict = Resilience.contextVerdict(lastTok);
         boolean heavy = limit > 0 ? lastTok * 100 / limit >= 50 : lastTok >= 50_000;
         if (!verdict.isEmpty()) m.append(verdict).append("\n");
@@ -1870,7 +1937,7 @@ public class ChatActivity extends Activity
                         + "the old chat is still in Sessions");
             });
         }
-        b.show();
+        Theme.skin(b.show());
     }
 
     private void sys(String s) {
@@ -2012,7 +2079,7 @@ public class ChatActivity extends Activity
     private TextView text(int sizeSp, int colorRes, boolean bold) {
         TextView tv = new TextView(this);
         tv.setTextSize(sizeSp);
-        tv.setTextColor(getColor(colorRes));
+        tv.setTextColor(Theme.cr(this, colorRes));
         if (bold) tv.setTypeface(Typeface.DEFAULT_BOLD);
         return tv;
     }
@@ -2275,6 +2342,25 @@ public class ChatActivity extends Activity
                         Theme.press(open);
                         open.setOnClickListener(v -> openInFiles(abs));
                         c.addView(open);
+                        // P31: the interactive canvas — a write/edit that
+                        // produced an .html page grows a ▶ chip so the page
+                        // opens in the sandboxed viewer (JS on, no file or
+                        // content access). Never auto-opens; the user taps.
+                        if (CanvasDoc.isRenderable(abs)) {
+                            TextView play = text(12, R.color.accent_light, true);
+                            play.setText("▶ interactive");
+                            play.setBackgroundResource(R.drawable.bg_chip);
+                            play.setPadding(op, dp(6), op, dp(6));
+                            LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT);
+                            plp.topMargin = dp(8);
+                            plp.leftMargin = dp(8);
+                            play.setLayoutParams(plp);
+                            Theme.press(play);
+                            play.setOnClickListener(v -> openCanvas(abs));
+                            c.addView(play);
+                        }
                     }
                 }
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -2698,6 +2784,8 @@ public class ChatActivity extends Activity
         final String[] cmds = {
                 "New chat", "Sessions…", "Model…", "Toggle Build / Plan",
                 "Compact context (save tokens)",
+                "✦ Interactive canvas…",
+                "Find in chat…",
                 terseOn() ? "Turn OFF terse replies (next message)"
                           : "Turn ON terse replies (token saver)",
                 autoAllowOn() ? "Turn OFF unattended (auto-allow)"
@@ -2706,7 +2794,8 @@ public class ChatActivity extends Activity
                 "Projects →", "Settings",
                 "API keys…", "Server logs & shell…", "Restart server",
                 "Expand all cards", "Collapse all cards",
-                "Copy last response", "Export chat to Downloads"};
+                "Copy last response", "Export chat to Downloads",
+                "Share chat as Markdown"};
         AlertDialog.Builder b = new AlertDialog.Builder(this);
         b.setTitle("⌘ commands");
         LinearLayout wrap = new LinearLayout(this);
@@ -2743,6 +2832,7 @@ public class ChatActivity extends Activity
             dlg.dismiss();
             runCommand(visible.get(pos));
         });
+        Theme.skin(dlg);
         dlg.show();
     }
 
@@ -2765,6 +2855,8 @@ public class ChatActivity extends Activity
             case "Toggle Build / Plan": toggleMode(); break;
             case "Compact context (save tokens)":
                 RunHub.compact(); break;
+            case "✦ Interactive canvas…": canvasDialog(); break;
+            case "Find in chat…": findInChat(); break;
             case "Turn ON terse replies (token saver)":
             case "Turn OFF terse replies (token saver)":
                 toggleTerse(); break;
@@ -2787,8 +2879,188 @@ public class ChatActivity extends Activity
             case "Collapse all cards": setAllOpen(false); break;
             case "Copy last response": copyLast(); break;
             case "Export chat to Downloads": exportChat(); break;
+            case "Share chat as Markdown": shareChat(); break;
             default: break;
         }
+    }
+
+    // ============================================== P31: interactive canvas
+
+    /** The canvas ask: the ONLY way a page gets written — the user asks
+     *  for it, the app carries the request as a normal message that tells
+     *  the model exactly what a self-contained page must look like. The
+     *  tool is OFFERED, never forced: nothing runs unless the user opens
+     *  the ▶ chip or this command. */
+    private void canvasDialog() {
+        final EditText in = new EditText(this);
+        in.setHint("what should the interactive page explain?");
+        in.setTextSize(14);
+        String typed = input.getText().toString().trim();
+        if (!typed.isEmpty()) in.setText(typed);
+        new AlertDialog.Builder(this)
+                .setTitle("✦ Interactive canvas")
+                .setMessage("The agent writes a self-contained HTML page (inline "
+                        + "CSS/JS, no external resources) to " + CanvasDoc.FILE_NAME
+                        + " in the project. When the tool card shows, tap "
+                        + "\u25B6 interactive to open it.")
+                .setView(in)
+                .setPositiveButton("Explain it", (d, w) -> {
+                    String topic = in.getText().toString().trim();
+                    if (topic.isEmpty()) {
+                        Toast.makeText(this, "give it a topic first",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    input.setText("");
+                    RunHub.sys(CanvasDoc.sentNote());
+                    RunHub.send(CanvasDoc.prompt(topic));
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Open a written page in the sandboxed viewer. */
+    private void openCanvas(String path) {
+        try {
+            Intent i = new Intent(this, CanvasActivity.class);
+            i.putExtra("path", path);
+            startActivity(i);
+            overridePendingTransition(R.anim.slide_up_in, R.anim.fade_out);
+        } catch (Exception e) {
+            Toast.makeText(this, "cannot open the page: " + e,
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    // ============================================== P31: find + share
+
+    private List<Integer> findHits;
+    private int findPos = -1;
+
+    /** Find in chat: scans the transcript, jumps match to match. The
+     *  model stays untouched — this is a pure view-side search. */
+    private void findInChat() {
+        final EditText in = new EditText(this);
+        in.setHint("search this conversation…");
+        in.setTextSize(14);
+        in.setSingleLine(true);
+        new AlertDialog.Builder(this)
+                .setTitle("Find in chat")
+                .setView(in)
+                .setPositiveButton("Find first", (d, w) -> {
+                    findHits = scanChat(in.getText().toString());
+                    findPos = -1;
+                    findJumpNext();
+                })
+                .setNeutralButton("Find next", (d, w) -> findJumpNext())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Row indexes matching the query (case-insensitive, all row kinds). */
+    private List<Integer> scanChat(String query) {
+        List<Integer> out = new ArrayList<>();
+        if (query == null || query.trim().isEmpty()) return out;
+        String q = query.toLowerCase(Locale.US);
+        List<RunHub.Row> rs = RunHub.rows();
+        synchronized (lock) {
+            for (int i = 0; i < rs.size(); i++) {
+                RunHub.Row r = rs.get(i);
+                StringBuilder sb = new StringBuilder();
+                if (r.text != null) sb.append(r.text).append(' ');
+                if (r.title != null) sb.append(r.title).append(' ');
+                if (r.input != null) sb.append(r.input).append(' ');
+                if (r.output != null) sb.append(r.output).append(' ');
+                if (r.meta != null) sb.append(r.meta).append(' ');
+                if (sb.indexOf(q) >= 0) out.add(i);
+            }
+        }
+        return out;
+    }
+
+    private void findJumpNext() {
+        if (findHits == null || findHits.isEmpty()) {
+            Toast.makeText(this, "no matches in this chat", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        findPos = (findPos + 1) % findHits.size();
+        int idx = findHits.get(findPos);
+        List<RunHub.Row> rs = RunHub.rows();
+        if (idx >= rs.size()) return;
+        RunHub.Row r = rs.get(idx);
+        View v0 = r.key == null ? null : viewByKey.get(r.key);
+        if (v0 == null) { renderAll(); v0 = r.key == null ? null : viewByKey.get(r.key); }
+        if (v0 != null) {
+            final View v = v0;
+            scroll.post(() -> scroll.smoothScrollTo(0, Math.max(0, v.getTop() - dp(60))));
+            if (Theme.motionOn(this)) Theme.pop(v);
+        }
+        Toast.makeText(this, "match " + (findPos + 1) + " of " + findHits.size(),
+                Toast.LENGTH_SHORT).show();
+    }
+
+    /** P31: share the chat as Markdown through the system share sheet
+     *  (EXTRA_TEXT — no file URIs, no storage permission, no crash). */
+    private void shareChat() {
+        String md;
+        synchronized (lock) {
+            md = chatMarkdown();
+        }
+        if (md.trim().isEmpty()) {
+            Toast.makeText(this, "nothing to share yet", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent s = new Intent(Intent.ACTION_SEND);
+        s.setType("text/plain");
+        s.putExtra(Intent.EXTRA_SUBJECT,
+                "OpenCode chat · " + (projectName == null ? "project" : projectName));
+        s.putExtra(Intent.EXTRA_TEXT, md);
+        try {
+            startActivity(Intent.createChooser(s, "Share chat"));
+        } catch (Exception e) {
+            Toast.makeText(this, "no app could share this", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** The transcript as Markdown (share + future exports). Pure over the
+     *  row list; called under the hub lock. */
+    private String chatMarkdown() {
+        StringBuilder b = new StringBuilder();
+        b.append("# OpenCode chat");
+        if (projectName != null && !projectName.isEmpty())
+            b.append(" — ").append(projectName);
+        b.append('\n');
+        List<RunHub.Row> rs = RunHub.rows();
+        for (RunHub.Row r : rs) {
+            switch (r.kind) {
+                case K_USER:
+                    b.append("\n## you\n\n").append(r.text).append('\n');
+                    break;
+                case K_ASSISTANT:
+                    b.append("\n## agent\n\n").append(r.text).append('\n');
+                    break;
+                case K_REASON:
+                    if (r.text.length() > 0)
+                        b.append("\n> thinking: ")
+                         .append(r.text.toString().replace("\n", "\n> "))
+                         .append('\n');
+                    break;
+                case K_TOOL:
+                    b.append("\n> tool ").append(r.tool)
+                     .append(r.title == null || r.title.isEmpty() ? "" : " · " + r.title)
+                     .append('\n');
+                    if (r.input.length() > 0)
+                        b.append("\n```\n").append(r.input).append("\n```\n");
+                    if (r.output.length() > 0)
+                        b.append("\n```").append(r.output).append("\n```\n");
+                    break;
+                case K_ERR:
+                    b.append("\n> ! error: ").append(r.text).append('\n');
+                    break;
+                default: break;   // live/sys/image rows stay out of the export
+            }
+        }
+        return b.toString();
     }
 
     // ---------------------------------------------------------- sessions
@@ -2829,8 +3101,14 @@ public class ChatActivity extends Activity
         root.setOrientation(LinearLayout.VERTICAL);
         ListView lv = new ListView(this);
         List<Object[]> items = new ArrayList<>(); // [titleLine, timeLine, SessRow|null]
-        items.add(new Object[]{"＋  New chat", "start over", null});
-        for (SessRow s : listS) items.add(new Object[]{s.title, relTime(s.updated), s});
+        items.add(new Object[]{"＋  New chat", "start over — the old chats stay here", null});
+        for (SessRow s : listS) {
+            boolean run = RunHub.busyFor(s.id);
+            items.add(new Object[]{
+                    (run ? "● " : "") + s.title,
+                    run ? "RUNNING NOW · " + relTime(s.updated) : relTime(s.updated),
+                    s});
+        }
         lv.setAdapter(new BaseAdapter() {
             public int getCount() { return items.size(); }
             public Object getItem(int i) { return items.get(i); }
@@ -2841,11 +3119,13 @@ public class ChatActivity extends Activity
                 int pad = dp(14);
                 box.setPadding(pad, dp(9), pad, dp(9));
                 Object[] it = items.get(i);
-                TextView t1 = text(14, i == 0 ? R.color.accent_light : R.color.text_primary, i == 0);
+                boolean run = String.valueOf(it[1]).startsWith("RUNNING");
+                TextView t1 = text(14, i == 0 ? R.color.accent_light
+                        : run ? R.color.ok : R.color.text_primary, i == 0 || run);
                 t1.setText(String.valueOf(it[0]));
                 t1.setSingleLine(true);
                 t1.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-                TextView t2 = text(11, R.color.text_secondary, false);
+                TextView t2 = text(11, run ? R.color.ok : R.color.text_secondary, run);
                 t2.setText(String.valueOf(it[1]));
                 box.addView(t1);
                 box.addView(t2);
@@ -2866,16 +3146,32 @@ public class ChatActivity extends Activity
             Object[] it = items.get(pos);
             if (!(it[2] instanceof SessRow)) return true;
             SessRow s = (SessRow) it[2];
+            // P31: a running session can be stopped right from the sheet —
+            // the only other stop is the ■ button in its own chat.
+            boolean running = RunHub.busyFor(s.id);
+            java.util.List<String> opts = new ArrayList<>(java.util.Arrays
+                    .asList(running
+                            ? new String[]{"Open", "Stop the run", "Delete"}
+                            : new String[]{"Open", "Delete"}));
             new AlertDialog.Builder(this)
                     .setTitle(s.title)
-                    .setItems(new String[]{"Open", "Delete"}, (d, w) -> {
-                        if (w == 0) { dlg.dismiss(); RunHub.loadSession(s.id); }
-                        else confirmDelete(s);
+                    .setItems(opts.toArray(new String[0]), (d, w) -> {
+                        String picked = opts.get(w);
+                        if ("Open".equals(picked)) {
+                            dlg.dismiss();
+                            RunHub.loadSession(s.id);
+                        } else if ("Stop the run".equals(picked)) {
+                            dlg.dismiss();
+                            RunHub.abortSession(s.id);
+                        } else {
+                            confirmDelete(s);
+                        }
                     })
                     .setNegativeButton("Cancel", null)
                     .show();
             return true;
         });
+        Theme.skin(dlg);
         dlg.show();
     }
 
@@ -3058,12 +3354,14 @@ public class ChatActivity extends Activity
 
         TextView hint = text(11, R.color.text_secondary, false);
         hint.setText("bright = runs now · dim = catalog — tap to try, auto-"
-                + "falls-back if refused · ⌘ → API keys to add one");
+                + "falls-back if refused · LONG-PRESS a model to pin it to "
+                + "★ Favorites · ⌘ → API keys to add one");
         hint.setPadding(dp(4), dp(8), dp(4), dp(10));
         root.addView(hint);
         sheetHint = hint;
         b.setView(root);
         final AlertDialog dlg = b.create();
+        Theme.skin(dlg);
         dlg.show();
         android.view.Window w = dlg.getWindow();
         if (w != null) {
@@ -3097,6 +3395,25 @@ public class ChatActivity extends Activity
                 return a.name.compareToIgnoreCase(b2.name);
             };
             List<Models.Prov> ps = sheetProvs != null ? sheetProvs : provs;
+            // P31: the ★ FAVORITES shelf — the user's pinned models, one
+            // tap away at the TOP of the sheet (long-press pins/unpins).
+            // Resolved against the live fetch; a favorite the rotating
+            // catalog no longer lists is HIDDEN (still pinned) not deleted.
+            if (q.isEmpty()) {
+                List<Object[]> shelf = new ArrayList<>();
+                for (String[] f : Models.favs(this)) {
+                    for (Models.Prov pr : ps) {
+                        if (!pr.id.equals(f[0])) continue;
+                        for (Models.Mdl m : pr.models)
+                            if (m.id.equals(f[1]))
+                                shelf.add(new Object[]{"f", pr, m});
+                    }
+                }
+                if (!shelf.isEmpty()) {
+                    items.add(new Object[]{"fh", null, null});
+                    items.addAll(shelf);
+                }
+            }
             for (Models.Prov pr : ps) {
                 boolean provHit = q.isEmpty()
                         || pr.id.toLowerCase(Locale.US).contains(q)
@@ -3127,7 +3444,21 @@ public class ChatActivity extends Activity
                     box.removeAllViews();
                     int pad = dp(14);
                     box.setPadding(pad, dp(8), pad, dp(8));
-                    if ("h".equals(it[0])) {
+                    if ("fh".equals(it[0])) {
+                        // P31: the favorites shelf header.
+                        LinearLayout hrow = new LinearLayout(ChatActivity.this);
+                        hrow.setOrientation(LinearLayout.HORIZONTAL);
+                        hrow.setGravity(Gravity.CENTER_VERTICAL);
+                        TextView t = text(13, R.color.accent_light, true);
+                        t.setText("★  FAVORITES");
+                        t.setLetterSpacing(0.08f);
+                        hrow.addView(t, new LinearLayout.LayoutParams(0,
+                                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                        TextView tip = text(10, R.color.text_secondary, false);
+                        tip.setText("long-press a model to unpin");
+                        hrow.addView(tip);
+                        box.addView(hrow);
+                    } else if ("h".equals(it[0])) {
                         // P16 provider header: state mark + a direct "＋ key"
                         // action for providers missing theirs. The header tap
                         // itself STILL never steals the sheet (P15 rule) — the
@@ -3171,11 +3502,12 @@ public class ChatActivity extends Activity
                             hrow.addView(add, alp);
                         }
                         box.addView(hrow);
-                    } else if ("m".equals(it[0])) {
+                    } else if ("m".equals(it[0]) || "f".equals(it[0])) {
                         Models.Mdl m = (Models.Mdl) it[2];
                         Models.Prov pr = (Models.Prov) it[1];
                         boolean isCur = cur != null && cur[0].equals(pr.id)
                                 && cur[1].equals(m.id);
+                        boolean isFav = "f".equals(it[0]);
                         // P12a rendering: live rows bright, catalog rows dim
                         // and tagged — the state that told the user, at a
                         // glance, exactly what would work.
@@ -3188,7 +3520,8 @@ public class ChatActivity extends Activity
                         // middle-ellipsis) vs price (right, never truncated
                         // by the path).
                         TextView t1 = text(14, col, isCur || m.live);
-                        t1.setText((isCur ? "✓ " : "") + m.name
+                        t1.setText((isFav ? "★ " : "")
+                                + (isCur ? "✓ " : "") + m.name
                                 + (m.live ? "" : "   ·  catalog")
                                 + (m.free ? "   ⟨free⟩" : ""));
                         t1.setSingleLine(true);
@@ -3234,8 +3567,25 @@ public class ChatActivity extends Activity
         });
         refill.run();
         sheetRefill = refill;
+        // P31: LONG-PRESS A MODEL = ★ pin/unpin. Instant, in place, with
+        // the haptic the deck long-press set as the pattern.
+        lv.setOnItemLongClickListener((parent, v, pos, id4) -> {
+            Object[] it = items.get(pos);
+            if (!("m".equals(it[0]) || "f".equals(it[0]))) return true;
+            Models.Prov pr = (Models.Prov) it[1];
+            Models.Mdl m = (Models.Mdl) it[2];
+            Theme.haptic(lv);
+            boolean pinned = Models.toggleFav(ChatActivity.this, pr.id, m.id);
+            Toast.makeText(ChatActivity.this, pinned
+                    ? "★ " + m.name + " pinned to Favorites"
+                    : m.name + " removed from Favorites",
+                    Toast.LENGTH_SHORT).show();
+            refill.run();                    // shelf updates in place
+            return true;
+        });
         lv.setOnItemClickListener((parent, v, pos, id4) -> {
             Object[] it = items.get(pos);
+            if ("fh".equals(it[0])) return;   // the shelf header is inert
             if ("h".equals(it[0])) {
                 // P15: headers never steal the sheet. Unconfigured provider →
                 // point at the keys screen in place (P14 closed the whole
@@ -3248,7 +3598,7 @@ public class ChatActivity extends Activity
                             Toast.LENGTH_SHORT).show();
                 return;
             }
-            if (!"m".equals(it[0])) return;
+            if (!("m".equals(it[0]) || "f".equals(it[0]))) return;
             Models.Prov pr = (Models.Prov) it[1];
             Models.Mdl m = (Models.Mdl) it[2];
             // P26: discovery-catalog entries are now SELECTABLE — the field
@@ -3273,7 +3623,7 @@ public class ChatActivity extends Activity
                         sheetHint.setText(m.name + " is in the discovery catalog — "
                                 + "trying it. If the server can't serve it, the run "
                                 + "falls back to the default automatically");
-                        sheetHint.setTextColor(getColor(R.color.accent_light));
+                        sheetHint.setTextColor(Theme.cr(this, R.color.accent_light));
                     }
                     dlg.dismiss();
                 } else {
@@ -3290,7 +3640,7 @@ public class ChatActivity extends Activity
                             Toast.LENGTH_SHORT).show();
                     if (sheetHint != null) {
                         sheetHint.setText(why);
-                        sheetHint.setTextColor(getColor(R.color.accent_light));
+                        sheetHint.setTextColor(Theme.cr(this, R.color.accent_light));
                     }
                 }
                 return;

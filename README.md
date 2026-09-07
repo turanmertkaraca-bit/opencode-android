@@ -7,14 +7,14 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.30.0 — P30)
+## Install (v0.31.0 — P31)
 
-1. Grab `opencode-p30-v0.30.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p31-v0.31.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
    sandbox → chat. **＋** adds a project, **long-press** a card → Open /
-   Rename / Remove card / **Delete project**. **⌘** is the command palette.
+   Rename / Remove card / **Delete project**. **⌘** is the command palette (interactive canvas, find in chat, share).
 3. **⌘ → API keys** to paste keys; the OpenCode row (Zen + Go plans,
    console.opencode.ai) runs its 31 FREE models with no key at all.
 4. One-minute armor against Galaxy process kills: **Settings → keep alive →
@@ -23,7 +23,50 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
 
-## What's in v0.30.0 (P30 — the setting that listens, the honest price line, the delete button)
+## What's in v0.31.0 (P31 — parallel chats, favorites, a credit limit, the canvas, themes, sleep)
+
+- **the long-press fix** — "long press to delete doesn't work, it just
+  opens the chat": a project card is a clickable child, so it consumed the
+  whole touch stream and the deck's gesture detector never saw a
+  stationary hold; on release the card's own click fired — the chat
+  opened. The long-press now lives ON THE CARD (native long-click:
+  consumes the gesture, suppresses the release-click) with the deck
+  callback kept as the gap fallback. Pinned by a UI test.
+- **★ model favorites** — long-press a model in the picker and it lands
+  on a ★ FAVORITES shelf at the very top, ahead of every provider. Tap to
+  use, long-press to unpin. Ordered, capped at 8, rotation-proof (a
+  favorite the free catalog no longer lists hides — it is never deleted).
+- **credit limit** — Settings → Safety: set a dollar cap; the app tracks
+  what it actually observed (all-time, this device, persisted) and
+  refuses every send past the cap with one honest line. ⚠ subtitle nudge
+  at ≥80%, cap state in the Σ popover, manual counter reset.
+- **parallel sessions** — runs are tracked per chat: a script can stream
+  in one session while you keep working in another (up to 3). Sessions →
+  green ● RUNNING NOW badge, long-press → Stop the run; ■ answers only
+  the chat on screen; the subtitle announces background runs; the
+  watchdog/re-arm/eviction rules all became per-run aware.
+- **interactive canvas** — ⌘ → "✦ Interactive canvas…": the agent writes
+  a self-contained HTML page (inline CSS/JS, no external resources) to
+  canvas.html; a ▶ interactive chip (on the tool card, or Files →
+  long-press an .html file) opens it in a sandboxed viewer — JS on, file
+  and content access off, external navigation refused, nothing
+  auto-opens. Offered, never forced.
+- **reset sandbox environment** — Settings → Environment: wipes ONLY the
+  extracted tooling (Debian rootfs, Alpine layer, shims, applets,
+  caches). Keys, GitHub token, projects, every chat on disk and all
+  settings survive; canonical-path guards; optional immediate reinstall.
+- **auto-hibernate** — app in the background + no run in any chat + no
+  approval waiting + past the quiet threshold (default 10 min) → the
+  sandbox stops itself and the RAM goes back to the phone; reopening
+  drops you straight into the chat you left, restored from disk. Never
+  fires while work is in flight.
+- **six themes** — OLED black (default), Midnight blue, Graphite, Ember,
+  Forest, Paper (light). Dialogs, status bars and every static XML color
+  are remapped at runtime; the old AMOLED toggle migrates.
+- **plus** — Share chat as Markdown (system share sheet), Find in chat
+  (jump match to match).
+
+## What was in v0.30.0 (P30 — the setting that listens, the honest price line, the delete button)
 
 - **terse replies now work MID-conversation** — the field report was
   exact: P29 wrote the toggle into the project's AGENTS.md, but opencode
@@ -528,5 +571,6 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P27 stable taps + resume-current + curated rootfs + AMOLED design system + tappable file mentions | shipped |
 | P28 the P27 field report: tappable mentions, dots above composer, big-file-proof peek, faster boot | shipped |
 | P29 model-sheet double-open, photo tray, cost prediction, /compact, terse v1, feel pass | shipped |
-| P30 live setting injection (<system-reminder>), cost-hint clipping, long-press project delete | **current** |
+| P31 parallel chats, model favorites, credit limit, interactive canvas, six themes, auto-hibernate | **current** |
+| P30 live setting injection (<system-reminder>), cost-hint clipping, long-press project delete | shipped |
 | Next: on-device toolchain (clang) import path | planned |

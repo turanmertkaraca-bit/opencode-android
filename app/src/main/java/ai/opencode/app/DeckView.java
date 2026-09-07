@@ -68,6 +68,9 @@ public class DeckView extends ViewGroup {
     }
 
     public void setCallback(Callback c) { cb = c; }
+    /** Package-private test seam: the gap-fallback callback is part of
+     *  the long-press contract (P31UiTest pins it). */
+    Callback callbackForTest() { return cb; }
     public void setSidePad(int px) { sidePad = px; requestLayout(); }
 
     // ---- geometry ------------------------------------------------------

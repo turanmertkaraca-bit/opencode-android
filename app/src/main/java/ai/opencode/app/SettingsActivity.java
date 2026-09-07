@@ -53,6 +53,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         setContentView(buildUi());
+        Theme.window(this);              // P31: palette owns the window + dialogs
         ServerService.subscribe(this);
         refreshState(ServerService.getState(), null);
         refreshPkg();
@@ -164,6 +165,13 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         env.addView(divider());
         // P27 phase 2: the CURATED rootfs — ~50 MB of docs/man/timezones/
         // perl gone at install, caches swept every boot. Default ON.
+        env.addView(divider());
+        // P31: the factory reset for the TOOL ENVIRONMENT — keys, GitHub
+        // token, projects and every chat survive; only extracted tooling.
+        env.addView(rowLink("Reset sandbox environment\u2026",
+                "wipe Debian + Alpine + shims \u00b7 keys/chats/settings survive",
+                "\u267B", v -> confirmEnvReset()));
+        env.addView(divider());
         env.addView(switchRow("Curated rootfs", "curate_rootfs",
                 "trim docs · man · timezones · perl · locale archives (~50 MB); boot sweeps npm/apt caches (~108 MB)"));
         root.addView(env);
@@ -181,6 +189,14 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         ka.addView(switchRow("Cool idle", "eco_idle",
                 "wake lock ONLY while the agent works — phone stays cool when idle (off = old always-on behavior)"));
         ka.addView(divider());
+        // P31: auto-hibernate — the sandbox stops itself when the app sits
+        // unused in the background; reopening drops you back into your chat.
+        ka.addView(switchRow("Auto-hibernate (save RAM)", "hibernate",
+                "app in the background + no runs + nothing waiting \u2192 the sandbox stops itself; reopening restores your chat from disk"));
+        ka.addView(divider());
+        ka.addView(rowLink("Hibernate after", hibernateLabel(),
+                "\u25F4", v -> pickHibernate()));
+        ka.addView(divider());
         ka.addView(rowLink("Notifications",
                 "the persistent “OpenCode server” notice keeps the agent alive",
                 "◍", v -> openNotifSettings()));
@@ -197,6 +213,13 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 "▤", v -> showIncidentLog()));
         root.addView(ka);
 
+        // ---- P31: safety (the credit limit)
+        root.addView(Theme.sectionLabel(this, "safety"));
+        LinearLayout sf = section();
+        sf.addView(rowLink("Credit limit", creditLimitSub(),
+                "\u24BA", v -> creditDialog()));
+        root.addView(sf);
+
         // ---- projects
         root.addView(Theme.sectionLabel(this, "projects"));
         LinearLayout pr = section();
@@ -207,11 +230,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- interface
         root.addView(Theme.sectionLabel(this, "interface"));
         LinearLayout it = section();
-        // P27: AMOLED pure black is the DEFAULT theme — true-black base
-        // surfaces, hairline-raised cards. The toggle offers the softer
-        // dark surface set for screens where pure black bands visibly.
-        it.addView(switchRow("Pure black (AMOLED)", "amoled",
-                "true-black base · hairline depth · default ON"));
+        // P31: SIX palettes (OLED black stays the default) — the old
+        // AMOLED toggle became the full theme picker.
+        it.addView(rowLink("Theme", Theme.paletteName(Theme.currentId(this))
+                        + " · tap to change",
+                "\u25C9", v -> pickTheme()));
+        it.addView(divider());
         it.addView(switchRow("Animations", "motion",
                 "all movement app-wide (also honors system \"remove animations\")"));
         root.addView(it);
@@ -219,7 +243,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.27.0-p27 · stable taps under streaming (pinned live tree, in-place rows), resume-current chat, curated rootfs, AMOLED design system, tappable file mentions", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.31.0-p31 · parallel chats, model favorites, credit limit, interactive canvas, themes, self-hibernation", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -398,6 +422,178 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
     }
 
     /** Install (or repair + re-probe) the Debian layer with progress UI. */
+    // ============================================ P31: theme / safety / hibernate / reset
+
+    private String hibernateLabel() {
+        int m = getSharedPreferences("oc", MODE_PRIVATE).getInt("hibernate_min",
+                Hibernate.DEFAULT_MINUTES);
+        return "after " + m + " min in the background (no runs)";
+    }
+
+    private void pickHibernate() {
+        String[] labels = new String[Hibernate.MINUTE_CHOICES.length];
+        for (int i = 0; i < labels.length; i++)
+            labels[i] = Hibernate.MINUTE_CHOICES[i] + " minutes";
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Hibernate after")
+                .setItems(labels, (d, w) -> {
+                    getSharedPreferences("oc", MODE_PRIVATE).edit()
+                            .putInt("hibernate_min", Hibernate.MINUTE_CHOICES[w])
+                            .apply();
+                    Toast.makeText(this, "sandbox sleeps after "
+                            + Hibernate.MINUTE_CHOICES[w] + " idle minutes "
+                            + "in the background", Toast.LENGTH_SHORT).show();
+                    root.removeAllViews();
+                    setContentView(buildUi());
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private String creditLimitSub() {
+        double cap = RunHub.spendCap();
+        double spent = RunHub.spendTotal();
+        if (cap <= 0) return spent > 0
+                ? "no limit set · " + CreditLimit.fmt(spent) + " spent total"
+                : "no limit set \u2014 set one so a runaway loop can\u2019t burn money";
+        int v = CreditLimit.verdict(spent, cap);
+        return CreditLimit.stateLine(spent, cap)
+                + (v == CreditLimit.BLOCK ? " \u00b7 spending paused"
+                   : v == CreditLimit.WARN ? " \u00b7 nearing the cap" : "");
+    }
+
+    private void creditDialog() {
+        final EditText in = new EditText(this);
+        in.setHint("cap in dollars, e.g. 5 or 5.50 \u2014 empty = no limit");
+        in.setTextSize(14);
+        in.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        double cur = RunHub.spendCap();
+        if (cur > 0) in.setText(String.format(java.util.Locale.US, "%g", cur));
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Credit limit")
+                .setMessage("All-time spend on this device: "
+                        + CreditLimit.fmt(RunHub.spendTotal()) + "\n\n"
+                        + "When total spending reaches the cap, every send is "
+                        + "refused until you raise or clear it. The counter "
+                        + "tracks what the app actually observed; reset it if "
+                        + "you already paid elsewhere.")
+                .setView(in)
+                .setPositiveButton("Save", (d, w) -> {
+                    double v = CreditLimit.parseCap(in.getText().toString());
+                    if (v < 0) {
+                        Toast.makeText(this, "that is not a dollar amount "
+                                + "(example: 5 or 5.50)", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    getSharedPreferences("oc", MODE_PRIVATE).edit()
+                            .putString("spend_cap", v <= 0 ? ""
+                                    : String.valueOf(v)).apply();
+                    Toast.makeText(this, v <= 0 ? "credit limit cleared"
+                            : "credit limit set to " + CreditLimit.fmt(v),
+                            Toast.LENGTH_SHORT).show();
+                    root.removeAllViews();
+                    setContentView(buildUi());
+                })
+                .setNeutralButton("Reset spend counter", (d, w) -> {
+                    RunHub.resetSpendTotal();
+                    Toast.makeText(this, "spend counter zeroed",
+                            Toast.LENGTH_SHORT).show();
+                    root.removeAllViews();
+                    setContentView(buildUi());
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void pickTheme() {
+        String cur = Theme.currentId(this);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        int pad = Theme.dp(this, 8);
+        wrap.setPadding(pad, pad, pad, pad);
+        for (int i = 0; i < Theme.PALETTES.length; i++) {
+            final String id = Theme.PALETTES[i];
+            LinearLayout row = (LinearLayout) getLayoutInflater().inflate(
+                    android.R.layout.simple_list_item_1, wrap, false);
+            TextView t = new TextView(this);
+            t.setTextSize(15);
+            boolean on = id.equals(cur);
+            t.setTextColor(on ? Theme.ACCENT_LT : Theme.TXT);
+            t.setTypeface(on ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+            t.setText((on ? "\u2713  " : "") + Theme.paletteName(id)
+                    + (id.equals("oled") ? "  \u00b7 default" : ""));
+            t.setPadding(Theme.dp(this, 18), Theme.dp(this, 13),
+                    Theme.dp(this, 18), Theme.dp(this, 13));
+            wrap.addView(t);
+            t.setBackground(Theme.ripple(this, null));
+            Theme.press(t);
+            t.setOnClickListener(v -> {
+                getSharedPreferences("oc", MODE_PRIVATE).edit()
+                        .putString("theme", id).apply();
+                Theme.apply(this);
+                recreate();
+            });
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Theme")
+                .setView(wrap)
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** P31: the environment factory reset — honest dialog, guarded wipe,
+     *  optional immediate Debian reinstall. */
+    private void confirmEnvReset() {
+        StringBuilder msg = new StringBuilder("WILL be wiped (re-extracted from "
+                + "the bundled, sha-verified assets on next boot):\n");
+        for (String n : EnvironmentReset.targetNames()) msg.append(" \u2022 ").append(n).append('\n');
+        msg.append("\nSTAYS exactly as it is:\n");
+        for (String n : EnvironmentReset.keptNames()) msg.append(" \u2022 ").append(n).append('\n');
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("Reset sandbox environment?")
+                .setMessage(msg.toString())
+                .setPositiveButton("Reset", (d, w) -> runEnvReset())
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void runEnvReset() {
+        Toast.makeText(this, "resetting the environment\u2026", Toast.LENGTH_SHORT).show();
+        final File files = getFilesDir();
+        final File cache = getCacheDir();
+        new Thread(() -> {
+            Throwable t = Resilience.guard(() -> {
+                ServerService.stopForDelete(this);   // no respawn mid-wipe
+                int n = EnvironmentReset.wipe(
+                        EnvironmentReset.targets(files, cache), files, cache);
+                ServerService.appendDiagStatic(this, "env-reset",
+                        "environment reset \u2014 " + n + " entries wiped "
+                                + "(keys/chats/settings kept)");
+                ui.post(() -> new android.app.AlertDialog.Builder(this)
+                        .setTitle("Environment reset")
+                        .setMessage(n + " entries wiped. Reinstall the Debian "
+                                + "environment now (takes a minute), or let it "
+                                + "happen on demand later? The Lite toolkit "
+                                + "reinstalls itself on the next launch either way.")
+                        .setPositiveButton("Reinstall now", (d2, w2) -> {
+                            ServerService.restart(this);
+                            installDebian();
+                        })
+                        .setNegativeButton("Later", (d2, w2) -> {
+                            ServerService.restart(this);
+                            Toast.makeText(this, "environment will rebuild on demand",
+                                    Toast.LENGTH_SHORT).show();
+                        })
+                        .show());
+            });
+            if (t != null) {
+                Trail.record(this, "env reset", t);
+                ui.post(() -> Toast.makeText(this, "reset failed: " + t.getMessage(),
+                        Toast.LENGTH_LONG).show());
+            }
+        }, "oc-env-reset").start();
+    }
+
     private void installDebian() {
         TextView prog = new TextView(this);
         prog.setTypeface(Typeface.MONOSPACE);
@@ -723,6 +919,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             dlg.dismiss();
             recreate();
         });
+        Theme.skin(dlg);
         dlg.show();
     }
 
@@ -897,7 +1094,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         ic.setTextColor(Theme.ACCENT_LT);
         ic.setGravity(Gravity.CENTER);
         GradientDrawable g = new GradientDrawable();
-        g.setColor(0x1FA5B4FF);
+        g.setColor(Theme.ICON_DISC);   // P31 token
         g.setShape(GradientDrawable.OVAL);
         ic.setBackground(g);
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(

@@ -101,6 +101,18 @@ public class HomeActivity extends Activity implements ServerService.Evt {
     }
 
     @Override
+    protected void onPause() {
+        // P31: the hibernate-resume anchor — the deck is where the user
+        // left off unless a chat screen pauses after this and stamps over
+        // it (each surface writes on pause; the LAST pauser wins).
+        try {
+            getSharedPreferences("oc", MODE_PRIVATE).edit()
+                    .putString(Resume.KEY, Resume.DECK).apply();
+        } catch (Exception ignored) {}
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
         ServerService.unsubscribe(this);
         if (pulse != null) pulse.cancel();
@@ -199,6 +211,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         root.addView(pill, plp);
 
         setContentView(root);
+        Theme.window(this);              // P31: palette owns the window + dialogs
         Theme.enter(root, 0);
     }
 
@@ -281,7 +294,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         TextView when = new TextView(this);
         when.setText(p.opened > 0 ? "last opened · " + relTime(p.opened) : "not opened yet");
         when.setTextSize(11);
-        when.setTextColor(0xCCFFFFFF);
+        when.setTextColor(Theme.ON_CARD);   // P31 token
         when.setSingleLine(true);
         when.setEllipsize(android.text.TextUtils.TruncateAt.END);
         foot.addView(when, new LinearLayout.LayoutParams(0,
@@ -295,6 +308,21 @@ public class HomeActivity extends Activity implements ServerService.Evt {
         card.addView(foot);
 
         card.setOnClickListener(v -> openProject(p));
+        // P31 — THE LONG-PRESS FIX. The deck's GestureDetector never sees a
+        // stationary hold on a card: the card is a clickable child, it
+        // consumes the touch stream, the deck's onInterceptTouchEvent only
+        // wakes on a MOVE past the slop, so Deck.Callback.onLongPress could
+        // only fire on the gaps BETWEEN cards. On release the card's own
+        // click fired — "long press to delete just opens the chat", exactly
+        // the field report. The long-press now lives ON THE CARD (native
+        // long-click: fires after the timeout, consumes the gesture, and
+        // suppresses the click on release). The deck-level callback stays
+        // as the gap/padding fallback.
+        card.setOnLongClickListener(v -> {
+            Theme.haptic(v);
+            cardActions(p);
+            return true;
+        });
         return card;
     }
 
@@ -359,7 +387,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
                 lp.topMargin = Theme.dp(this, 4);
                 lp.bottomMargin = Theme.dp(this, 4);
                 d.setLayoutParams(lp);
-                d.setBackground(Theme.circle(0x558B93A8));
+                d.setBackground(Theme.circle(Theme.DOT_IDLE));   // P31 token
                 dots.addView(d);
             }
         }
@@ -370,7 +398,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
             lp.height = Theme.dp(this, active ? 20 : 6);
             lp.width = Theme.dp(this, active ? 6 : 6);
             d.setLayoutParams(lp);
-            d.setBackground(Theme.circle(active ? Theme.ACCENT_LT : 0x558B93A8));
+            d.setBackground(Theme.circle(active ? Theme.ACCENT_LT : Theme.DOT_IDLE));   // P31 token
         }
     }
 
@@ -621,6 +649,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
                             }))
                     .setNegativeButton("Cancel", null)
                     .create();
+            Theme.skin(dlg);
             dlg.show();
             dlg.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(Theme.ACCENT_LT);
             dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setTextColor(Theme.ACCENT_LT);

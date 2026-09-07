@@ -43,7 +43,7 @@ public class P26Test {
         set("sessionId", null);
         set("sessionTitle", null);
         set("busy", false);
-        set("runSessionId", null);
+        RunHub.clearRunsForTest();
         set("interruptedNotePending", false);
         set("replayNeeded", false);
         synchronized (editFocus()) { editFocus().clear(); }

@@ -34,13 +34,14 @@ public class KeysActivity extends Activity {
         super.onCreate(b);
 
         ScrollView scroll = new ScrollView(this);
-        scroll.setBackgroundColor(getColor(R.color.bg));
+        scroll.setBackgroundColor(Theme.cr(this, R.color.bg));
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(16);
         root.setPadding(pad, pad, pad, dp(24));
         scroll.addView(root);
         setContentView(scroll);
+        Theme.window(this);              // P31: palette owns the window + dialogs
 
         root.addView(header());
         TextView note = text(13, R.color.text_secondary, false);
@@ -129,7 +130,7 @@ public class KeysActivity extends Activity {
         }
         String status = masked == null ? "no key" : "saved · " + masked;
         LinearLayout t = row(name, id + "  ·  " + status);
-        ((TextView) t.getChildAt(0)).setTextColor(getColor(masked == null
+        ((TextView) t.getChildAt(0)).setTextColor(Theme.cr(this, masked == null
                 ? R.color.text_primary : R.color.ok));
         Theme.press(t);
         t.setOnClickListener(v -> keyDialog(id, name));
@@ -204,7 +205,7 @@ public class KeysActivity extends Activity {
                 masked == null
                         ? "not set — lets the AI clone, commit and push this repo"
                         : "saved · " + masked);
-        ((TextView) t.getChildAt(0)).setTextColor(getColor(
+        ((TextView) t.getChildAt(0)).setTextColor(Theme.cr(this,
                 masked == null ? R.color.text_primary : R.color.ok));
         Theme.press(t);
         t.setOnClickListener(v -> githubDialog());
@@ -366,7 +367,7 @@ public class KeysActivity extends Activity {
     private TextView text(int sizeSp, int colorRes, boolean bold) {
         TextView tv = new TextView(this);
         tv.setTextSize(sizeSp);
-        tv.setTextColor(getColor(colorRes));
+        tv.setTextColor(Theme.cr(this, colorRes));
         if (bold) tv.setTypeface(Typeface.DEFAULT_BOLD);
         return tv;
     }

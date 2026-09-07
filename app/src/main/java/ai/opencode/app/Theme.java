@@ -10,6 +10,7 @@ import android.graphics.drawable.RippleDrawable;
 import android.content.res.ColorStateList;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.OvershootInterpolator;
@@ -74,17 +75,123 @@ public final class Theme {
     public static int TINT_OK     = 0xFF27402F;   // plan/todo disc — ok family
     public static int TINT_DANGER = 0xFF4A2126;   // failed tool disc
     public static int ON_DISC     = 0xFFEDF0FA;   // glyph on a tool disc
+    // P31 tokens: the last hardcoded hues, now palette-owned.
+    public static int RIM_USER   = 0xFF2A3552;   // user bubble rim
+    public static int ICON_DISC  = 0x1FA5B4FF;   // settings row icon wash
+    public static int DOT_IDLE   = 0x558B93A8;   // deck page dot at rest
+    public static int ON_CARD    = 0xCCFFFFFF;   // text on a gradient card
+    public static int RIPPLE     = 0x22FFFFFF;   // ripple mask
+    public static boolean LIGHT  = false;        // paper flag (status bar icons)
 
-    /** Project-card gradient pairs — very dark blue-gray steps (AMOLED:
-     *  depth from hairlines, not bright fills). */
-    public static final int[][] CARD_GRADS = {
-            {0xFF151A28, 0xFF07080F},
-            {0xFF111624, 0xFF05060C},
-            {0xFF1A2030, 0xFF090B12},
-            {0xFF0E1220, 0xFF04050A},
-            {0xFF171C2A, 0xFF060810},
-            {0xFF131826, 0xFF05060B},
+
+    // ---------------------------------------------------- P31 palettes ----
+
+    /** Palette ids, in menu order. "oled" is the DEFAULT (the user set
+     *  it: pure black first). Fields per entry (order matters):
+     *  BG SURFACE SURFACE2 STROKE ACCENT ACCENT_LT ACCENT_BG
+     *  TXT TXT_DIM TXT_FAINT OK ERR WARN ON_ACCENT
+     *  TINT_ACCENT TINT_OK TINT_DANGER ON_DISC RIM_USER ICON_DISC
+     *  DOT_IDLE ON_CARD RIPPLE */
+    public static final String[] PALETTES = {
+            "oled", "midnight", "graphite", "ember", "forest", "paper"
     };
+
+    public static String paletteName(String id) {
+        if (id == null) return "";
+        switch (id) {
+            case "midnight":  return "Midnight blue";
+            case "graphite":  return "Graphite";
+            case "ember":     return "Ember";
+            case "forest":    return "Forest";
+            case "paper":     return "Paper (light)";
+            default:          return "OLED black";
+        }
+    }
+
+    // package-private: the JVM suite pins the table (P31Test)
+    static final int[][] PALETTE_DATA = {
+        // oled — pure black + calm blue (the P27 default, unchanged)
+        {0xFF000000, 0xFF0B0E16, 0xFF121724, 0xFF1B2233, 0xFF7C9CFF, 0xFFA5B8FF,
+         0xFF141A2C, 0xFFF4F6FB, 0xFFABAFBC, 0xFF6E7280, 0xFF7FD1A7, 0xFFE07A7A,
+         0xFFE5C07B, 0xFF0A0D18, 0xFF2A3A66, 0xFF27402F, 0xFF4A2126, 0xFFEDF0FA,
+         0xFF2A3552, 0x1FA5B4FF, 0x558B93A8, 0xCCFFFFFF, 0x22FFFFFF},
+        // midnight — the old non-AMOLED surfaces + the same blue
+        {0xFF0A0C12, 0xFF141826, 0xFF1B2132, 0xFF262E44, 0xFF7C9CFF, 0xFFA5B8FF,
+         0xFF1B2436, 0xFFF4F6FB, 0xFFABAFBC, 0xFF6E7280, 0xFF7FD1A7, 0xFFE07A7A,
+         0xFFE5C07B, 0xFF0A0D18, 0xFF2C3D66, 0xFF27402F, 0xFF4A2126, 0xFFEDF0FA,
+         0xFF2E3A5A, 0x1FA5B4FF, 0x558B93A8, 0xCCFFFFFF, 0x22FFFFFF},
+        // graphite — neutral gray, steel accent
+        {0xFF0A0A0B, 0xFF141416, 0xFF1C1C1F, 0xFF29292E, 0xFF9FB0C3, 0xFFC4D2E2,
+         0xFF1E2126, 0xFFF2F3F5, 0xFFADAFB6, 0xFF70727A, 0xFF8FCFA9, 0xFFE08282,
+         0xFFE2BE7C, 0xFF101216, 0xFF2E343D, 0xFF2A3C2F, 0xFF452226, 0xFFEDF0F4,
+         0xFF33363E, 0x1F9FB0B8, 0x558B93A8, 0xCCFFFFFF, 0x22FFFFFF},
+        // ember — warm dark + amber
+        {0xFF0D0A07, 0xFF181109, 0xFF201710, 0xFF2F2418, 0xFFE8A062, 0xFFF2BE8C,
+         0xFF2A2013, 0xFFF6F1EA, 0xFFB5A998, 0xFF77695A, 0xFF9CCF9A, 0xFFE08282,
+         0xFFE5C07B, 0xFF1A1208, 0xFF4A3320, 0xFF2E3E26, 0xFF4A2126, 0xFFFAF2E6,
+         0xFF40301C, 0x2FA5B47C, 0x558B93A8, 0xCCFFF6EA, 0x22FFFFFF},
+        // forest — deep green + green accent
+        {0xFF050A07, 0xFF0C1410, 0xFF12201A, 0xFF1B2E24, 0xFF6FCF97, 0xFF94E0B4,
+         0xFF13291D, 0xFFEFF7F2, 0xFFA3B3AA, 0xFF67756D, 0xFF7FD1A7, 0xFFE08282,
+         0xFFE2C97C, 0xFF07130C, 0xFF1F4030, 0xFF27402F, 0xFF4A2126, 0xFFEAF6EE,
+         0xFF24402F, 0x1F9FB48C, 0x558B93A8, 0xCCF0FFF5, 0x22FFFFFF},
+        // paper — light: ink on warm paper (the one light option)
+        {0xFFF3F1EA, 0xFFFBFAF6, 0xFFEDEBE2, 0xFFD8D4C8, 0xFF3D63D8, 0xFF2E4CB0,
+         0xFFE4EAF9, 0xFF1B1D24, 0xFF565B66, 0xFF8A8F99, 0xFF2E7D53, 0xFFB3424A,
+         0xFF96691F, 0xFFFFFFFF, 0xFFDCE4F8, 0xFFDDF0E2, 0xFFF6DBDD, 0xFF22242A,
+         0xFFC9D2EE, 0x143D63D8, 0x33998FA0, 0xE6222630, 0x24304460},
+    };
+
+    private static final int[][][] GRAD_DATA = {
+        // oled
+        {{0xFF151A28, 0xFF07080F}, {0xFF111624, 0xFF05060C}, {0xFF1A2030, 0xFF090B12},
+         {0xFF0E1220, 0xFF04050A}, {0xFF171C2A, 0xFF060810}, {0xFF131826, 0xFF05060B}},
+        // midnight
+        {{0xFF1B2136, 0xFF0B0E18}, {0xFF161B2E, 0xFF080B14}, {0xFF212845, 0xFF0C0F1C},
+         {0xFF141928, 0xFF060910}, {0xFF1D2440, 0xFF090C16}, {0xFF182032, 0xFF070A12}},
+        // graphite
+        {{0xFF1B1B1E, 0xFF0B0B0C}, {0xFF17171A, 0xFF09090A}, {0xFF222226, 0xFF0D0D0F},
+         {0xFF141416, 0xFF080809}, {0xFF1E1E22, 0xFF0B0B0D}, {0xFF19191D, 0xFF09090B}},
+        // ember
+        {{0xFF241A0E, 0xFF100B05}, {0xFF1E150B, 0xFF0C0804}, {0xFF2C2012, 0xFF130D06},
+         {0xFF1B1209, 0xFF0A0603}, {0xFF261B10, 0xFF0F0A05}, {0xFF20160C, 0xFF0C0804}},
+        // forest
+        {{0xFF12241A, 0xFF060E09}, {0xFF0E1E15, 0xFF050B08}, {0xFF162C20, 0xFF081109},
+         {0xFF0D1B13, 0xFF040A06}, {0xFF142819, 0xFF060F0A}, {0xFF102116, 0xFF050C08}},
+        // paper
+        {{0xFFFDFCF9, 0xFFEFEBE0}, {0xFFF8F5EE, 0xFFEAE6D9}, {0xFFFFFEFB, 0xFFF2EEE3},
+         {0xFFF6F3EB, 0xFFE9E4D6}, {0xFFFBF9F3, 0xFFEDE9DE}, {0xFFF9F6F0, 0xFFEBE7DB}},
+    };
+
+    /** The gradient table for a palette id (index into GRAD_DATA). */
+    static int[][] gradTable(String id) {
+        int i = paletteIndex(id);
+        return GRAD_DATA[i];
+    }
+
+    /** Index of id in PALETTES (unknown → 0 = oled). */
+    public static int paletteIndex(String id) {
+        if (id != null) for (int i = 0; i < PALETTES.length; i++)
+            if (PALETTES[i].equals(id)) return i;
+        return 0;
+    }
+
+    /** Project-card gradient pairs — palette-owned since P31 (each theme
+     *  ships its own six pairs; very dark steps on dark themes, soft
+     *  paper steps on light). Initialized AFTER GRAD_DATA (static order). */
+    public static int[][] CARD_GRADS = gradTable("oled");
+
+    /** The current palette id (defaults: legacy "amoled" flag → oled/midnight). */
+    public static String currentId(Context c) {
+        String t = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                .getString("theme", null);
+        if (t == null) {
+            boolean amoled = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .getBoolean("amoled", true);
+            return amoled ? "oled" : "midnight";
+        }
+        return t;
+    }
 
     // ---- tokens: spacing (4dp scale) / radii / motion ---------------------
     /** 4dp spacing scale — the ONLY horizontal/vertical rhythm in the app. */
@@ -101,19 +208,202 @@ public final class Theme {
     // ---- apply / AMOLED switch --------------------------------------------
 
     /** Read the theme prefs into the palette. Called from App.onCreate and
-     *  after the Settings toggles (activities then recreate). */
+     *  after the Settings toggles (activities then recreate).
+     *  P31: six palettes — the "theme" string pref is the source; the old
+     *  "amoled" boolean migrates (true→oled, false→midnight) on first
+     *  read and stays untouched for rollback compatibility. */
     public static void apply(Context c) {
-        boolean amoled = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
-                .getBoolean("amoled", true);      // default PURE BLACK
-        if (amoled) {
-            BG = 0xFF000000; SURFACE = 0xFF0B0E16; SURFACE2 = 0xFF121724;
-            STROKE = 0xFF1B2233;
-        } else {
-            BG = 0xFF0A0C12; SURFACE = 0xFF141826; SURFACE2 = 0xFF1B2132;
-            STROKE = 0xFF262E44;
-        }
+        String id = currentId(c);
+        int[] p = PALETTE_DATA[paletteIndex(id)];
+        BG = p[0]; SURFACE = p[1]; SURFACE2 = p[2]; STROKE = p[3];
+        ACCENT = p[4]; ACCENT_LT = p[5]; ACCENT_BG = p[6];
+        TXT = p[7]; TXT_DIM = p[8]; TXT_FAINT = p[9];
+        OK = p[10]; ERR = p[11]; WARN = p[12]; ON_ACCENT = p[13];
+        TINT_ACCENT = p[14]; TINT_OK = p[15]; TINT_DANGER = p[16]; ON_DISC = p[17];
+        RIM_USER = p[18]; ICON_DISC = p[19]; DOT_IDLE = p[20]; ON_CARD = p[21];
+        RIPPLE = p[22];
+        LIGHT = "paper".equals(id);
+        currentIdStatic = id;
+        CARD_GRADS = GRAD_DATA[paletteIndex(id)];
         Markdown.setLinkColor(ACCENT_LT);
         Markdown.setCodeColors(SURFACE2, TXT);
+    }
+
+    /** True when the active palette is the light one (status-bar icons,
+     *  ripple polarity, home glow follow this). */
+    public static boolean isLight() { return LIGHT; }
+
+    // ------------------------------------------------ P31: window + skin
+
+    /** Paint the WINDOW from the palette: decor background, status and
+     *  navigation bars, light-icon flags. The XML theme can only carry
+     *  the static AMOLED colors — every activity calls this once after
+     *  setContentView so a palette switch is whole-screen, not
+     *  "everything except the window". */
+    public static void window(android.app.Activity a) {
+        try {
+            android.view.Window w = a.getWindow();
+            w.setStatusBarColor(BG);
+            w.setNavigationBarColor(BG);
+            w.getDecorView().setBackgroundColor(BG);
+            View d = w.getDecorView();
+            int flags = d.getSystemUiVisibility();
+            if (LIGHT) flags |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            else flags &= ~View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            d.setSystemUiVisibility(flags);
+            // P31: dialogs resolve their theme AT CREATION — applying the
+            // palette's sheet style here (after setContentView is fine for
+            // dialogs) skins every AlertDialog this activity will show:
+            // surface, hairline, text colors, accent — no per-call-site
+            // skinning needed anywhere.
+            a.getTheme().applyStyle(sheetStyle(paletteIndex(currentId(a))), true);
+            // and remap every static XML color in the inflated tree
+            retint(w.getDecorView());
+        } catch (Exception ignored) {
+            // a window-level nit must never take a screen down
+        }
+    }
+
+    /** R.style of the sheet presentation for a palette index. */
+    static int sheetStyle(int idx) {
+        switch (Math.max(0, Math.min(idx, PALETTES.length - 1))) {
+            case 1: return R.style.OcSheetMidnight;
+            case 2: return R.style.OcSheetGraphite;
+            case 3: return R.style.OcSheetEmber;
+            case 4: return R.style.OcSheetForest;
+            case 5: return R.style.OcSheetPaper;
+            default: return R.style.OcSheetOled;
+        }
+    }
+
+    /** Skin a dialog from the palette: rounded SURFACE panel + hairline,
+     *  themed nav bar. The OcSheet XML style only carries the static
+     *  AMOLED colors — with six palettes, dialogs are skinned at runtime
+     *  (call right after show()). */
+    public static void skin(android.app.Dialog d) {
+        try {
+            android.view.Window w = d.getWindow();
+            if (w == null) return;
+            w.setBackgroundDrawable(panelDrawable(d.getContext()));
+            w.setNavigationBarColor(BG);
+            // custom content rows are painted at build time — give them
+            // the same remap the activity tree gets
+            retint(w.getDecorView());
+        } catch (Exception ignored) {}
+    }
+
+    /** The rounded SURFACE panel used by skin(). */
+    private static android.graphics.drawable.Drawable panelDrawable(Context c) {
+        android.graphics.drawable.GradientDrawable g =
+                new android.graphics.drawable.GradientDrawable();
+        g.setColor(SURFACE);
+        g.setCornerRadius(radiusSheet(c));
+        g.setStroke(dp(c, 1), STROKE);
+        return g;
+    }
+
+    // ------------------------------------------------ P31: runtime retint
+
+    /**
+     * XML colors are read ONCE at build time (@color/bg, @color/surface,
+     * bg_chip's solid, layout textColor attrs...) — five of the six
+     * palettes cannot live inside that static file. The fix: window()
+     * walks the freshly-inflated tree and REMAPS every color that equals
+     * an OLED-table value to the active palette's value. Dark palettes
+     * are near-identical (no-ops); Paper flips every static hue in one
+     * pass. Views painted from the Java ints (cards, chips, bubbles) are
+     * already correct and unaffected.
+     */
+    public static void retint(View root) {
+        try {
+            if (root == null) return;
+            retintWalk(root, 0);
+        } catch (Throwable ignored) {
+            // a missed tint is a nit; a thrown one is a broken screen
+        }
+    }
+
+    private static void retintWalk(View v, int depth) {
+        if (depth > 30) return;                       // pathological trees out
+        android.graphics.drawable.Drawable bg = v.getBackground();
+        if (bg instanceof android.graphics.drawable.ColorDrawable) {
+            android.graphics.drawable.ColorDrawable cd =
+                    (android.graphics.drawable.ColorDrawable) bg;
+            int mapped = remap(cd.getColor());
+            if (mapped != cd.getColor()) {
+                ((android.graphics.drawable.ColorDrawable) cd.mutate()).setColor(mapped);
+                v.setBackground(cd);
+            }
+        } else if (bg instanceof android.graphics.drawable.GradientDrawable) {
+            android.graphics.drawable.GradientDrawable g =
+                    (android.graphics.drawable.GradientDrawable) bg;
+            android.content.res.ColorStateList c = g.getColor();
+            if (c != null) {
+                int mapped = remap(c.getDefaultColor());
+                if (mapped != c.getDefaultColor()) {
+                    ((android.graphics.drawable.GradientDrawable) g.mutate()).setColor(mapped);
+                    v.setBackground(g);
+                }
+            }
+        }
+        if (v instanceof android.widget.TextView) {
+            android.widget.TextView tv = (android.widget.TextView) v;
+            int cur = tv.getCurrentTextColor();
+            int mapped = remap(cur);
+            if (mapped != cur) tv.setTextColor(mapped);
+            int hint = tv.getCurrentHintTextColor();
+            int mappedHint = remap(hint);
+            if (mappedHint != hint) tv.setHintTextColor(mappedHint);
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) retintWalk(g.getChildAt(i), depth + 1);
+        }
+    }
+
+    /**
+     * OLED hex → active-palette hex (pure; index order = the field order
+     * documented on PALETTES). Returns the input unchanged when it is not
+     * an OLED table value — custom runtime colors (card gradients, washes)
+     * pass through untouched.
+     */
+    static int remap(int color) {
+        int[] oled = PALETTE_DATA[0];
+        int[] cur = PALETTE_DATA[paletteIndex(currentIdStatic)];
+        if (oled == cur) return color;
+        for (int i = 0; i < oled.length; i++)
+            if (oled[i] == color) return cur[i];
+        return color;
+    }
+
+    /** The palette id retint/remap are serving (set by apply()). */
+    private static volatile String currentIdStatic = "oled";
+
+    /** A color RESOURCE read at paint time, remapped to the active
+     *  palette. @color/text_primary etc. are frozen at build; views that
+     *  read them through this helper (and every dialog's custom content)
+     *  follow the palette instead of staying OLED-white on Paper. */
+    public static int cr(Context c, int res) {
+        try {
+            return remap(c.getColor(res));
+        } catch (Exception e) {
+            return res;
+        }
+    }
+
+    /** The home glow, palette-aware: the static bg_home XML is dark-tuned;
+     *  the light palette gets a flat BG instead of a dark halo. */
+    public static android.graphics.drawable.Drawable homeGlow(Context c) {
+        if (LIGHT) {
+            android.graphics.drawable.ColorDrawable cd =
+                    new android.graphics.drawable.ColorDrawable(BG);
+            return cd;
+        }
+        try {
+            return c.getDrawable(R.drawable.bg_home);
+        } catch (Exception e) {
+            return new android.graphics.drawable.ColorDrawable(BG);
+        }
     }
 
     // ---- motion ------------------------------------------------------
@@ -286,7 +576,7 @@ public final class Theme {
     /** Ripple wrapper for rows/cards (framework RippleDrawable). */
     public static Drawable ripple(Context c, Drawable content) {
         try {
-            return new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), content, null);
+            return new RippleDrawable(ColorStateList.valueOf(RIPPLE), content, null);
         } catch (Exception e) {
             return content;
         }
@@ -316,7 +606,7 @@ public final class Theme {
         GradientDrawable d = new GradientDrawable();
         d.setColor(ACCENT_BG);
         d.setCornerRadius(dp(c, 16));
-        d.setStroke(1, 0xFF2A3552);
+        d.setStroke(1, RIM_USER);
         return d;
     }
 
