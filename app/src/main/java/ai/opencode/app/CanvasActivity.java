@@ -40,6 +40,12 @@ public class CanvasActivity extends Activity {
     private String sourceName = "page";
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        Theme.syncIfNeeded(this);        // P32: a theme switch elsewhere re-skins here too
+    }
+
+    @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         Theme.window(this);                  // palette follows the app

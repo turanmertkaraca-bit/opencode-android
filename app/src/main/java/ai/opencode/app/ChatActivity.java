@@ -286,6 +286,7 @@ public class ChatActivity extends Activity
     @Override
     protected void onResume() {
         super.onResume();
+        if (Theme.syncIfNeeded(this)) return;   // P32: palette changed → recreating
         ServerService.subscribe(this);
         int st = ServerService.getState();
         if ((st == ServerService.ST_IDLE || st == ServerService.ST_STOPPED
@@ -735,7 +736,7 @@ public class ChatActivity extends Activity
             c.setTextSize(13);
             c.setTypeface(Typeface.DEFAULT_BOLD);
             c.setTextColor(Theme.cr(this, R.color.accent_light));
-            c.setBackgroundResource(R.drawable.bg_suggest);
+            c.setBackground(Theme.suggestPill(this));
             int p = dp(14);
             c.setPadding(p, dp(11), p, dp(11));   // P25: taller touch target
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -768,7 +769,7 @@ public class ChatActivity extends Activity
         FrameLayout content = (FrameLayout) ((ViewGroup)
                 getWindow().getDecorView().findViewById(android.R.id.content));
         FrameLayout fl = new FrameLayout(this);
-        fl.setBackgroundColor(0xE60A0C12);
+        fl.setBackgroundColor(Theme.surfaceScrim(0xE6));  // P32: palette-owned veil
         fl.setClickable(true);
 
         LinearLayout card = new LinearLayout(this);
@@ -1061,7 +1062,7 @@ public class ChatActivity extends Activity
         liveSlot.removeAllViews();
         liveCard = new LinearLayout(this);
         liveCard.setOrientation(LinearLayout.VERTICAL);
-        liveCard.setBackgroundResource(R.drawable.bg_thought_card);
+        liveCard.setBackground(Theme.thoughtCard(this));
         int cp = dp(11);
         liveCard.setPadding(cp, dp(8), cp, dp(9));
 
@@ -1260,7 +1261,7 @@ public class ChatActivity extends Activity
         } else {
             livePeekSlot.removeAllViews();
             pv = mono(text(10, R.color.text_primary, false), 10);
-            pv.setBackgroundResource(R.drawable.bg_code);
+            pv.setBackground(Theme.codeWell(this));
             int pp = dp(9);
             pv.setPadding(pp, pp, pp, pp);
             pv.setSingleLine(false);
@@ -1601,7 +1602,7 @@ public class ChatActivity extends Activity
         row.setPadding(rp, dp(3), rp, dp(3));
         boolean sel = e.abs != null && e.abs.equals(RunHub.liveSel());
         boolean isNewest = e.abs != null && e.abs.equals(newest);
-        if (sel) row.setBackgroundResource(R.drawable.bg_code);
+        if (sel) row.setBackground(Theme.codeWell(this));
         else row.setBackground(null);
 
         TextView g = (TextView) row.getChildAt(0);
@@ -1710,7 +1711,7 @@ public class ChatActivity extends Activity
             if (bm != null) iv.setImageBitmap(bm);
             else iv.setImageResource(android.R.drawable.ic_menu_report_image);
             iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            iv.setBackgroundResource(R.drawable.bg_code);
+            iv.setBackground(Theme.codeWell(this));
             chip.addView(iv, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
@@ -1821,7 +1822,7 @@ public class ChatActivity extends Activity
         ImageView iv = new ImageView(this);
         iv.setAdjustViewBounds(true);
         iv.setMaxWidth(dp(240));
-        iv.setBackgroundResource(R.drawable.bg_code);
+        iv.setBackground(Theme.codeWell(this));
         int ip = dp(4);
         iv.setPadding(ip, ip, ip, ip);
         Bitmap bm;
@@ -2109,7 +2110,7 @@ public class ChatActivity extends Activity
                 LinearLayout wrap = new LinearLayout(this);
                 wrap.setOrientation(LinearLayout.HORIZONTAL);
                 TextView tv = text(15, R.color.user_text, false);
-                tv.setBackgroundResource(R.drawable.bg_bubble_user);
+                tv.setBackground(Theme.userBubbleTail(this));
                 int p = dp(13);
                 tv.setPadding(p, dp(9), p, dp(9));
                 tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.78));
@@ -2192,7 +2193,7 @@ public class ChatActivity extends Activity
                 // open, the body itself streams with the caret.
                 LinearLayout c = new LinearLayout(this);
                 c.setOrientation(LinearLayout.VERTICAL);
-                c.setBackgroundResource(R.drawable.bg_thought_card);
+                c.setBackground(Theme.thoughtCard(this));
                 int cp = dp(13);
                 c.setPadding(cp, dp(10), cp, dp(12));
 
@@ -2267,8 +2268,8 @@ public class ChatActivity extends Activity
                 boolean running = "running".equals(r.status) || "pending".equals(r.status);
                 LinearLayout c = new LinearLayout(this);
                 c.setOrientation(LinearLayout.VERTICAL);
-                c.setBackgroundResource(failed
-                        ? R.drawable.bg_err_card : R.drawable.bg_tool_card);
+                c.setBackground(failed
+                        ? Theme.errCard(this) : Theme.toolCard(this));
                 int cp = dp(11);
                 c.setPadding(cp, cp, cp, cp);
 
@@ -2382,7 +2383,7 @@ public class ChatActivity extends Activity
             case K_ERR: {
                 LinearLayout c = new LinearLayout(this);
                 c.setOrientation(LinearLayout.VERTICAL);
-                c.setBackgroundResource(R.drawable.bg_err_card);
+                c.setBackground(Theme.errCard(this));
                 int p = dp(12);
                 c.setPadding(p, dp(10), p, dp(10));
                 TextView t1 = text(13, R.color.err, true);
@@ -2414,7 +2415,7 @@ public class ChatActivity extends Activity
                 TextView tv = text(11, R.color.text_secondary, false);
                 tv.setText(r.text.toString());
                 tv.setGravity(Gravity.CENTER_HORIZONTAL);
-                tv.setBackgroundResource(R.drawable.bg_sys_pill);
+                tv.setBackground(Theme.sysPill(this));
                 int p = dp(12);
                 tv.setPadding(p, dp(6), p, dp(6));
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -2501,7 +2502,7 @@ public class ChatActivity extends Activity
             copyText(content, "code");
             return true;
         });
-        tv.setBackgroundResource(R.drawable.bg_code);
+        tv.setBackground(Theme.codeWell(this));
         int p = dp(10);
         tv.setPadding(p, p, p, p);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -2599,7 +2600,7 @@ public class ChatActivity extends Activity
             TextView pill = text(12, R.color.ok, true);
             pill.setText("⏵ unattended — auto-allowing " + action
                     + " · tap to turn off");
-            pill.setBackgroundResource(R.drawable.bg_sys_pill);
+            pill.setBackground(Theme.sysPill(this));
             int pp = dp(12);
             pill.setPadding(pp, dp(7), pp, dp(7));
             pill.setOnClickListener(v -> setAutoAllow(false));
@@ -2657,7 +2658,7 @@ public class ChatActivity extends Activity
         String dt = detail.toString();
         if (dt.length() > 1500) dt = dt.substring(0, 1500) + "…";
         d.setText(dt);
-        d.setBackgroundResource(R.drawable.bg_code);
+        d.setBackground(Theme.codeWell(this));
         int dpc = dp(10);
         d.setPadding(dpc, dpc, dpc, dpc);
         LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(
@@ -2672,14 +2673,14 @@ public class ChatActivity extends Activity
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         blp.topMargin = dp(12);
 
-        TextView deny = permButton("Deny", "reject", R.drawable.bg_btn_deny, id, R.color.err);
+        TextView deny = permButton("Deny", "reject", Theme.denyPill(this), id, R.color.err);
         btns.addView(deny);
-        TextView always = permButton("Always allow", "always", R.drawable.bg_btn_outline, id, R.color.accent_light);
+        TextView always = permButton("Always allow", "always", Theme.outlinePill(this), id, R.color.accent_light);
         LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         alp.leftMargin = dp(8);
         btns.addView(always, alp);
-        TextView allow = permButton("Allow", "once", R.drawable.bg_btn_allow, id, R.color.on_accent);
+        TextView allow = permButton("Allow", "once", Theme.allowPill(this), id, R.color.on_accent);
         LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         vlp.leftMargin = dp(8);
@@ -2695,10 +2696,11 @@ public class ChatActivity extends Activity
     }
 
     /** P10: one solid, tappable permission button (min touch target 44dp). */
-    private TextView permButton(String label, String response, int bgRes, String id, int colorRes) {
+    private TextView permButton(String label, String response,
+                                android.graphics.drawable.Drawable bg, String id, int colorRes) {
         TextView b = text(13, colorRes, true);
         b.setText(label);
-        b.setBackgroundResource(bgRes);
+        b.setBackground(bg);
         b.setGravity(Gravity.CENTER);
         int p = dp(16);
         b.setPadding(p, dp(11), p, dp(11));

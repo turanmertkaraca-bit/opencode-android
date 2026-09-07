@@ -342,6 +342,15 @@ public final class Theme {
                 int mapped = remap(c.getDefaultColor());
                 if (mapped != c.getDefaultColor()) {
                     ((android.graphics.drawable.GradientDrawable) g.mutate()).setColor(mapped);
+                    // P32: this drawable came from static XML with a
+                    // build-time-frozen OLED solid — its 1dp hairline
+                    // stroke (if any) is equally frozen. Re-skin it from
+                    // the live token so Paper never wears a near-black
+                    // ring. (Java-painted drawables never fire here: on
+                    // non-oled palettes their solids are palette values,
+                    // and on oled the remap is identity.)
+                    ((android.graphics.drawable.GradientDrawable) g).setStroke(
+                            dp(v.getContext(), 1), STROKE);
                     v.setBackground(g);
                 }
             }
@@ -378,6 +387,78 @@ public final class Theme {
 
     /** The palette id retint/remap are serving (set by apply()). */
     private static volatile String currentIdStatic = "oled";
+
+    // ------------------------------------------------ P32: card ink + sync
+
+    /**
+     * P32: the palette's ON-CARD ink at a custom alpha. The P8-era card
+     * rows hardcoded white tints (0xB3FFFFFF tag, 0xB8FFFFFF path,
+     * 0x30FFFFFF divider …) — invisible on Paper, where the card ink is
+     * dark. This derives every on-gradient tint from the ON_CARD token
+     * instead: dark palettes keep their white family (on the DEFAULT oled
+     * palette the results are BYTE-IDENTICAL to the old hexes — zero
+     * visual change), Paper gets ink at the same relative strength.
+     */
+    public static int onCard(int alpha) {
+        return (ON_CARD & 0x00FFFFFF) | ((alpha & 0xFF) << 24);
+    }
+
+    /**
+     * P32: a full-screen scrim in the active SURFACE hue at a custom
+     * alpha — the "starting sandbox" veil. The old veil hardcoded a dark
+     * midnight wash (0xE60A0C12), which read as a dead black hole over
+     * the Paper palette; now the veil follows the palette (light wash on
+     * Paper, the same near-black feel on the dark palettes).
+     */
+    public static int surfaceScrim(int alpha) {
+        return (SURFACE & 0x00FFFFFF) | ((alpha & 0xFF) << 24);
+    }
+
+    /**
+     * P32 pure core of the stale-palette check: was the screen built with
+     * a palette that is no longer the pref? (A theme switch in Settings
+     * only recreates the Settings screen — every OTHER open screen kept
+     * the old palette until the process died. This is the "some parts of
+     * the ui is inconsistent" report, second half.) A null applied id is
+     * defined as NOT stale: screens paint from App.onCreate's apply(), so
+     * null never happens in practice and no-op beats a recreate storm.
+     */
+    public static boolean isStale(String prefId, String appliedId) {
+        if (prefId == null || appliedId == null) return false;
+        return paletteIndex(prefId) != paletteIndex(appliedId);
+    }
+
+    /** Stale check against the live pref + the palette this process last
+     *  applied (the pure core above, wired to real state). */
+    public static boolean isStale(Context c) {
+        return isStale(currentId(c), currentIdStatic);
+    }
+
+    /**
+     * P32: call at the TOP of every activity's onResume. If a theme
+     * switch happened while this screen was in the background, apply the
+     * new palette (statics + Markdown links/code) and recreate the
+     * screen — the whole app follows the theme, not just Settings.
+     * Returns true when a palette change was detected AND applied (the
+     * recreate itself is best-effort and contained). After a recreate the
+     * ids match, so this cannot loop.
+     */
+    public static boolean syncIfNeeded(android.app.Activity a) {
+        try {
+            if (!isStale(a)) return false;
+            apply(a);               // statics are current BEFORE the rebuild
+        } catch (Throwable e) {
+            return false;           // apply failed: stay coherent, no half state
+        }
+        try {
+            a.recreate();
+        } catch (Throwable ignored) {
+            // recreate refused (rare device states) — the statics are
+            // already new, so the next natural rebuild picks them up
+        }
+        return true;
+    }
+
 
     /** A color RESOURCE read at paint time, remapped to the active
      *  palette. @color/text_primary etc. are frozen at build; views that
@@ -543,16 +624,19 @@ public final class Theme {
 
         GradientDrawable rim = new GradientDrawable();
         rim.setCornerRadius(radiusPx);
-        rim.setStroke(1, 0x33FFFFFF);
+        // P32: palette-owned rim (the hardcoded white rim vanished on Paper)
+        rim.setStroke(1, onCard(0x33));
         return new LayerDrawable(new Drawable[]{base, shine, rim});
     }
 
-    /** Ghost "new project" card: dashed-feel rim on translucent fill. */
+    /** Ghost "new project" card: dashed-feel rim on translucent fill.
+     *  P32: palette-owned on-card ink — the hardcoded whites were
+     *  invisible on Paper (a white ghost on paper-white). */
     public static GradientDrawable ghostCard(Context c) {
         GradientDrawable d = new GradientDrawable();
-        d.setColor(0x10FFFFFF);
+        d.setColor(onCard(0x10));
         d.setCornerRadius(radiusCard(c));
-        d.setStroke(dp(c, 2), 0x50FFFFFF);
+        d.setStroke(dp(c, 2), onCard(0x50));
         return d;
     }
 
@@ -607,6 +691,105 @@ public final class Theme {
         d.setColor(ACCENT_BG);
         d.setCornerRadius(dp(c, 16));
         d.setStroke(1, RIM_USER);
+        return d;
+    }
+
+    /** P32: the user bubble WITH the asymmetric tail (br 6dp) — the
+     *  P10 XML shape, now palette-owned end to end (the XML's stroke
+     *  color was build-time-frozen and stayed dark-blue on Paper). */
+    public static GradientDrawable userBubbleTail(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(ACCENT_BG);
+        float r = dp(c, 20), tail = dp(c, 6);
+        d.setCornerRadii(new float[]{r, r, r, r, r, r, r, tail});
+        d.setStroke(dp(c, 1), RIM_USER);
+        return d;
+    }
+
+    // ---- P32: palette-owned replacements for the P10 XML cards/pills ----
+    // The XML drawables freeze colors at BUILD time: solids equal to an
+    // OLED-table value are remapped by retint(), but STROKES and
+    // non-table solids (#0D1017 code wells, #2A151C error cards…) can
+    // never follow the palette — the "parts of the ui inconsistent"
+    // report. These build the same shapes from the LIVE tokens.
+
+    /** Tool input/output well + code blocks (was bg_code: frozen
+     *  #0D1017/#222836 — a near-black block on the Paper palette). */
+    public static GradientDrawable codeWell(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(SURFACE);
+        d.setCornerRadius(radiusWell(c));
+        d.setStroke(dp(c, 1), STROKE);
+        return d;
+    }
+
+    /** Thinking/live card (was bg_thought_card). */
+    public static GradientDrawable thoughtCard(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(SURFACE);
+        d.setCornerRadius(dp(c, 14));
+        d.setStroke(dp(c, 1), (TINT_ACCENT & 0x00FFFFFF) | 0x33000000);
+        return d;
+    }
+
+    /** Error/failed card (was bg_err_card: frozen #2A151C). */
+    public static GradientDrawable errCard(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(TINT_DANGER);
+        d.setCornerRadius(dp(c, 14));
+        d.setStroke(dp(c, 1), (ERR & 0x00FFFFFF) | 0x66000000);
+        return d;
+    }
+
+    /** Plain tool card (was bg_tool_card). */
+    public static GradientDrawable toolCard(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(SURFACE);
+        d.setCornerRadius(dp(c, 14));
+        d.setStroke(dp(c, 1), STROKE);
+        return d;
+    }
+
+    /** System pill (was bg_sys_pill: frozen #141824). */
+    public static GradientDrawable sysPill(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(SURFACE2);
+        d.setCornerRadius(dp(c, 12));
+        return d;
+    }
+
+    /** Deny pill (was bg_btn_deny: frozen dark wash). */
+    public static GradientDrawable denyPill(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(TINT_DANGER);
+        d.setCornerRadius(radiusChip(c));
+        d.setStroke(dp(c, 1), (ERR & 0x00FFFFFF) | 0x66000000);
+        return d;
+    }
+
+    /** Always-allow outline pill (was bg_btn_outline). */
+    public static GradientDrawable outlinePill(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(ACCENT_BG);
+        d.setCornerRadius(radiusChip(c));
+        d.setStroke(dp(c, 1), STROKE);
+        return d;
+    }
+
+    /** Allow pill — filled accent (was bg_btn_allow). */
+    public static GradientDrawable allowPill(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(ACCENT);
+        d.setCornerRadius(radiusChip(c));
+        return d;
+    }
+
+    /** Suggestion chip (was bg_suggest: frozen stroke). */
+    public static GradientDrawable suggestPill(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(ACCENT_BG);
+        d.setCornerRadius(dp(c, 18));
+        d.setStroke(dp(c, 1), (ACCENT & 0x00FFFFFF) | 0x4D000000);
         return d;
     }
 

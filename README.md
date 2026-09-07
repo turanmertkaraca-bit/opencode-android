@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.31.0 — P31)
+## Install (v0.32.0 — P32, final)
 
-1. Grab `opencode-p31-v0.31.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p32-v0.32.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
    uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
@@ -23,7 +23,30 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
 
-## What's in v0.31.0 (P31 — parallel chats, favorites, a credit limit, the canvas, themes, sleep)
+## What's in v0.32.0 (P32 — the final polish: the theme crash, fixed; every screen follows the palette)
+
+- **the theme crash** — "pressing the theme change button causes a
+  crash": P31's picker dead-cast `simple_list_item_1` (a TextView!) to
+  LinearLayout — ClassCastException on every tap, before the sheet even
+  opened, in a line no logic test could see. The dead cast is gone, the
+  picker is contained (failure = one toast + incident-log line, never
+  the app), and a Robolectric test now performs the exact tap and
+  asserts the sheet opens.
+- **every screen follows the palette** — a theme switch used to re-skin
+  Settings only; all screens sync on resume now (loop-proof,
+  contained).
+- **no more frozen colors** — code wells, error cards, permission
+  pills, system pills, thinking cards, suggestion chips, the user-bubble
+  rim, card ink, the sandbox veil and the hero disc all follow the live
+  palette now; on the default OLED theme every result is byte-identical
+  to P31 (pinned by test) and Paper finally gets real ink. `retint()`
+  re-skins the static-XML hairline strokes it could never reach.
+- **the picker, improved** — live swatches (bg · surface · accent) on
+  every theme row, haptic on select.
+- 275 JVM tests green (17 new). Fixes and polish only — no new surface:
+  this is the final version.
+
+## What was in v0.31.0 (P31 — parallel chats, favorites, a credit limit, the canvas, themes, sleep)
 
 - **the long-press fix** — "long press to delete doesn't work, it just
   opens the chat": a project card is a clickable child, so it consumed the
@@ -571,6 +594,7 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P27 stable taps + resume-current + curated rootfs + AMOLED design system + tappable file mentions | shipped |
 | P28 the P27 field report: tappable mentions, dots above composer, big-file-proof peek, faster boot | shipped |
 | P29 model-sheet double-open, photo tray, cost prediction, /compact, terse v1, feel pass | shipped |
-| P31 parallel chats, model favorites, credit limit, interactive canvas, six themes, auto-hibernate | **current** |
+| P31 parallel chats, model favorites, credit limit, interactive canvas, six themes, auto-hibernate | shipped |
 | P30 live setting injection (<system-reminder>), cost-hint clipping, long-press project delete | shipped |
-| Next: on-device toolchain (clang) import path | planned |
+| P32 the final polish: theme crash fixed, whole-app palette sync, frozen colors retired, swatch picker | **current — final** |
+| Next: on-device toolchain (clang) import path | dropped (P32 is final) |
