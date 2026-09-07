@@ -27,6 +27,33 @@ Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
    (system exit records, retroactive), and the sandbox incident log has
    the server's side. Paste both.
 
+## Why not just Termux + proot + the TUI?
+
+Fair question — and it is the honest one, because this project started
+exactly there: the first builds were a Termux port with a proot Debian
+and the TUI on top, before P7 replaced all of it with the native setup.
+Same agent binary either way (opencode v1.18.25). The difference is
+everything around it:
+
+| | **opencode-android** | **Termux + proot + TUI** |
+|---|---|---|
+| First chat | minutes: sideload the APK, paste a key — or none at all for the 31 free models | an evening: Termux, proot-distro, distro bootstrap, package installs, node/binary wiring, TUI config |
+| Skills needed | none — if you can use a chat app, you can use this | shell, package manager, TUI keybindings, terminal session management |
+| The interface | a native Android chat app: streaming bubbles, six themes, haptics, gesture navigation, real sheets | a terminal grid rendered on a touchscreen |
+| Photos & vision | attach up to 6 photos in one message; a vision-capable model sees the pixels, otherwise a free vision model describes them | no practical pipe from your gallery into the TUI |
+| Watching it work | live file feed of every edit, a peek at the exact line being changed, tappable file mentions | tail -f and hope |
+| Long runs | runs outlive the chat screen, parallel runs tracked per session, sessions auto-recover after a kill | survival depends on terminal multiplexer and wake-lock discipline |
+| After Android kills the app | the supervisor restarts the server with backoff; the incident log and last-exits forensics name the killer | you restart Termux and guess what happened |
+| Cost & context | a context-depth meter with cache stats, next-send cost prediction, a credit limit that actually stops spending | TUI counters on a six-inch terminal |
+| Extras | interactive HTML canvas, model favorites, terse mode, unattended mode, hibernation, in-place updates | whatever you script yourself |
+| Sandbox weight | curated rootfs — around 108 MB of dead weight trimmed every session | the full distro image |
+| The agent core | **opencode v1.18.25 — identical** | **opencode v1.18.25 — identical** |
+
+One honest row for the other side: the TUI exposes every CLI knob, and
+the app deliberately covers the core loop instead — power config still
+lives in the sandbox's own files. Same brain, same sessions-on-disk
+format. One of the two was designed for a phone.
+
 ## What's in v0.34.0 (P34 — one surface for every box, a deck that always catches you)
 
 - **every box in the app grew up** — the audit found 41 framework alert
