@@ -2372,7 +2372,8 @@ public class ChatActivity extends Activity
                         // content access). Never auto-opens; the user taps.
                         if (CanvasDoc.isRenderable(abs)) {
                             TextView play = text(12, R.color.accent_light, true);
-                            play.setText("▶ interactive");
+                            play.setText("▶ interactive"
+                                    + RenderCheck.chipSuffix(abs));
                             play.setBackgroundResource(R.drawable.bg_chip);
                             play.setPadding(op, dp(6), op, dp(6));
                             LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(
@@ -2976,8 +2977,10 @@ public class ChatActivity extends Activity
         final Sheet sh = Sheet.show(this, "✦ Interactive canvas")
                 .msg("The agent writes a self-contained HTML page (inline "
                         + "CSS/JS, no external resources) to " + CanvasDoc.FILE_NAME
-                        + " in the project. When the tool card shows, tap "
-                        + "\u25B6 interactive to open it.")
+                        + " in the project, then render-checks it through the "
+                        + "app's local checker and fixes every console error — "
+                        + "what you open has already passed its check. When the "
+                        + "tool card shows, tap \u25B6 interactive to open it.")
                 .add(in);
         if (!sh.showing()) return;
         sh.pillKeep("Explain it", Sheet.PRIMARY, (s) -> {
@@ -2990,7 +2993,9 @@ public class ChatActivity extends Activity
             s.dismiss();
             input.setText("");
             RunHub.sys(CanvasDoc.sentNote());
-            RunHub.send(CanvasDoc.prompt(topic));
+            RunHub.send(CanvasDoc.prompt(topic)
+                    + RenderCheck.renderClause(RenderServer.port(),
+                                               RenderServer.token()));
         });
         sh.pill("Cancel", Sheet.QUIET, null);
         sh.focus(in);
