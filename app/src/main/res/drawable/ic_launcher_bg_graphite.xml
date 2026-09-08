@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P36 launcher background, Graphite: the palette's own home gradient
+     (Theme GRAD_DATA, first pair) so the icon IS the theme's face.
+     Same diagonal as the P17 classic icon. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr xmlns:aapt="http://schemas.android.com/aapt" name="android:fillColor">
+            <gradient
+                android:startX="14" android:startY="6"
+                android:endX="94" android:endY="102"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF1B1B1E"/>
+                <item android:offset="1.0" android:color="#FF0B0B0C"/>
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

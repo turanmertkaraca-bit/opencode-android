@@ -758,6 +758,11 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                         getSharedPreferences("oc", MODE_PRIVATE).edit()
                                 .putString("theme", id).apply();
                         Theme.apply(this);
+                        // P36: the launcher icon follows the theme
+                        // (contained — a PackageManager nit logs one
+                        // line, never breaks the switch that already
+                        // succeeded).
+                        LauncherIcon.sync(this, id);
                         if (holder[0] != null && holder[0].showing())
                             holder[0].dismiss();
                         setContentView(buildUi());

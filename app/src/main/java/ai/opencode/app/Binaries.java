@@ -39,19 +39,35 @@ public final class Binaries {
      * the same opencode-linux-arm64 tarball, renamed so aapt2 cannot
      * decompress or rename it). Fresh installs skip the SAF import dance
      * entirely. Throws on any failure so the UI can show a real error.
+     *
+     * P36 hardening: the bundled asset goes by known names and the
+     * candidate order is a PINNED pure rule (pickAssetName). History:
+     * the v0.34/v0.35 builds accidentally packaged the tarball as
+     * n.bin while the code only read oc_pkg.bin — fresh installs could
+     * not boot the sandbox. The chain tolerates any of the three names
+     * so a packaging slip can never brick the first boot again.
      */
+    static final String[] ASSET_CANDIDATES = {"oc_pkg.bin", "oc_pkg", "n.bin"};
+
+    /** First bundled-asset name present in the APK, or null. (pure, pinned) */
+    static String pickAssetName(java.util.Set<String> available) {
+        for (String cand : ASSET_CANDIDATES)
+            if (available.contains(cand)) return cand;
+        return null;
+    }
+
     public static void extractBundled(Context c, TarGz.Progress cb) throws IOException {
         File bin = binaryFile(c);
         if (bin.exists()) bin.delete();
         InputStream in;
+        String name;
         try {
-            in = c.getAssets().open("oc_pkg.bin");
+            name = pickAssetName(new java.util.HashSet<>(
+                    java.util.Arrays.asList(c.getAssets().list(""))));
+            if (name == null) throw new IOException("no candidate");
+            in = c.getAssets().open(name);
         } catch (Exception e) {
-            try {
-                in = c.getAssets().open("oc_pkg");
-            } catch (Exception e2) {
-                throw new IOException("bundled package missing from APK");
-            }
+            throw new IOException("bundled package missing from APK");
         }
         boolean gz;
         try {
@@ -59,7 +75,7 @@ public final class Binaries {
             int n = in.read(m);
             gz = (n == 2 && m[0] == 0x1f && m[1] == (byte) 0x8b);
             in.close();
-            in = c.getAssets().open(gz ? "oc_pkg.bin" : "oc_pkg");
+            in = c.getAssets().open(name);
         } catch (IOException e) {
             throw new IOException("cannot read bundled package");
         }

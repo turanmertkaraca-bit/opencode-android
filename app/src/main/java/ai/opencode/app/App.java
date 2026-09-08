@@ -36,6 +36,9 @@ public class App extends Application {
         // ONCE at process start — every screen, drawable and markdown link
         // renders from the same palette from the first frame.
         Theme.apply(this);
+        // P36: the launcher icon follows the theme — self-heals an
+        // interrupted switch at boot (contained, never throws).
+        LauncherIcon.reconcile(this);
         // P25: the run engine exists for the WHOLE process lifetime — it
         // owns the transcript, busy state, send orchestration and the
         // live-edit feed, so a running agent turn never depends on any
