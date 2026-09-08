@@ -7,11 +7,13 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.35.0 — P35)
+## Install (v0.36.0 — P36)
 
-1. Grab `opencode-p35-v0.35.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p36-v0.36.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → updates in place, no
-   uninstall; your projects, keys and sessions survive).
+   uninstall; your projects, keys and sessions survive). If the v0.35.0
+   APK refused to install on your phone before Sep 8, that build was
+   rebuilt — but P36 supersedes it anyway, so just install this one.
 2. Open the app: the project deck opens, tap a card → that project's
    sandbox → chat. **＋** adds a project, **long-press** a card → the project
    sheet (Open / Rename / Remove card / **Delete project** — the app's own
@@ -54,7 +56,44 @@ the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
 
-## What's in v0.35.0 (P35 — the agent's eyes: write, render-check, fix, then show)
+## What's in v0.36.0 (P36 — the icon follows the theme)
+
+- **the launcher icon re-inks itself when you pick a theme** — the same
+  `>_` glyph the app has carried since P5, on each palette's own face:
+  the background gradient is that theme's real home gradient and the
+  chevron wears the palette accent (Paper goes light with blue ink, Ember
+  goes warm amber, Forest goes deep green). Under the hood it is one
+  launcher alias per palette with exactly ONE enabled at a time.
+- **an explicit pick always wins, silence keeps the classic** — a device
+  that never chose a theme keeps the P17 icon; the Graphite default is a
+  rendering default, not a choice (the same philosophy the picker already
+  uses for its · default crown).
+- **the switch can never strand you** — the new alias is enabled BEFORE
+  the old one is disabled, so the launcher never sees a no-icon moment;
+  every process start reconciles the alias state, so an interrupted
+  switch (enable landed, disable didn't) heals itself on the next open;
+  and the whole thing is contained — a PackageManager failure is one
+  incident-log line, never a broken theme switch (the palette change
+  that called it already succeeded).
+- **some launchers repaint lazily** — the icon is correct app-side the
+  moment you tap; a launcher that caches hard (a few OEMs) may show the
+  old face until it next reloads. That is launcher behavior, not app
+  state.
+- **the fresh-install boot fix rides along** — the v0.34/v0.35 builds
+  packaged the bundled server binary under a name the code does not read
+  (n.bin where the code opens oc_pkg.bin): upgrades never noticed (the
+  binary was already on disk) but a FRESH install could not boot the
+  sandbox. The rebuilt v0.35.0 asset (Sep 8) already carried the fix;
+  P36 ships it forward and adds a name-fallback chain (pinned by tests)
+  so a packaging slip can never brick the first boot again.
+- **330 JVM tests green (17 new)** — the alias table must stay aligned
+  with the palette table (a future theme without an icon fails the suite,
+  not the user), the theme→alias mapping (garbage never maps to OLED),
+  the exactly-one-enabled plan (enable-before-disable, interrupted-switch
+  healing, stale-cleanup, no-op when already correct), and the
+  bundled-asset name chain.
+
+## What was in v0.35.0 (P35 — the agent's eyes: write, render-check, fix, then show)
 
 - **the loop closed** — the agent could write code and run it, but it
   could not LOOK at a page it wrote: the sandbox has no browser, tool
@@ -757,8 +796,9 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P32 the final polish: theme crash fixed, whole-app palette sync, frozen colors retired, swatch picker | shipped |
 | P33 the final version: instant themes, Graphite default, keys reach the sandbox, honest picker, project sheet | shipped |
 | P34 one surface for every box (41 framework boxes → Sheets), back always catches you, Settings ESSENTIALS top zone, Pixel-style credit editor | shipped |
-| P35 the agent's eyes: localhost render endpoint (the browser the agent can use), write → render-check → fix → present loop, quiet ✓ chips | **current** |
-| Next: P36 | reserved |
+| P35 the agent's eyes: localhost render endpoint (the browser the agent can use), write → render-check → fix → present loop, quiet ✓ chips | shipped |
+| P36 the icon follows the theme: one launcher alias per palette, exactly-one-enabled with self-heal, fresh-install boot fix | **current** |
+| Next: P37 | reserved |
 
 ## Credits
 

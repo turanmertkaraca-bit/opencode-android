@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- P36: adaptive icon, Paper (light) palette. minSdk 28 >= 26 — anydpi-v26
+     covers every supported device. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_bg_paper"/>
+    <foreground android:drawable="@drawable/ic_launcher_fg_paper"/>
+    <monochrome android:drawable="@drawable/ic_launcher_fg_paper"/>
+</adaptive-icon>
