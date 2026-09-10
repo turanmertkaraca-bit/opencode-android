@@ -2154,14 +2154,32 @@ public class ChatActivity extends Activity
                 return wrap;
             }
             case K_ASSISTANT: {
+                boolean blankText = RunHub.blankText(r.text);
+                if (blankText && (r.meta == null || r.meta.isEmpty())) {
+                    // P37: a content-less text part (tool-only assistant
+                    // rounds, the shell before an early error) must not
+                    // paint a padded empty box — the empty-item /
+                    // weird-gap field reports. Zero footprint, and no
+                    // ghost view registrations left behind.
+                    LinearLayout g = new LinearLayout(this);
+                    g.setVisibility(View.GONE);
+                    String gk = r.key == null ? "" : r.key;
+                    viewByKey.remove(gk);
+                    bodyByKey.remove(gk);
+                    metaByKey.remove(gk);
+                    return g;
+                }
                 LinearLayout box = new LinearLayout(this);
                 box.setOrientation(LinearLayout.VERTICAL);
-                box.setPadding(dp(2), dp(8), 0, dp(2));
+                box.setPadding(dp(2), blankText ? dp(4) : dp(8), 0, dp(2));
                 boolean streaming = r.shown < r.text.length();
                 TextView body = text(15, R.color.text_primary, false);
                 body.setTextIsSelectable(true);
                 body.setLineSpacing(dp(1), 1f);
-                if (streaming) {
+                if (blankText) {
+                    // P37: blank text that still carries a token footer →
+                    // paint the compact footer only (no box, no dots).
+                } else if (streaming) {
                     // plain tail with caret — cheap, re-painted by the smoother
                     int upto = Math.min(r.shown, r.text.length());
                     String s = r.text.substring(0, upto);
@@ -2192,16 +2210,16 @@ public class ChatActivity extends Activity
                         return true;
                     });
                 }
-                box.addView(body);
+                if (!blankText) box.addView(body);
                 if (r.meta != null && !r.meta.isEmpty()) {
                     TextView meta = text(11, R.color.text_secondary, false);
                     meta.setText(r.meta);
-                    meta.setPadding(0, dp(3), 0, dp(6));
+                    meta.setPadding(0, dp(blankText ? 1 : 3), 0, dp(blankText ? 2 : 6));
                     box.addView(meta);
                 }
                 String key = r.key == null ? "" : r.key;
                 viewByKey.put(key, box);
-                bodyByKey.put(key, body);
+                if (!blankText) bodyByKey.put(key, body);
                 TextView m = r.meta == null ? null
                         : (TextView) box.getChildAt(box.getChildCount() - 1);
                 if (m != null && m != body) metaByKey.put(key, m);

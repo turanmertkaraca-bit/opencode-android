@@ -116,6 +116,8 @@ public final class RunHub implements ServerService.EventListener {
          *  every run start; cleared on session resets. */
         public long depthPeak;
         public int rowsAdded;              // monotonically bumps on add (view cue)
+        /** P37: the leaky-model note is once per session, never per part. */
+        public boolean dsmlNoted;
         // P26: RUNNING session sums. A year-long run must not re-iterate
         // an ever-growing msgs map on every pill paint — totals move by
         // delta on each message update and survive the eviction of old
@@ -208,6 +210,19 @@ public final class RunHub implements ServerService.EventListener {
      * in the session → no tokens spent. LRU-capped at 64 like styleTold.
      */
     private static final java.util.Map<String, Boolean> renderTold =
+            new java.util.LinkedHashMap<String, Boolean>(16, 0.75f, false) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Boolean> e) {
+                    return size() > 64;
+                }
+            };
+    /**
+     * P37 — per-session environment-note state: TRUE = the map (Debian
+     * guest vs host tools + the GitHub-token answer) rode this session's
+     * first message. Absent = the session never heard it → the next send
+     * carries it once. LRU-capped at 64 like styleTold.
+     */
+    private static final java.util.Map<String, Boolean> envTold =
             new java.util.LinkedHashMap<String, Boolean>(16, 0.75f, false) {
                 @Override protected boolean removeEldestEntry(
                         java.util.Map.Entry<String, Boolean> e) {
@@ -1084,8 +1099,15 @@ public final class RunHub implements ServerService.EventListener {
 
     static void upsertText(final Tx t, final String key, final String mid, final String text) {
         main(() -> {
+            boolean dsml = false;
             synchronized (LOCK) {
                 Row r = rowIn(t, key);
+                // P37: a text part holding only whitespace is NOT a message —
+                // tool-only assistant rounds used to materialize as an
+                // invisible padded box + a floating token footer (the
+                // empty-item / weird-gap field reports). No content, no row;
+                // the moment real text arrives this same key creates it.
+                if (r == null && blankText(text)) return;
                 if (r == null) {
                     r = new Row();
                     r.kind = K_ASSISTANT;
@@ -1110,9 +1132,42 @@ public final class RunHub implements ServerService.EventListener {
                     if (metaChanged) r.meta = meta;
                     if (!changed && !metaChanged) return;
                 }
+                // P37: leaky-model one-shot. A model printing raw DSML
+                // tool-call markup as chat text means its endpoint is not
+                // honoring tool calls — say so once, in the visible chat
+                // only (background transcripts never surface notes).
+                if (t == cur && !t.dsmlNoted && r.text.length() > 0
+                        && Dsml.leaky(r.text.toString())) {
+                    t.dsmlNoted = true;
+                    dsml = true;
+                }
             }
+            if (dsml) sys(Dsml.note());
             afterUpsert(t, key);
         });
+    }
+
+    /** P37: whitespace-only text = no content (see upsertText). */
+    static boolean blankText(CharSequence s) {
+        if (s == null) return true;
+        for (int i = 0; i < s.length(); i++)
+            if (!Character.isWhitespace(s.charAt(i))) return false;
+        return true;
+    }
+
+    /** P37 — some provider endpoints answer tool prompts by printing
+     *  their raw tool-call markup (DSML) as plain text. The tool actions
+     *  inside that text never ran; the honest app says so once per
+     *  session instead of letting the junk sit unexplained. */
+    static final class Dsml {
+        static boolean leaky(String s) {
+            return s != null && (s.contains("<|DSML|") || s.contains("</|DSML|"));
+        }
+        static String note() {
+            return "⚠ this model printed raw tool-call markup (DSML) as chat "
+                    + "text — those tool actions did NOT run. Its endpoint is "
+                    + "not honoring tool calls; try another model (⌘ → Model)";
+        }
     }
 
     static void upsertReason(final Tx t, final String key, final String mid, final String text) {
@@ -1441,6 +1496,8 @@ public final class RunHub implements ServerService.EventListener {
                 }
                 showError = mi != null && !mi.errorShown && fErrName != null;
                 if (showError) mi.errorShown = true;
+                // (P37 note: the card view already draws its own ✕ — the
+                // old "✕ " prefix here painted the double-cross.)
                 if (fMeta != null) {
                     for (int i = t.rows.size() - 1; i >= 0; i--) {
                         Row r = t.rows.get(i);
@@ -1457,7 +1514,7 @@ public final class RunHub implements ServerService.EventListener {
             }
             if (hasSpend) notifySpend();
             if (showError) {
-                err("✕ " + fErrName, fErrMsg == null ? "" : fErrMsg,
+                err(fErrName, fErrMsg == null ? "" : fErrMsg,
                         String.valueOf(info));
                 releaseRun(t.sid, false);
             }
@@ -1519,7 +1576,16 @@ public final class RunHub implements ServerService.EventListener {
                         ? RenderCheck.note(RenderServer.port(),
                                            RenderServer.token())
                         : null;
+                // P37: the environment map rides the FIRST message of the
+                // session — Debian guest vs host tools, and the honest
+                // GitHub-token answer (present + what it is for, or absent
+                // + where the user adds one). No more blind git/gh probing.
+                final Boolean eTold;
+                synchronized (envTold) { eTold = envTold.get(sid); }
+                final String eNote = EnvNote.needsNote(eTold)
+                        ? EnvNote.note(EnvNote.ghConfigured(appCtx)) : null;
                 String wire = TerseMode.wrap(text, tp, told);
+                if (eNote != null) wire = eNote + "\n\n" + wire;
                 if (rNote != null) wire = rNote + "\n\n" + wire;
                 List<String> bodies = buildBodies(
                         wire, Models.selected(appCtx), agent);
@@ -1571,6 +1637,8 @@ public final class RunHub implements ServerService.EventListener {
                 styleMark(sid, tp);              // P30: this session is in sync now
                 if (rNote != null)               // P35: note delivered — once
                     synchronized (renderTold) { renderTold.put(sid, Boolean.TRUE); }
+                if (eNote != null)               // P37: env map delivered — once
+                    synchronized (envTold) { envTold.put(sid, Boolean.TRUE); }
                 reconcile(r.body);
                 H.removeCallbacks(watchdog);
                 H.postDelayed(watchdog, 2000);
@@ -1642,90 +1710,10 @@ public final class RunHub implements ServerService.EventListener {
         });
     }
 
-    /** Screenshot send (the vision flow's network half). The confirm
-     *  sheet stays in the view; the run is hub-owned like every other.
-     *  P31: per-session claim + credit gate, like send(). */
-    public static void sendImage(File jpg, String caption) {
-        if (creditBlocked()) {
-            sys(CreditLimit.blockLine(spendTotal(), spendCap()));
-            return;
-        }
-        final String cap2 = (caption == null || caption.isEmpty())
-                ? "what do you see here?" : caption;
-        final String key = "img" + System.currentTimeMillis();
-        upsertImage(cur, key, null, jpg.getAbsolutePath(), cap2, "user");
-        IO.execute(() -> {
-            String sid = ensureSession();
-            if (sid == null) {
-                sys("server not healthy yet — try again in a moment");
-                return;
-            }
-            int claim = claimRun(sid);
-            if (claim != RunBook.CLAIM_OK) {
-                sys(claim == RunBook.CLAIM_BUSY
-                        ? "this chat is still running — tap ■ to stop it first"
-                        : "parallel run limit reached — let one finish");
-                return;
-            }
-            try {
-                validateSelectedModel();
-                byte[] bytes = java.nio.file.Files.readAllBytes(jpg.toPath());
-                String dataUrl = Vision.dataUrl(bytes);
-                lastUserText = cap2;
-                runHadOutput = false;
-                touchRun(sid);
-
-                // ---- path 1: the server's own file part (raw pixels)
-                // P30: the style note rides the caption like any text send.
-                final boolean tp = tersePref();
-                final Boolean told;
-                synchronized (styleTold) { told = styleTold.get(sid); }
-                final String wireCap = TerseMode.wrap(cap2, tp, told);
-                Api.Resp r = null;
-                for (String body : buildImageBodies(wireCap, dataUrl,
-                        Models.selected(appCtx), agent)) {
-                    r = Api.post("/session/" + sid + "/message", body, 300_000);
-                    if (r.ok()) break;
-                }
-                if (r != null && r.ok()) {
-                    sys("◉ screenshot attached — the agent sees the pixels");
-                    styleMark(sid, tp);          // P30
-                    reconcile(r.body);
-                    H.removeCallbacks(watchdog);
-                    H.postDelayed(watchdog, 2000);
-                    return;
-                }
-
-                // ---- path 2: a FREE vision model describes it (keyless ok)
-                sys("◉ asking a free vision model to look at it…");
-                String bearer = Vision.zenKey(appCtx);
-                IOException last = null;
-                for (int i = 0; i < Vision.CANDIDATES.length; i++) {
-                    String[] m = Vision.modelAt(i);
-                    try {
-                        String desc = Vision.describe(m[1], Vision.prompt(cap2),
-                                bytes, bearer, 45_000);
-                        sys("◉ " + m[1] + " saw the screenshot — feeding the agent");
-                        sendText(sid, cap2 + "\n\n[screenshot shared by the user"
-                                + " · vision via " + m[0] + "/" + m[1] + "]\n" + desc);
-                        return;
-                    } catch (IOException e2) {
-                        last = e2;               // rotate to the next free model
-                    }
-                }
-                err("vision failed", last == null ? "no model answered"
-                        : last.getMessage(), last == null ? "" : String.valueOf(last));
-                releaseRun(sid, false);
-            } catch (Exception e) {
-                sys("screenshot send failed: " + e);
-                releaseRun(sid, false);
-            } catch (Throwable e) {
-                Trail.record(appCtx, "hub screenshot send", e);
-                sys("screenshot send hit an internal error — contained");
-                releaseRun(sid, false);
-            }
-        });
-    }
+    // P37: sendImage removed — dead since P29. The attachment tray's
+    // sendWithAttachments covers the single-image case (and more), no
+    // caller remained in code or tests, and buildImageBodies/Vision stay
+    // in service of the live paths.
 
     /** P29: the multi-image send — the tray flow's network half. Every
      *  picked photo rides ONE message (path 1: N file parts); if the

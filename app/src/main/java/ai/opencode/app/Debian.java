@@ -678,6 +678,20 @@ public final class Debian {
 
     // ----------------------------------------------------- launcher script
 
+    /** P37 — the guest credential-helper gitconfig (written by
+     *  writeLauncher next to the launcher script). git does NOT read
+     *  GH_TOKEN on its own — the field report: token in the env, push
+     *  still failed. The FILE holds no secret; the helper reads
+     *  $GH_TOKEN at push time. Pure so the suite can pin the exact
+     *  quoting: the printf format must reach the file as the two-char
+     *  backslash-n sequence (the helper prints real newlines when git
+     *  asks for credentials at push time). */
+    static String gitConfigSnippet() {
+        return "[credential \"https://github.com\"]\n"
+             + "\thelper = !f() { test \"$1\" = get && "
+             + "printf 'username=x-access-token\\npassword=%s\\n' \"$GH_TOKEN\"; }; f\n";
+    }
+
     /**
      * files/debian/launch — the shell-script twin of guestProcess(): the
      * `bash` shim execs THIS so agent shells land inside Debian. Baked
@@ -700,6 +714,20 @@ public final class Debian {
             String lib = libDir(c).getAbsolutePath();
             String rootfs = rootfsDir(c).getAbsolutePath();
             String home = Binaries.homeDir(c).getAbsolutePath();
+
+            // P37: /root/.gitconfig — plain git push works out of the box
+            // once GH_TOKEN is exported. Write-if-different like the
+            // launcher; silent when the rootfs is not installed yet.
+            try {
+                File gr = new File(rootfs, "root");
+                if (gr.isDirectory()) {
+                    File gf = new File(gr, ".gitconfig");
+                    byte[] g = gitConfigSnippet().getBytes(StandardCharsets.UTF_8);
+                    if (!gf.exists() || !java.util.Arrays.equals(readAll(gf), g)) {
+                        try (OutputStream o = new FileOutputStream(gf)) { o.write(g); }
+                    }
+                }
+            } catch (Exception ignored) {}
 
             StringBuilder s = new StringBuilder();
             s.append("#!/system/bin/sh\n")
