@@ -208,8 +208,9 @@ format. One of the two was designed for a phone.
   now lands the same frame: save → apply → dismiss the sheet → rebuild the
   one view tree in place. The new palette is on screen before the sheet
   finishes its 180 ms slide-out.
-- **Graphite is the default face** — the user picked it ("the graphite
-  theme is cool make it default"). Fresh installs (and pref-less devices)
+- **Graphite is the default face** — picked from the field: of all the
+  palettes, graphite read coolest on a phone screen, so it became the
+  default. Fresh installs (and pref-less devices)
   come up in Graphite; an explicit theme choice always wins; the picker's
   "· default" label moved with the crown.
 - **the whole-app palette sync actually works now** — P32's `syncIfNeeded`
