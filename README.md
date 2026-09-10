@@ -7,13 +7,11 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.36.0 — P36)
+## Install (v0.37.0 — P37)
 
-1. Grab `opencode-p36-v0.36.0-debug.apk` from the releases page and sideload
-   it (same signing key as every earlier build → updates in place, no
-   uninstall; your projects, keys and sessions survive). If the v0.35.0
-   APK refused to install on your phone before Sep 8, that build was
-   rebuilt — but P36 supersedes it anyway, so just install this one.
+1. Grab `opencode-p37-v0.37.0-debug.apk` from the releases page and sideload
+   it (same signing key as every earlier build → installs as an update in
+   place, no uninstall; your projects, keys and sessions survive).
 2. Open the app: the project deck opens, tap a card → that project's
    sandbox → chat. **＋** adds a project, **long-press** a card → the project
    sheet (Open / Rename / Remove card / **Delete project** — the app's own
@@ -55,6 +53,43 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.37.0 (P37 — the chat stops lying with empty space)
+
+- **no more empty items and weird gaps in chat** — assistant rounds that
+  only ran tools (no text) used to render as an invisible padded box with
+  their token footer floating alone between the tool cards (the blank
+  areas and lonely `tok` lines in the field screenshots). A message now
+  exists only when it has words: tool cards sit tight together, real
+  messages keep their bodies and footers exactly as before.
+- **error cards show one cross, not two** — the `✕` was painted twice on
+  the same card.
+- **raw tool-call markup in the chat gets explained, once per session** —
+  if a model prints its own tool-call syntax as plain text, the app says
+  plainly that those actions did not run and another model should be
+  tried. The junk text stays visible; nothing is hidden, it just stops
+  being unexplained.
+- **the environment map rides every session's first message** — the shell
+  runs inside a Debian guest whose `/root` the host read/edit/write tools
+  cannot see (keep shared files in the project folder — that was the
+  read-file error in the field), and the GitHub-token question gets an
+  honest answer in both states: with a token set (scoped to this repo, a
+  credential helper preinstalled, plain `git push` works, the token is
+  never printed) or without one (pushes will fail; add a key under the
+  keys screen, Agent GitHub access). No more blind git/gh probing.
+- **plain `git push` actually works now** — git never read `GH_TOKEN` by
+  itself (the field report had the token in the environment and push
+  still failing); the guest ships a `/root/.gitconfig` credential helper
+  that reads the token at push time. The file itself holds no secret.
+- Rides along: the dead single-screenshot send path removed (superseded
+  by the attachment tray long ago); `scripts/axml_parse.py` ships in the
+  repo so the build gate's manifest proof survives workspace wipes; and
+  the build gate now pins the bundled payload digest — the opencode
+  tarball itself, not the binary inside it — so a wrong-stage payload is
+  refused before the build even starts.
+- 346 JVM tests green, 16 new pins: the blank-part rules, the note texts
+  (never carrying a token-shaped secret), the gitconfig quoting, the
+  DSML detector, and the zero-footprint render.
 
 ## What's in v0.36.0 (P36 — the icon follows the theme)
 
@@ -797,8 +832,9 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P33 the final version: instant themes, Graphite default, keys reach the sandbox, honest picker, project sheet | shipped |
 | P34 one surface for every box (41 framework boxes → Sheets), back always catches you, Settings ESSENTIALS top zone, Pixel-style credit editor | shipped |
 | P35 the agent's eyes: localhost render endpoint (the browser the agent can use), write → render-check → fix → present loop, quiet ✓ chips | shipped |
-| P36 the icon follows the theme: one launcher alias per palette, exactly-one-enabled with self-heal, fresh-install boot fix | **current** |
-| Next: P37 | reserved |
+| P36 the icon follows the theme: one launcher alias per palette, exactly-one-enabled with self-heal, fresh-install boot fix | shipped |
+| P37 empty chat gaps gone, the environment map, plain git push, single error cross | **current** |
+| Next: P38 | reserved |
 
 ## Credits
 
@@ -806,6 +842,6 @@ scripts/                     toolchain setup, binary API scanners, packaging
 
 Ran development end to end: spec'd every feature, called every design
 decision, tested every build in the field, and shipped 34 releases
-(P0 → P34).
+(P1 → P37).
 
 Developed with AI assistance under their direction.
