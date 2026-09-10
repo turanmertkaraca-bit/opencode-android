@@ -23,6 +23,23 @@ cd "$PROJ"
 ASSET="app/src/main/assets/oc_pkg.bin"
 [ -f "$ASSET" ] || { echo "FAIL: $ASSET missing (the opencode tarball — not in git; restore it from a release asset)"; exit 1; }
 
+# ---- 0b. the payload itself: gzip tarball, known-good digest ---------------
+# The asset is the opencode TARBALL, not the uncompressed binary inside it —
+# the raw 184 MB ELF went in by mistake once: TarGz.extractAll would reject it
+# on first read and every fresh install would fail to boot the sandbox.
+# Bump the digest below consciously, only when the payload legitimately changes.
+EXPECT_SHA="6384e745af0ee988a6f51e8aa205c0d71b614e0bb100d22c4e535b355d673a7d"
+ACTUAL_SHA="$(sha256sum "$ASSET" | cut -d' ' -f1)"
+[ "$ACTUAL_SHA" = "$EXPECT_SHA" ] || {
+  echo "FAIL: oc_pkg.bin sha mismatch: $ACTUAL_SHA" >&2
+  echo "      expected: $EXPECT_SHA (wrong stage, or the payload changed — bump consciously)" >&2
+  exit 1
+}
+[ "$(od -An -tx1 -N2 "$ASSET" | tr -d ' \n')" = "1f8b" ] || {
+  echo "FAIL: oc_pkg.bin is not gzip — wrong stage (raw binary?), TarGz.extractAll cannot read it"; exit 1
+}
+echo "payload OK: oc_pkg.bin $ACTUAL_SHA"
+
 # ---- 1. gradle build --------------------------------------------------------
 "$GRADLE" assembleDebug --no-daemon 2>&1 | tail -3
 APK="app/build/outputs/apk/debug/app-debug.apk"
