@@ -90,6 +90,10 @@ public final class RunHub implements ServerService.EventListener {
          *  in the Σ popover so "are the money-saving features on?" has a
          *  visible answer: cached tokens ARE being counted as cached. */
         public long cacheRead;
+        /** P39: compaction summary message (assistant, info.summary) — the
+         *  amnesia detector never judges across one: compacting
+         *  legitimately shrinks the payload. */
+        public boolean summary;
         public boolean errorShown;
     }
 
@@ -1497,6 +1501,9 @@ public final class RunHub implements ServerService.EventListener {
                 t.msgs.put(mid, mi);
             }
             if (role != null) mi.role = role;
+            // P39: sticky — a summary flag arriving on any update marks the
+            // message for the detector, live SSE and replay alike.
+            if (Boolean.TRUE.equals(info.get("summary"))) mi.summary = true;
         }
         Map<String, Object> tk = Json.map(info, "tokens");
         long total = 0;
@@ -1674,6 +1681,12 @@ public final class RunHub implements ServerService.EventListener {
                 String wire = TerseMode.wrap(text, tp, told);
                 if (eNote != null) wire = eNote + "\n\n" + wire;
                 if (rNote != null) wire = rNote + "\n\n" + wire;
+                // P39: context repair rides FIRST (outermost block) when the
+                // flat-totals signature says the turns are being answered
+                // without history. The model reads the thread again; the
+                // user's bubble stays clean (NoteStrip knows the signature).
+                final String recap = contextRepair(sid);
+                if (recap != null) wire = recap + "\n\n" + wire;
                 List<String> bodies = buildBodies(
                         wire, Models.selected(appCtx), agent);
                 Api.Resp r = null;
@@ -1755,6 +1768,73 @@ public final class RunHub implements ServerService.EventListener {
         });
     }
 
+    // ------------------------------------------------ P39 context repair
+
+    /** The session's assistant messages, chronological (opencode message
+     *  ids are monotonic, so id order is time order — the msgs map itself
+     *  is recency-ordered by UPDATE, unusable for sequencing). Pure view
+     *  for the amnesia detector. */
+    static List<AmnesiaGuard.Obs> assistantObs(final Tx t) {
+        ArrayList<String[]> rows = new ArrayList<>();
+        synchronized (LOCK) {
+            for (Map.Entry<String, MsgInfo> e : t.msgs.entrySet()) {
+                MsgInfo mi = e.getValue();
+                if (mi == null || !"assistant".equals(mi.role)) continue;
+                rows.add(new String[]{e.getKey(), String.valueOf(mi.tok),
+                        mi.summary ? "1" : "0"});
+            }
+        }
+        rows.sort((a, b) -> String.valueOf(a[0]).compareTo(String.valueOf(b[0])));
+        List<AmnesiaGuard.Obs> out = new ArrayList<>(rows.size());
+        for (String[] r : rows)
+            out.add(new AmnesiaGuard.Obs(Long.parseLong(r[1]), "1".equals(r[2])));
+        return out;
+    }
+
+    /** The recent thread as digest lines, newest-collected first then
+     *  reversed — tail-capped so one huge paste cannot eat the budget.
+     *  User rows are already display-form (P38: upsertUser paints the
+     *  stripped text), assistant rows are the visible bodies. */
+    static String threadDigest(final Tx t) {
+        ArrayList<String> lines = new ArrayList<>();
+        int budget = AmnesiaGuard.RECAP_MAX_CHARS + 4096;
+        int used = 0;
+        synchronized (LOCK) {
+            for (int i = t.rows.size() - 1; i >= 0 && used < budget; i--) {
+                Row r = t.rows.get(i);
+                if (r == null || r.text == null || r.text.length() == 0) continue;
+                String kind;
+                if (r.kind == K_USER) kind = "user";
+                else if (r.kind == K_ASSISTANT) kind = "assistant";
+                else continue;
+                String line = AmnesiaGuard.digestLine(kind, r.text.toString());
+                if (line == null) continue;
+                lines.add(line);
+                used += line.length();
+            }
+        }
+        StringBuilder b = new StringBuilder();
+        for (int i = lines.size() - 1; i >= 0; i--)
+            b.append(lines.get(i)).append('\n');
+        return b.toString();
+    }
+
+    /** The recap block when this session's flat totals say the model is
+     *  being answered without its history; null when healthy. NEVER
+     *  throws — a detector hiccup must never block a send. */
+    static String contextRepair(String sid) {
+        try {
+            if (sid == null) return null;
+            final Tx t;
+            synchronized (LOCK) { t = cur; }
+            if (t == null || !sid.equals(t.sid)) return null;
+            if (!AmnesiaGuard.confirmed(assistantObs(t))) return null;
+            return AmnesiaGuard.recapBlock(threadDigest(t));
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
     /** Fire-and-track the same text again (self-heal / stream-flake retry).
      *  P31: the caller's run claim is still held — retries never re-claim. */
     private static void sendText(final String sid, final String q) {
@@ -1767,8 +1847,11 @@ public final class RunHub implements ServerService.EventListener {
                 final boolean tp = tersePref();
                 final Boolean told;
                 synchronized (styleTold) { told = styleTold.get(sid); }
+                String wire = TerseMode.wrap(q, tp, told);
+                final String recap = contextRepair(sid);   // P39: ride here too
+                if (recap != null) wire = recap + "\n\n" + wire;
                 List<String> bodies = buildBodies(
-                        TerseMode.wrap(q, tp, told),
+                        wire,
                         Models.selected(appCtx), agent);
                 Api.Resp r = null;
                 for (String body : bodies) {
@@ -2284,6 +2367,18 @@ public final class RunHub implements ServerService.EventListener {
                 }
                 List<Object> arr = Json.arr(Json.parse(r.body));
                 if (arr == null) return;
+                if (arr.isEmpty()) {
+                    // P39: the server answered fine and knows this session —
+                    // but its message store is EMPTY. The history is gone
+                    // server-side; say so once instead of leaving the user
+                    // in a silently fresh-looking chat.
+                    sys("the sandbox's store has no messages for this chat — "
+                            + "its history was lost server-side. New sends start "
+                            + "a fresh thread; context repair feeds the recent "
+                            + "turns back automatically once the detector sees "
+                            + "the pattern.");
+                    return;
+                }
                 int from = Math.max(0, arr.size() - 80);
                 for (int i = from; i < arr.size(); i++) {
                     if (!id.equals(sessionId)) return;  // switched mid-replay

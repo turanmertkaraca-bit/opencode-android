@@ -26,9 +26,11 @@ public final class NoteStrip {
     /** The app's note signatures — what follows the opening tag. These
      *  MUST match the note builders (pinned cross-class in P38Test):
      *  EnvNote.note → "Environment:", RenderCheck.note → "App capability",
-     *  TerseMode.note → "User preference updated". */
+     *  TerseMode.note → "User preference updated", and P39's
+     *  AmnesiaGuard.recapBlock → "Context repair". */
     static final String[] SIGNATURES = {
-            "Environment:", "App capability", "User preference updated"
+            "Environment:", "App capability", "User preference updated",
+            "Context repair"
     };
 
     static final String OPEN = "<system-reminder>";
