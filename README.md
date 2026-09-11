@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.39.0 — P39)
+## Install (v0.40.0 — P40)
 
-1. Grab `opencode-p39-v0.39.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p40-v0.40.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
    Note: v0.38.0 was built and field-tested but never published here —
@@ -55,6 +55,50 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.40.0 (P40 — the amnesia cured at its source)
+
+P39 made the amnesia observable and non-fatal. P40 ends it. The rig went
+back to work — the exact bundled server (v1.18.25) under emulation with a
+payload-logging mock provider — and this time it reproduced the field bug
+end to end, found the real mechanism, repaired it at the source on the
+rig, and the app now does the same on the device.
+
+- **the mechanism, proven** — the server keeps every message in a SQLite
+  store, and opening a session paints the whole thread from it (why you
+  always SAW your history). But the payload the model receives assembles
+  from a different start: the LAST compaction root — a marker row a
+  summarize/compact run leaves behind. Everything before that marker is
+  deliberately excluded. When the compacting model returns an EMPTY
+  reply, the marker is still written — with no text. From then on every
+  payload is system prompt + a dangling prompt + your latest message:
+  flat per-turn tokens, and the model answers as if the chat were fresh.
+  That is the field report, mechanistically, end to end. Kills,
+  restarts, and re-compacting were proven NOT to cause or cure it — the
+  API path cannot even see the old history through the poisoned root.
+- **the cure at the source** — the app owns the device: it stops the
+  server, removes exactly the poisoned marker rows (empty roots and
+  their trigger prompts, by id, bound-parameter deletes — healthy
+  summaries and real turns are never touched), restarts, and verifies
+  through the same API the model reads. The full conversation is back
+  in the model's view; nothing was lost, nothing re-sent by hand.
+- **prevention at the compact button** — after a compact, the app checks
+  the summary that just landed. An empty one is called out honestly and
+  the repair runs before the amnesia is ever felt. The session opens
+  are checked too, so a session poisoned long ago heals on its next
+  open.
+- **the bridge, not a tax** — while a session is diagnosed and not yet
+  repaired, the P39 Context repair note rides its sends. Once the repair
+  verifies clean, it stops. The detector now also reads the compaction
+  marker on replayed sessions (older builds only saw it live), so the
+  flat-totals watch can no longer misjudge across an old compaction.
+- 399 JVM tests green, 20 new pins: the root marker (and the trap —
+  user messages carry their own summary metadata that must never read
+  as a root), the poison table (empty, whitespace, healthy, superseded,
+  nothing-to-lose), the victim list (empty roots + triggers only), the
+  bound-parameter SQL plan (parts before messages, batched under the
+  999-parameter wall), the honest lines, and the hub's ride-then-lift
+  bridge.
 
 ## What's in v0.39.0 (P39 — the context-integrity release)
 
@@ -898,15 +942,16 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P36 the icon follows the theme: one launcher alias per palette, exactly-one-enabled with self-heal, fresh-install boot fix | shipped |
 | P37 empty chat gaps gone, the environment map, plain git push, single error cross | shipped |
 | P38 notes stop painting in your bubble, told-ledgers persist, tail-void trimmed (field-tested; folded into v0.39.0) | shipped |
-| P39 the context-integrity release: amnesia detector, automatic context repair, honest empty-store note, the server's own log in Diagnostics | **current** |
-| Next: P40 — keys copy/reveal in the keys screen; the preset rename (name pending) | reserved |
+| P39 the context-integrity release: amnesia detector, automatic context repair, honest empty-store note, the server's own log in Diagnostics | shipped |
+| P40 the amnesia cured at its source: poisoned compaction root found on the rig, repaired in the store, prevented at the compact button | **current** |
+| Next: P41 — keys copy/reveal in the keys screen; the preset rename (name pending) | reserved |
 
 ## Credits
 
 **[@turanmertkaraca-bit](https://github.com/turanmertkaraca-bit) — Founder & Project Lead**
 
 Ran development end to end: spec'd every feature, called every design
-decision, tested every build in the field, and shipped 36 releases
-(P1 → P39).
+decision, tested every build in the field, and shipped 37 releases
+(P1 → P40).
 
 Developed with AI assistance under their direction.
