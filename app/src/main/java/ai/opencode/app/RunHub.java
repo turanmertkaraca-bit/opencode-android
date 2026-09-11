@@ -406,6 +406,7 @@ public final class RunHub implements ServerService.EventListener {
     private static void styleMark(String sid, boolean state) {
         if (sid == null) return;
         synchronized (styleTold) { styleTold.put(sid, state); }
+        persistTold();
     }
 
     /** P30: the session's style memory is void — the model must be
@@ -415,6 +416,7 @@ public final class RunHub implements ServerService.EventListener {
     public static void styleToldReset(String sid) {
         if (sid == null) return;
         synchronized (styleTold) { styleTold.remove(sid); }
+        persistTold();
     }
 
     private static final Handler H = new Handler(Looper.getMainLooper());
@@ -520,6 +522,7 @@ public final class RunHub implements ServerService.EventListener {
         appCtx = c.getApplicationContext();
         ServerService.subscribeEvents(HUB);
         restoreRunState();
+        restoreTold();
     }
 
     private static final RunHub HUB = new RunHub();
@@ -566,6 +569,80 @@ public final class RunHub implements ServerService.EventListener {
     private static File runStateFile() {
         Context c = appCtx;
         return c == null ? null : new File(c.getFilesDir(), "run-state.json");
+    }
+
+    // ------------------------------------------- P38: told-state on disk
+
+    /** The per-session note ledger survives process death. P37's field
+     *  report: continuing a session the morning after re-sent the
+     *  environment map — the maps live in memory only, a restart forgets,
+     *  and the user sees the block again (and pays the tokens again).
+     *  Write-through: the maps stay the source of truth; this file is the
+     *  snapshot they restore from at init. */
+    private static File toldFile() {
+        Context c = appCtx;
+        return c == null ? null : new File(c.getFilesDir(), "told-state.json");
+    }
+
+    /** Snapshot the three told maps to disk (atomic .part swap). */
+    private static void persistTold() {
+        final StringBuilder sb = new StringBuilder("{\"v\":1");
+        synchronized (envTold) { sb.append(",\"env\":").append(toldJson(envTold)); }
+        synchronized (renderTold) { sb.append(",\"render\":").append(toldJson(renderTold)); }
+        synchronized (styleTold) { sb.append(",\"style\":").append(toldJson(styleTold)); }
+        sb.append('}');
+        IO.execute(() -> {
+            File f = toldFile();
+            if (f == null) return;
+            try {
+                File tmp = new File(f.getParentFile(), f.getName() + ".part");
+                try (OutputStream o = new FileOutputStream(tmp)) {
+                    o.write(sb.toString().getBytes("UTF-8"));
+                }
+                if (f.exists()) f.delete();
+                tmp.renameTo(f);
+            } catch (Exception ignored) {}
+        });
+    }
+
+    /** One map → compact JSON object. Keys are server session ids
+     *  (opaque ASCII), values booleans; quote through Json.quote anyway. */
+    private static String toldJson(java.util.Map<String, Boolean> m) {
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (java.util.Map.Entry<String, Boolean> e : m.entrySet()) {
+            if (!first) sb.append(',');
+            first = false;
+            sb.append(Json.quote(e.getKey())).append(':')
+              .append(Boolean.TRUE.equals(e.getValue()));
+        }
+        return sb.append('}').toString();
+    }
+
+    /** Boot: refill the three maps from the snapshot (missing file =
+     *  fresh install, fine). Unknown shapes are ignored, never thrown. */
+    private static void restoreTold() {
+        File f = toldFile();
+        if (f == null || !f.isFile()) return;
+        try (FileInputStream fin = new FileInputStream(f)) {
+            Map<String, Object> root = Json.obj(Json.parse(Api.readAll(fin)));
+            if (root == null) return;
+            restoreToldMap(root, "env", envTold);
+            restoreToldMap(root, "render", renderTold);
+            restoreToldMap(root, "style", styleTold);
+        } catch (Exception ignored) {}
+    }
+
+    private static void restoreToldMap(Map<String, Object> root, String key,
+                                       java.util.Map<String, Boolean> into) {
+        Map<String, Object> m = Json.map(root, key);
+        if (m == null) return;
+        synchronized (into) {
+            for (Map.Entry<String, Object> e : m.entrySet()) {
+                if (e.getValue() instanceof Boolean)
+                    into.put(e.getKey(), (Boolean) e.getValue());
+            }
+        }
     }
 
     private static void saveRunState() {
@@ -1074,6 +1151,13 @@ public final class RunHub implements ServerService.EventListener {
     // --------------------------------------------------------- upserts
 
     static void upsertUser(final Tx t, final String key, final String text) {
+        // P38: the bubble shows what the user SAID — the app-injected
+        // system-reminder notes on the wire (env map, render check, terse
+        // mode) are for the model, never for the human (the P37 field
+        // report: the whole block buried the message). Display-only: the
+        // server still stores and echoes the full wire text; replay paints
+        // through here too, so old sessions clean up as well.
+        final String shown = NoteStrip.display(text);
         main(() -> {
             synchronized (LOCK) {
                 Row r = rowIn(t, key);
@@ -1082,14 +1166,14 @@ public final class RunHub implements ServerService.EventListener {
                     r.kind = K_USER;
                     r.key = key;
                     r.ts = System.currentTimeMillis();
-                    r.text.append(text);
+                    r.text.append(shown);
                     t.rows.add(r);
                     t.idxByKey.put(key, t.rows.size() - 1);
                     t.rowsAdded++;
                 } else {
-                    if (!text.contentEquals(r.text)) {
+                    if (!shown.contentEquals(r.text)) {
                         r.text.setLength(0);
-                        r.text.append(text);
+                        r.text.append(shown);
                     } else return;
                 }
             }
@@ -1345,8 +1429,10 @@ public final class RunHub implements ServerService.EventListener {
             if (in == null) return;
             String abs = resolveAgainstRoot(
                     firstStr(in, "path", "filePath", "file"));
-            if (abs != null && CanvasDoc.isRenderable(abs))
+            if (abs != null && CanvasDoc.isRenderable(abs)) {
                 synchronized (renderTold) { renderTold.put(t.sid, Boolean.FALSE); }
+                persistTold();
+            }
         } catch (Exception ignored) {
             // a malformed tool part must never take the feed down
         }
@@ -1363,6 +1449,7 @@ public final class RunHub implements ServerService.EventListener {
                         f == null ? null : String.valueOf(f));
                 if (abs != null && CanvasDoc.isRenderable(abs)) {
                     synchronized (renderTold) { renderTold.put(t.sid, Boolean.FALSE); }
+                    persistTold();
                     return;
                 }
             }
@@ -1635,10 +1722,14 @@ public final class RunHub implements ServerService.EventListener {
                     sys("note: the server ignored the picked model for this "
                             + "message — it answered with its default model");
                 styleMark(sid, tp);              // P30: this session is in sync now
-                if (rNote != null)               // P35: note delivered — once
+                if (rNote != null) {             // P35: note delivered — once
                     synchronized (renderTold) { renderTold.put(sid, Boolean.TRUE); }
-                if (eNote != null)               // P37: env map delivered — once
+                    persistTold();
+                }
+                if (eNote != null) {             // P37: env map delivered — once
                     synchronized (envTold) { envTold.put(sid, Boolean.TRUE); }
+                    persistTold();
+                }
                 reconcile(r.body);
                 H.removeCallbacks(watchdog);
                 H.postDelayed(watchdog, 2000);
@@ -1785,8 +1876,10 @@ public final class RunHub implements ServerService.EventListener {
                             ? " image attached" : " images attached")
                             + " — the agent sees the pixels");
                     styleMark(sid, tp);          // P30
-                    if (rNote != null)           // P35: note delivered — once
+                    if (rNote != null) {         // P35: note delivered — once
                         synchronized (renderTold) { renderTold.put(sid, Boolean.TRUE); }
+                        persistTold();
+                    }
                     reconcile(r.body);
                     H.removeCallbacks(watchdog);
                     H.postDelayed(watchdog, 2000);
