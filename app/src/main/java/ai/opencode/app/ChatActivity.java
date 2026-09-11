@@ -2196,9 +2196,9 @@ public class ChatActivity extends Activity
                                 self.openInFiles(abs);
                             }
                         };
-                        md = Markdown.render(r.text.toString(), mres);
+                        md = Markdown.render(NoteStrip.trimTail(r.text.toString()), mres);
                     }
-                    catch (Exception e) { md = r.text.toString(); }
+                    catch (Exception e) { md = NoteStrip.trimTail(r.text.toString()); }
                     body.setText(md.length() == 0 ? "…" : md);
                     // P28: the field fix — P27 rendered the accent+underline
                     // mention links but nothing ever fired their taps (the
@@ -2206,7 +2206,7 @@ public class ChatActivity extends Activity
                     // selection + long-press copy + scroll drags native.
                     if (Markdown.hasLinks(md)) Markdown.enableSpanTaps(body);
                     body.setOnLongClickListener(v -> {
-                        copyText(r.text.toString(), "response");
+                        copyText(NoteStrip.trimTail(r.text.toString()), "response");
                         return true;
                     });
                 }
