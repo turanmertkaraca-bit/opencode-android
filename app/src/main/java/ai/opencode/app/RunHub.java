@@ -94,6 +94,11 @@ public final class RunHub implements ServerService.EventListener {
          *  amnesia detector never judges across one: compacting
          *  legitimately shrinks the payload. */
         public boolean summary;
+        /** P40: the message's agent field — "compaction" marks the root a
+         *  summarize run leaves behind. Sticky like summary, live SSE and
+         *  replay alike: the replayed GET info carries agent where older
+         *  builds carried only the live summary flag. */
+        public String agent;
         public boolean errorShown;
     }
 
@@ -1019,6 +1024,162 @@ public final class RunHub implements ServerService.EventListener {
 
     private static final java.util.Set<String> autoReplied = new java.util.HashSet<>();
 
+    // ------------------------------------------------ P40 poisoned root
+
+    /** Sessions diagnosed with an empty compaction root (the model sees
+     *  only the latest message). The Context repair note rides sends for
+     *  these until the repair lands — the one-send bridge, never a tax. */
+    private static final java.util.Set<String> poisonKnown = new java.util.HashSet<>();
+    /** Sessions with a repair in flight (server stop → store edit →
+     *  restart → verify). Sends for these are politely held. */
+    private static final java.util.Set<String> poisonCuring = new java.util.HashSet<>();
+    /** sid → victim message ids the repair will delete. */
+    private static final Map<String, List<String>> poisonVictims = new HashMap<>();
+
+    /** P40: diagnose a session from the raw message array the hub just
+     *  pulled (loadSession / reconcileOnBind / post-compact check). When
+     *  the model's context starts at an EMPTY compaction root while real
+     *  turns exist, the session is flagged, the honest line lands once,
+     *  and the repair runs at the first idle moment. Never throws. */
+    static void diagnosePoison(final String sid, final List<Object> raw) {
+        if (sid == null || raw == null || raw.isEmpty()) return;
+        try {
+            List<CompactionPoison.Msg> msgs = CompactionPoison.parse(raw);
+            if (!CompactionPoison.poisoned(msgs)) return;
+            final List<String> victims = CompactionPoison.victims(msgs);
+            if (victims.isEmpty()) return;
+            boolean first;
+            synchronized (LOCK) {
+                first = poisonKnown.add(sid);
+                poisonVictims.put(sid, victims);
+            }
+            if (first) sys(CompactionPoison.note());
+            if (busyFor(sid)) return;   // never stop the server under a run
+            curePoison(sid);
+        } catch (Throwable e) {
+            Trail.record(appCtx, "hub poison diagnose", e);
+        }
+    }
+
+    /** P40: the cure, at the source. Stops the server, removes the
+     *  poisoned root rows from the store (the app owns both), restarts,
+     *  verifies through the same API, and repaints. On any failure the
+     *  honest line lands and the Context repair note keeps riding. */
+    private static void curePoison(final String sid) {
+        final List<String> victims;
+        synchronized (LOCK) {
+            if (poisonCuring.contains(sid)) return;
+            victims = poisonVictims.get(sid);
+            if (victims == null || victims.isEmpty()) return;
+            poisonCuring.add(sid);
+        }
+        IO.execute(() -> {
+            String fail = null;
+            try {
+                ServerService.stopForRepair(appCtx);
+                if (!awaitCondition("await stop", 15_000,
+                        () -> !ServerService.healthy()
+                                && ServerService.getState() != ServerService.ST_STARTING))
+                    fail = "the server did not stop";
+                if (fail == null && !runStoreSurgery(victims))
+                    fail = "the store edit failed";
+                if (fail == null) ServerService.restart(appCtx);
+                if (fail == null && !awaitCondition("await healthy", 60_000,
+                        ServerService::healthy))
+                    fail = "the server did not come back";
+                if (fail == null && !verifyCured(sid))
+                    fail = "the after-repair check";
+                if (fail == null) {
+                    synchronized (LOCK) {
+                        poisonKnown.remove(sid);
+                        poisonVictims.remove(sid);
+                    }
+                    sys(CompactionPoison.curedNote());
+                    reconcileOnBind();       // repaint from the healed store
+                } else {
+                    sys(CompactionPoison.failedNote(fail));
+                }
+            } catch (Throwable e) {
+                Trail.record(appCtx, "hub poison cure", e);
+                sys(CompactionPoison.failedNote("internal error"));
+            } finally {
+                synchronized (LOCK) { poisonCuring.remove(sid); }
+            }
+        });
+    }
+
+    /** Bounded wait on a condition (the repair's own clock — 250 ms
+     *  steps, capped). Named thread, no leaks, no indefinite hangs. */
+    private static boolean awaitCondition(String what, long capMs,
+                                          java.util.concurrent.Callable<Boolean> cond) {
+        long deadline = System.currentTimeMillis() + capMs;
+        while (System.currentTimeMillis() < deadline) {
+            try { if (Boolean.TRUE.equals(cond.call())) return true; }
+            catch (Exception ignored) {}
+            try { Thread.sleep(250); }
+            catch (InterruptedException ie) { return false; }
+        }
+        Trail.record(appCtx, "hub repair " + what, new Exception("timeout"));
+        return false;
+    }
+
+    /** The store file the server owns: files/home/.local/share/opencode/
+     *  opencode.db (the SQLite store since the JSON-layout era ended). */
+    private static java.io.File storeDbFile(Context c) {
+        return new File(new File(Binaries.homeDir(c), ".local/share/opencode"),
+                "opencode.db");
+    }
+
+    /** Execute the planned deletes against the store. The server is
+     *  stopped; ids are bound, never spliced into SQL. */
+    private static boolean runStoreSurgery(List<String> ids) {
+        if (ids == null || ids.isEmpty()) return true;
+        android.database.sqlite.SQLiteDatabase db = null;
+        try {
+            java.io.File f = storeDbFile(appCtx);
+            if (!f.exists()) return false;
+            db = android.database.sqlite.SQLiteDatabase.openDatabase(
+                    f.getPath(), null,
+                    android.database.sqlite.SQLiteDatabase.OPEN_READWRITE);
+            int step = CompactionPoison.SQL_BATCH;
+            for (int from = 0; from < ids.size(); from += step) {
+                int to = Math.min(ids.size(), from + step);
+                db.execSQL(CompactionPoison.sqlFor("part", "message_id", to - from),
+                        ids.subList(from, to).toArray());
+            }
+            for (int from = 0; from < ids.size(); from += step) {
+                int to = Math.min(ids.size(), from + step);
+                db.execSQL(CompactionPoison.sqlFor("message", "id", to - from),
+                        ids.subList(from, to).toArray());
+            }
+            return true;
+        } catch (Throwable e) {
+            Trail.record(appCtx, "hub store surgery", e);
+            return false;
+        } finally {
+            if (db != null) try { db.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** Confirm through the API the model will actually read: no empty
+     *  root left, poison gone. A few retries ride out the restart. */
+    private static boolean verifyCured(String sid) {
+        for (int attempt = 0; attempt < 5; attempt++) {
+            try {
+                Api.Resp r = Api.get("/session/" + sid + "/message");
+                if (r.ok()) {
+                    List<CompactionPoison.Msg> msgs =
+                            CompactionPoison.parse(Json.arr(Json.parse(r.body)));
+                    return !CompactionPoison.poisoned(msgs)
+                            && CompactionPoison.victims(msgs).isEmpty();
+                }
+            } catch (Throwable ignored) {}
+            try { Thread.sleep(1500); }
+            catch (InterruptedException ie) { return false; }
+        }
+        return false;
+    }
+
     /** True when the hub already auto-answered this request id (dedupe
      *  between the hub's event path and the view's queue check). */
     public static boolean autoAlready(String id) {
@@ -1504,6 +1665,13 @@ public final class RunHub implements ServerService.EventListener {
             // P39: sticky — a summary flag arriving on any update marks the
             // message for the detector, live SSE and replay alike.
             if (Boolean.TRUE.equals(info.get("summary"))) mi.summary = true;
+            // P40: sticky agent — "compaction" marks the root row the
+            // model's context starts from. Replayed GET infos carry it
+            // where live summaries only carried the summary flag, so the
+            // detector now sees compactions in BOTH paths.
+            String agent = Json.str(info, "agent");
+            if (agent != null && !agent.isEmpty()) mi.agent = agent;
+            if ("compaction".equals(mi.agent)) mi.summary = true;
         }
         Map<String, Object> tk = Json.map(info, "tokens");
         long total = 0;
@@ -1630,6 +1798,13 @@ public final class RunHub implements ServerService.EventListener {
         if (creditBlocked()) {
             sys(CreditLimit.blockLine(spendTotal(), spendCap()));
             return;
+        }
+        synchronized (LOCK) {
+            if (poisonCuring.contains(sessionId)) {
+                sys("context repair in progress — one moment, the chat "
+                        + "continues right after it");
+                return;
+            }
         }
         lastUserText = text;
         runHadOutput = false;
@@ -1821,13 +1996,19 @@ public final class RunHub implements ServerService.EventListener {
 
     /** The recap block when this session's flat totals say the model is
      *  being answered without its history; null when healthy. NEVER
-     *  throws — a detector hiccup must never block a send. */
+     *  throws — a detector hiccup must never block a send.
+     *  P40: a diagnosed poisoned root rides the recap too — the bridge
+     *  between diagnosis and the repair landing (one send, not a tax). */
     static String contextRepair(String sid) {
         try {
             if (sid == null) return null;
             final Tx t;
             synchronized (LOCK) { t = cur; }
             if (t == null || !sid.equals(t.sid)) return null;
+            synchronized (LOCK) {
+                if (poisonKnown.contains(sid))
+                    return AmnesiaGuard.recapBlock(threadDigest(t));
+            }
             if (!AmnesiaGuard.confirmed(assistantObs(t))) return null;
             return AmnesiaGuard.recapBlock(threadDigest(t));
         } catch (Throwable e) {
@@ -2250,6 +2431,21 @@ public final class RunHub implements ServerService.EventListener {
                     // the terse preference once. Costs a few tokens; buys
                     // certainty the style survives the compact.
                     styleToldReset(sid);
+                    // P40: the summary just landed — verify it actually
+                    // CARRIES text. An empty summary poisons the session's
+                    // context root (the model would see only the latest
+                    // message from now on); diagnosePoison catches it and
+                    // the repair runs before the amnesia is ever felt.
+                    IO.execute(() -> {
+                        try { Thread.sleep(1200); } catch (Exception ignored) {}
+                        try {
+                            Api.Resp g = Api.get("/session/" + sid + "/message");
+                            if (g.ok()) diagnosePoison(sid,
+                                    Json.arr(Json.parse(g.body)));
+                        } catch (Throwable t2) {
+                            Trail.record(appCtx, "hub compact check", t2);
+                        }
+                    });
                 } else {
                     sys("compact refused · HTTP " + r.status);
                 }
@@ -2379,6 +2575,11 @@ public final class RunHub implements ServerService.EventListener {
                             + "the pattern.");
                     return;
                 }
+                // P40: the history the user is about to see is also the
+                // history the MODEL should see — check the compaction root
+                // it starts from before the first send can ride a poisoned
+                // context.
+                diagnosePoison(id, arr);
                 int from = Math.max(0, arr.size() - 80);
                 for (int i = from; i < arr.size(); i++) {
                     if (!id.equals(sessionId)) return;  // switched mid-replay
@@ -2438,6 +2639,10 @@ public final class RunHub implements ServerService.EventListener {
                     return;
                 }
                 replayNeeded = false;
+                // P40: every bind-time re-pull re-checks the compaction
+                // root — the repair can also be triggered from here when
+                // a compact poisoned the session between binds.
+                diagnosePoison(id, arr);
                 refreshTitleIfPlaceholder(id);
                 // P21: the settle rule, extracted into Resilience so the
                 // REAL server payloads replay through it in the JVM tests.

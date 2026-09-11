@@ -143,6 +143,20 @@ public class ServerService extends Service {
     public static boolean healthy() { return state == ST_HEALTHY; }
 
     /**
+     * P40: stop the server and HOLD it stopped while the context repair
+     * edits the store — the surgical sibling of stopForDelete. The
+     * supervisor stays disarmed so nothing respawns mid-surgery;
+     * restart() re-arms and respawns when the repair is done. Safe from
+     * any thread.
+     */
+    public static void stopForRepair(Context c) {
+        userStop = true;
+        pendingRestart = false;
+        Intent stop = new Intent(c, ServerService.class).setAction(ACTION_STOP);
+        try { c.startService(stop); } catch (Exception ignored) {}
+    }
+
+    /**
      * P6: stop + start again (after auth/config changes so the server picks
      * them up; cold start is ~5 s). Safe to call from any foreground screen.
      */
