@@ -89,6 +89,24 @@ public class DiagnosticsActivity extends Activity {
         root.addView(section("last Java crash — the actual trace"));
         root.addView(crashSection());
 
+        // P39: the sandbox's OWN log file — the definitive witness for the
+        // context-loss class of reports. The server records every loop
+        // step, every message, every compaction and every error here; the
+        // app runs as the same uid, so the file is directly readable.
+        root.addView(section("opencode server log — the sandbox's own witness"));
+        TextView tvOcLog = monoText();
+        String ocLog = serverOwnLog();
+        tvOcLog.setText(ocLog.isEmpty()
+                ? "· no server log yet (it appears after the first sandbox boot)"
+                : ocLog);
+        root.addView(tvOcLog);
+        root.addView(note("This is the agent server's own log "
+                + "(files/home/.local/share/opencode/log/opencode.log): every "
+                + "turn's loop steps, messages, compactions and errors. If a "
+                + "chat ever answers as if it forgot the conversation, paste "
+                + "this — it shows exactly what the server did with each "
+                + "message."));
+
         // P27 phase 2: sandbox weight + boot budget — the trim report, the
         // boot hygiene line, and the measured cold-boot numbers, so the
         // "size + speed" work is ON THE RECORD, not a claim.
@@ -449,6 +467,40 @@ public class DiagnosticsActivity extends Activity {
             return s.isEmpty() ? null : s;
         } catch (Throwable t) {
             return null;
+        }
+    }
+
+    /** P39: the opencode server's own log tail (XDG_DATA_HOME/opencode/log
+     *  inside the app home). The newest file wins; the read is bounded
+     *  from the END of the file (random access, ≤ 16 KB on screen) so a
+     *  long-lived install can never flood the screen or the UI thread.
+     *  Empty string when the sandbox has not logged yet. */
+    private String serverOwnLog() {
+        File dir = new File(Binaries.homeDir(this),
+                ".local/share/opencode/log");
+        File best = null;
+        File[] kids = dir.listFiles();
+        if (kids != null) for (File k : kids) {
+            if (!k.isFile()) continue;
+            if (best == null || k.lastModified() > best.lastModified()) best = k;
+        }
+        if (best == null) return "";
+        final int want = 16 * 1024;
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(best, "r")) {
+            long len = raf.length();
+            int n = (int) Math.min(len, want + 1);
+            raf.seek(len - n);
+            byte[] b = new byte[n];
+            raf.readFully(b);
+            String s = new String(b, "UTF-8");
+            // drop the partial first line unless the whole file fit
+            if (n < len) {
+                int nl = s.indexOf('\n');
+                s = nl >= 0 && nl + 1 < s.length() ? s.substring(nl + 1) : "";
+            }
+            return s;
+        } catch (Throwable t) {
+            return "";
         }
     }
 
