@@ -7,11 +7,13 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.37.0 — P37)
+## Install (v0.39.0 — P39)
 
-1. Grab `opencode-p37-v0.37.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p39-v0.39.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
+   Note: v0.38.0 was built and field-tested but never published here —
+   its fixes ride inside v0.39.0, so this one release carries both.
 2. Open the app: the project deck opens, tap a card → that project's
    sandbox → chat. **＋** adds a project, **long-press** a card → the project
    sheet (Open / Rename / Remove card / **Delete project** — the app's own
@@ -53,6 +55,66 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.39.0 (P39 — the context-integrity release)
+
+The field report was blunt and the screenshot proved it: a session with
+37 turns and ~1.3M tokens behind it answered that this was a fresh chat
+with no prior conversation history, and every one of those turns cost
+a flat ~44k tokens. Flat per-turn tokens are the fingerprint — when
+history reaches the model, every turn's input grows by at least the new
+content. The history was physically never reaching the model.
+
+- **the amnesia detector** — the app now watches exactly that
+  fingerprint: five consecutive turns whose totals stay level (on a
+  base of at least 10k tokens), or a single one-step drop steeper than
+  a third, flag the session as answering without history. A compaction
+  summary resets the watch (shrinking after /compact is the feature
+  working), and error-partial turns are never judged. Healthy sessions
+  can grow by too little to trip it; the suite pins both sides of that
+  line.
+- **context repair** — while a session is flagged, every send carries a
+  compacted digest of the recent thread inside a system-reminder block
+  (the same ride-along path the terse/env/render notes use), so the
+  model is back inside the conversation no matter what eats the history
+  on the device. It stops riding by itself the moment the totals grow
+  again, and your bubble never shows it — the repair is for the model,
+  the strip keeps the chat human.
+- **the honest empty store** — opening a session whose server-side
+  message store answers empty used to sit silent and look like a fresh
+  chat; now it says once, plainly, that the sandbox lost this chat's
+  history and what happens next.
+- **the sandbox's own witness** — Diagnostics shows the opencode
+  server's own log file (bounded tail read): every loop step, message,
+  compaction and error the server actually made. If a chat ever forgets
+  again, that log plus the pill numbers settle what happened.
+- The investigation behind it: the exact bundled server version was
+  exercised on a rig with a payload-logging mock provider and the app's
+  real request shapes — history grew correctly turn after turn and
+  across a full server restart, which clears the server logic and makes
+  the app-side detection-and-repair the right fix at this layer.
+- 379 JVM tests green, 12 new pins: the detector table (healthy, flat,
+  compaction, collapse, error-turns, small sessions), the recap builder
+  and its strip cross-signature, the hub's chronological message view,
+  the digest assembly, and the sid-scoped repair gate.
+
+## What's in v0.38.0 (P38 — field-tested, folded into v0.39.0)
+
+Built and verified in the field but never published as its own release;
+every fix below is inside the v0.39.0 APK.
+
+- **the notes are for the model, not for the human** — the environment
+  map (and the render-check and terse notes on their ride turns)
+  rendered inside the user's own bubble as a giant system-reminder
+  block; the bubble now paints what the user said while the wire text
+  keeps every note, and old sessions repaint clean too.
+- **once means once** — the told-ledgers were memory-only, so continuing
+  a session the morning after rode the whole environment map again;
+  they persist write-through and refill at boot now.
+- **the residual gap** — a message body ending in blank lines painted
+  them, floating the token footer below a visible void; display and
+  copy trim the tail, stored bytes stay untouched.
+- 367 JVM tests green (21 new) at its own gate.
 
 ## What's in v0.37.0 (P37 — the chat stops lying with empty space)
 
@@ -834,15 +896,17 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P34 one surface for every box (41 framework boxes → Sheets), back always catches you, Settings ESSENTIALS top zone, Pixel-style credit editor | shipped |
 | P35 the agent's eyes: localhost render endpoint (the browser the agent can use), write → render-check → fix → present loop, quiet ✓ chips | shipped |
 | P36 the icon follows the theme: one launcher alias per palette, exactly-one-enabled with self-heal, fresh-install boot fix | shipped |
-| P37 empty chat gaps gone, the environment map, plain git push, single error cross | **current** |
-| Next: P38 | reserved |
+| P37 empty chat gaps gone, the environment map, plain git push, single error cross | shipped |
+| P38 notes stop painting in your bubble, told-ledgers persist, tail-void trimmed (field-tested; folded into v0.39.0) | shipped |
+| P39 the context-integrity release: amnesia detector, automatic context repair, honest empty-store note, the server's own log in Diagnostics | **current** |
+| Next: P40 — keys copy/reveal in the keys screen; the preset rename (name pending) | reserved |
 
 ## Credits
 
 **[@turanmertkaraca-bit](https://github.com/turanmertkaraca-bit) — Founder & Project Lead**
 
 Ran development end to end: spec'd every feature, called every design
-decision, tested every build in the field, and shipped 34 releases
-(P1 → P37).
+decision, tested every build in the field, and shipped 36 releases
+(P1 → P39).
 
 Developed with AI assistance under their direction.
