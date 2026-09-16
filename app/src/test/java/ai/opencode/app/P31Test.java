@@ -353,8 +353,8 @@ public class P31Test {
     // ----------------------------------------------------------- Theme
 
     @Test
-    public void theme_sixPalettes_uniqueIds_allNamed() {
-        assertEquals(6, Theme.PALETTES.length);
+    public void theme_sevenPalettes_uniqueIds_allNamed() {
+        assertEquals(7, Theme.PALETTES.length);
         for (int i = 0; i < Theme.PALETTES.length; i++)
             for (int j = i + 1; j < Theme.PALETTES.length; j++)
                 assertNotEquals(Theme.PALETTES[i], Theme.PALETTES[j]);
@@ -363,11 +363,24 @@ public class P31Test {
     }
 
     @Test
+    public void theme_p44_claudePalettePinned() {
+        // P44: appended, never spliced — older indices must not move
+        assertEquals(6, Theme.paletteIndex("claude"));
+        assertEquals("Claude (light)", Theme.paletteName("claude"));
+        int[] cl = Theme.PALETTE_DATA[Theme.paletteIndex("claude")];
+        assertEquals("warm paper base", 0xFFFAF9F5, cl[0]);      // BG
+        assertEquals("terracotta accent", 0xFFD97757, cl[4]);    // ACCENT
+        int[][] g = Theme.gradTable("claude");
+        assertEquals(6, g.length);
+    }
+
+    @Test
     public void theme_unknownId_fallsBackToOled() {
         assertEquals(0, Theme.paletteIndex("nope"));
         assertEquals(0, Theme.paletteIndex(null));
         assertEquals(2, Theme.paletteIndex("graphite"));
         assertEquals(5, Theme.paletteIndex("paper"));
+        assertEquals(6, Theme.paletteIndex("claude"));
     }
 
     @Test

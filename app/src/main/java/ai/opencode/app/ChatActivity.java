@@ -901,7 +901,7 @@ public class ChatActivity extends Activity
         card.setOrientation(LinearLayout.VERTICAL);
         card.setGravity(Gravity.CENTER_HORIZONTAL);
         card.setBackground(Theme.panel(this));
-        int p = Theme.dp(this, 26);
+        int p = Theme.dp(this, 28);
         card.setPadding(p, p, p, p);
         FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -920,19 +920,20 @@ public class ChatActivity extends Activity
 
         TextView t1 = new TextView(this);
         t1.setText("starting sandbox");
-        t1.setTextSize(16);
-        t1.setTypeface(Typeface.DEFAULT_BOLD);
+        t1.setTextSize(17);
+        t1.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t1.setLetterSpacing(0.02f);
         t1.setTextColor(Theme.TXT);
         t1.setGravity(Gravity.CENTER);
-        t1.setPadding(0, Theme.dp(this, 10), 0, 0);
+        t1.setPadding(0, Theme.dp(this, 12), 0, 0);
         card.addView(t1);
 
         TextView t2 = new TextView(this);
         t2.setText(projectName == null ? "" : projectName);
-        t2.setTextSize(12);
+        t2.setTextSize(13);
         t2.setTextColor(Theme.ACCENT_LT);
         t2.setGravity(Gravity.CENTER);
-        t2.setPadding(0, Theme.dp(this, 4), 0, 0);
+        t2.setPadding(0, Theme.dp(this, 5), 0, 0);
         card.addView(t2);
 
         TextView t3 = new TextView(this);
@@ -940,16 +941,16 @@ public class ChatActivity extends Activity
         t3.setTextSize(11);
         t3.setTextColor(Theme.TXT_DIM);
         t3.setGravity(Gravity.CENTER);
-        t3.setPadding(0, Theme.dp(this, 8), 0, 0);
+        t3.setPadding(0, Theme.dp(this, 10), 0, 0);
         card.addView(t3);
         veilElapsed = t3;
 
         TextView t4 = new TextView(this);
         t4.setText("sessions and tools are rooted at\nyour project folder");
         t4.setTextSize(10);
-        t4.setTextColor(Theme.TXT_DIM);
+        t4.setTextColor(Theme.TXT_FAINT);
         t4.setGravity(Gravity.CENTER);
-        t4.setPadding(0, Theme.dp(this, 3), 0, 0);
+        t4.setPadding(0, Theme.dp(this, 4), 0, 0);
         card.addView(t4);
 
         fl.addView(card, clp);

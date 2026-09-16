@@ -134,8 +134,8 @@ public class P32UiTest {
 
             // the screen is coherent with the pref — no recreate
             assertFalse(Theme.syncIfNeeded(a));
-            // P33: the pref-less default is Graphite now (was oled)
-            assertEquals(0xFF0A0A0B, Theme.BG);
+            // P44: the pref-less default is Claude now (was graphite)
+            assertEquals(0xFFFAF9F5, Theme.BG);
 
             // a theme switch happened elsewhere while this screen was open
             a.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()

@@ -68,13 +68,14 @@ public class P36Test {
     // ------------------------------------------------------------ mapping
 
     @Test
-    public void aliasMapping_allSixPalettes() {
+    public void aliasMapping_allSevenPalettes() {
         assertEquals("LauncherOled", LauncherIcon.aliasFor("oled"));
         assertEquals("LauncherMidnight", LauncherIcon.aliasFor("midnight"));
         assertEquals("LauncherGraphite", LauncherIcon.aliasFor("graphite"));
         assertEquals("LauncherEmber", LauncherIcon.aliasFor("ember"));
         assertEquals("LauncherForest", LauncherIcon.aliasFor("forest"));
         assertEquals("LauncherPaper", LauncherIcon.aliasFor("paper"));
+        assertEquals("LauncherClaude", LauncherIcon.aliasFor("claude"));
     }
 
     @Test

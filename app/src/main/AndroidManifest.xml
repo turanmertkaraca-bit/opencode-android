@@ -146,6 +146,19 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity-alias>
+        <activity-alias
+            android:name=".LauncherClaude"
+            android:targetActivity=".MainActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="OpenCode"
+            android:icon="@mipmap/ic_launcher_claude"
+            android:roundIcon="@mipmap/ic_launcher_claude_round">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity-alias>
 
         <!-- P8: the project deck — credit-card carousel, one sandbox per card -->
         <activity
