@@ -340,9 +340,16 @@ public class ServerService extends Service {
             String[] sel = Models.selected(this);
             long lim = sel == null ? 0
                     : Models.bundledLimit(this, sel[0], sel[1]);
-            if (AuthStore.ensureCompactionPreserve(this, lim))
+            // P42-check: the user's window cap shrinks the window the
+            // server actually enforces — the floor must assume the
+            // smaller of the two, or a capped model compacts into a
+            // no-op (the exact hazard the floor exists to prevent).
+            long win = sel == null ? lim
+                    : CompactionPolicy.effectiveWindow(lim,
+                            AuthStore.contextLimit(this, sel[0], sel[1]));
+            if (AuthStore.ensureCompactionPreserve(this, win))
                 appendDiag("config", "compaction preserve_recent_tokens pinned ("
-                        + lim + " tok window)");
+                        + win + " tok window)");
         } catch (Throwable t) {
             appendDiag("config", "compaction policy not written: " + t);
         }

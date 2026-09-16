@@ -421,6 +421,18 @@ public class ChatActivity extends Activity
         // P15: drop pending paint work with the unbind — the flush would
         // fire into a detached view tree on return (harmless but wasteful).
         ui.removeCallbacks(flushPaints);
+        // P42-check: the veil ticker re-posts itself every second while
+        // the veil is VISIBLE — leave during a boot and it holds the
+        // finished activity (and its view tree) forever, waking the CPU.
+        // The INFINITE pulses are the same class of leak; FilesActivity
+        // already cancels its pulse on pause — parity here.
+        ui.removeCallbacks(veilTicker);
+        if (veilPulse != null) { veilPulse.cancel(); veilPulse = null; }
+        if (chipPulse != null) {
+            chipPulse.cancel();
+            chipPulse = null;
+            if (chipModel != null) chipModel.setAlpha(1f);
+        }
         paintScheduled = false;
         dirtyRows.clear();
         // P25: that is ALL. The run, the SSE feed, the transcript, the
@@ -545,10 +557,15 @@ public class ChatActivity extends Activity
         boolean wide = wdp >= 600;
         int inset = wide ? Theme.dp(this,
                 Math.min(200, Math.max(14, (wdp - 720) / 2 + 14))) : 0;
+        // P42-check: narrow windows too — the composer keeps the XML's
+        // 12dp side padding (the old inset(0) sat the input well flush
+        // against the rounded bar), and the list bottom holds the
+        // project's own ≥14dp clipping floor.
         if (list != null) list.setPadding(inset > 0 ? inset : dp(14),
-                dp(14), inset > 0 ? inset : dp(14), dp(4));
+                dp(14), inset > 0 ? inset : dp(14), dp(14));
         View composer = findViewById(R.id.composerBar);
-        if (composer != null) composer.setPadding(inset, dp(8), inset, dp(10));
+        if (composer != null) composer.setPadding(inset > 0 ? inset : dp(12),
+                dp(8), inset > 0 ? inset : dp(12), dp(10));
         if (permSlot != null) permSlot.setPadding(inset > 0 ? inset : dp(10),
                 0, inset > 0 ? inset : dp(10), 0);
     }
@@ -898,9 +915,14 @@ public class ChatActivity extends Activity
             // P42: a restart race flips STARTING→HEALTHY→STARTING — the
             // old code re-ran the entry animation on every flap (strobe).
             // Re-shows cancel any pending fade-out and reuse the veil.
+            // P42-check: heal a mid-fade flap — during the 150 ms fade
+            // the veil still reports VISIBLE, so the old !shown gate
+            // skipped the alpha reset and parked a translucent scrim
+            // (plus a frozen elapsed line) over the chat. Reset alpha
+            // and re-arm the ticker unconditionally.
             veil.animate().cancel();
+            veil.setAlpha(1f);
             if (!shown) {
-                veil.setAlpha(1f);
                 veil.setVisibility(View.VISIBLE);
                 veilStartMs = System.currentTimeMillis();
                 if (Theme.motionOn(this)) {
@@ -908,9 +930,9 @@ public class ChatActivity extends Activity
                     if (veilDot != null) veilPulse = Theme.pulse(veilDot);
                 }
                 Theme.appear(veil);
-                ui.removeCallbacks(veilTicker);
-                veilTicker.run();
             }
+            ui.removeCallbacks(veilTicker);
+            veilTicker.run();
         } else if (shown) {
             if (veilPulse != null) {
                 veilPulse.cancel();
@@ -1057,6 +1079,7 @@ public class ChatActivity extends Activity
     private void applyBusyUi(boolean b) {
         if (b) {
             btnSend.setText("■");
+            btnSend.setContentDescription("Stop");
             btnSend.setTextSize(16);
             btnSend.setBackgroundResource(R.drawable.bg_stop);
             btnSend.setTextColor(Theme.cr(this, R.color.err));
@@ -1064,6 +1087,7 @@ public class ChatActivity extends Activity
             tvStatus.setText("working — tap ■ to stop");
         } else {
             btnSend.setText("↑");
+            btnSend.setContentDescription("Send");
             btnSend.setTextSize(22);
             btnSend.setBackgroundResource(R.drawable.bg_send);
             btnSend.setTextColor(Theme.cr(this, R.color.on_accent));
@@ -1810,14 +1834,17 @@ public class ChatActivity extends Activity
             // a cross sign so i can remove them")
             TextView x = new TextView(this);
             x.setText("✕");
+            x.setContentDescription("Remove attachment");
             x.setTextSize(11);
             x.setTextColor(Theme.cr(this, R.color.text_primary));
             x.setGravity(Gravity.CENTER);
             x.setBackgroundResource(R.drawable.bg_chip);
+            // P42-check: 28dp — 20dp was a thumbnail-size touch target
+            // for the only remove control on the tray.
             FrameLayout.LayoutParams xlp = new FrameLayout.LayoutParams(
-                    dp(20), dp(20), Gravity.TOP | Gravity.END);
-            xlp.rightMargin = dp(-6);
-            xlp.topMargin = dp(-6);
+                    dp(28), dp(28), Gravity.TOP | Gravity.END);
+            xlp.rightMargin = dp(-9);
+            xlp.topMargin = dp(-9);
             x.setLayoutParams(xlp);
             x.setOnClickListener(v -> {
                 Theme.haptic(v);
@@ -2044,7 +2071,11 @@ public class ChatActivity extends Activity
         else if (meterTxt.isEmpty()) sumTitle = "Σ " + Resilience.fmtCost(sumCost);
         else sumTitle = "Σ " + meterTxt
                 + (sumCost > 0 ? " · " + Resilience.fmtCost(sumCost) : "");
-        Sheet s = Sheet.show(this, sumTitle).msg(m.toString());
+        // P42-check: the popover can carry several paragraphs — on short
+        // screens a plain WRAP_CONTENT body grew past the top edge; the
+        // scroll cap keeps the title and the action pills reachable.
+        Sheet s = Sheet.show(this, sumTitle);
+        s.scroll(Sheet.note(this, m.toString()), 0.55f);
         // P42: the slider — the cap belongs beside the meter that shows
         // its effect (reachable even with no usage yet, see above).
         if (s.showing()) {
@@ -2117,9 +2148,19 @@ public class ChatActivity extends Activity
 
         final android.widget.SeekBar bar = new android.widget.SeekBar(this);
         bar.setMax(maxProgress);
+        // P42-check: tint the progress LAYER only — a whole-drawable
+        // filter painted track and fill the same accent, so the slider
+        // showed no visible progress. The thumb accessor is API 29+;
+        // minSdk 28 (Android 9) must not crash reaching for it.
         int tint = Theme.cr(this, R.color.accent);
-        bar.getProgressDrawable().setColorFilter(tint, android.graphics.PorterDuff.Mode.SRC_IN);
-        bar.getThumb().setColorFilter(tint, android.graphics.PorterDuff.Mode.SRC_IN);
+        android.graphics.drawable.Drawable progressFill =
+                ((android.graphics.drawable.LayerDrawable) bar.getProgressDrawable())
+                        .findDrawableByLayerId(android.R.id.progress);
+        if (progressFill != null)
+            progressFill.setColorFilter(tint, android.graphics.PorterDuff.Mode.SRC_IN);
+        if (android.os.Build.VERSION.SDK_INT >= 29)
+            bar.getThumb().setColorFilter(tint, android.graphics.PorterDuff.Mode.SRC_IN);
+        bar.setPadding(Theme.dp(this, 8), 0, Theme.dp(this, 8), 0);
 
         Runnable showVal = () -> val.setText(Resilience.fmtTok(
                 ContextPolicy.normalize(min + (long) bar.getProgress() * step))
@@ -2155,6 +2196,8 @@ public class ChatActivity extends Activity
             chip.setPadding(Theme.dp(this, 10), Theme.dp(this, 6),
                     Theme.dp(this, 10), Theme.dp(this, 6));
             chip.setBackground(Theme.ghostCard(this));
+            chip.setGravity(Gravity.CENTER);      // P42-check: weight=1 stretches
+            chip.setSingleLine(true);             // the cell — center, never wrap
             chip.setOnClickListener(v -> {
                 bar.setProgress((int) ((p - min) / step));
                 showVal.run();
@@ -3462,7 +3505,10 @@ public class ChatActivity extends Activity
                 return box;
             }
         });
-        sh.addFixed(lv, 420);
+        // P42-check: ratio-capped — a fixed 420dp list pushed the title
+        // and the newest rows off-screen on short (landscape) windows.
+        sh.addFixed(lv, Math.min(420, (int) (getResources().getDisplayMetrics()
+                .heightPixels / getResources().getDisplayMetrics().density * 0.60f)));
         lv.setOnItemClickListener((parent, v, pos, id3) -> {
             sh.dismiss();
             Object[] it = items.get(pos);
@@ -3989,8 +4035,12 @@ public class ChatActivity extends Activity
             // the ownership rule updates only app-written values, never
             // the user's own).
             try {
-                long lim = Models.bundledLimit(this, pr.id, m.id);
-                if (lim > 0) AuthStore.ensureCompactionPreserve(this, lim);
+                // P42-check: the floor follows the EFFECTIVE window — the
+                // user's cap counts, or a capped model never compacts.
+                long win = CompactionPolicy.effectiveWindow(
+                        Models.bundledLimit(this, pr.id, m.id),
+                        AuthStore.contextLimit(this, pr.id, m.id));
+                if (win > 0) AuthStore.ensureCompactionPreserve(this, win);
             } catch (Exception ignored) {}
             Toast.makeText(this, (!pr.configured && !"opencode".equals(pr.id)
                     ? "no key yet for " + pr.name + " — ⌘ → API keys · " : "")

@@ -133,6 +133,17 @@ public final class RunHub implements ServerService.EventListener {
         // MsgInfo entries.
         public double costSum;
         public long tokSum;
+        /** P42-check: the MsgInfo entries the MSG_CAP eviction dropped —
+         *  their booked cost/tok already live inside costSum/tokSum. When
+         *  a full-store pass recreates one, the delta must come from the
+         *  evicted values, not from zero, or every bind re-books the
+         *  evicted tail into the session Σ. */
+        public final Map<String, double[]> evictedSums = new HashMap<>();
+        /** P42-check: set when a compaction summary lands live; the FIRST
+         *  token-bearing assistant update after it resets the depth inputs
+         *  (the note itself often arrives tokenless — keying the reset to
+         *  it wasted the one shot and kept the pre-compaction depth). */
+        public boolean awaitDepthReset;
         /** P31: which session this transcript belongs to (null for a
          *  fresh chat). Lets message-level errors release the right run
          *  when several run in parallel. */
@@ -408,6 +419,23 @@ public final class RunHub implements ServerService.EventListener {
             appCtx.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
                     .putString("spend_total", String.valueOf(spendTotal)).apply();
         } catch (Exception ignored) {}
+    }
+
+    /** P42-check: debounced told-snapshot. The booking path can fire many
+     *  times per stream, and the ledger only survives process death if it
+     *  reaches disk at (or near) the pace the spend_total pref does — a
+     *  stale disk ledger re-books the un-flushed delta on the next replay
+     *  (real money shown twice). One pending coalesced write closes that
+     *  window; the IO executor serializes it behind whatever is running. */
+    private static final java.util.concurrent.atomic.AtomicBoolean toldFlushPending =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private static void persistToldSoon() {
+        if (!toldFlushPending.compareAndSet(false, true)) return;
+        IO.execute(() -> {
+            toldFlushPending.set(false);
+            persistTold();
+        });
     }
 
     /** All-time spend (this device) — the credit-limit numerator. */
@@ -1831,17 +1859,21 @@ public final class RunHub implements ServerService.EventListener {
         final double fCost = cost;
         final long fTok = total;
         final boolean hasSpend = total > 0 || cost > 0;
-        if (hasSpend && "assistant".equals(role)) {
+        if ("assistant".equals(role)) {
             synchronized (LOCK) {
-                if (fCompactionLanded) {
+                if (becameSummary) t.awaitDepthReset = true;   // P42-check: may land tokenless
+                if (t.awaitDepthReset && hasSpend) {
                     // P42: the summary message re-bills the whole payload,
                     // so its own token count is NOT the model's new depth
                     // — keeping it as the high-water painted 95% on a
                     // freshly-shrunken window. Reset: the next real turn
-                    // reports the honest post-compaction depth.
+                    // reports the honest post-compaction depth. P42-check:
+                    // keyed to the first token-bearing update AFTER the
+                    // summary, not to the note event itself.
                     t.lastAssistantTok = 0;
                     t.depthPeak = 0;
-                } else {
+                    t.awaitDepthReset = false;
+                } else if (hasSpend) {
                     t.lastAssistantTok = fTok;   // P25 depth input
                     if (fTok > t.depthPeak) t.depthPeak = fTok;   // P27 high-water
                 }
@@ -1881,16 +1913,33 @@ public final class RunHub implements ServerService.EventListener {
                 // P26: move the totals by DELTA — safe for re-reported
                 // (cumulative or corrected) values, and the eviction
                 // below can never lose a cent/token already counted.
-                double dCost = fCost - mi.cost;
-                t.costSum += dCost;
-                t.tokSum += fTok - mi.tok;
+                double prevCost = mi.cost;
+                long prevTok = mi.tok;
+                double[] evicted = t.evictedSums.remove(fMid);
+                if (evicted != null) {
+                    // P42-check: recreated after eviction — its money is
+                    // already inside the sums; delta from the evicted
+                    // values, never from zero (zero re-booked the evicted
+                    // tail into the session Σ on every bind).
+                    prevCost = evicted[0];
+                    prevTok = (long) evicted[1];
+                }
+                t.costSum += fCost - prevCost;
+                t.tokSum += fTok - prevTok;
                 // P42: all-time booking rides the persisted ledger —
                 // every message books exactly once, live or replayed.
                 // (The old live-only gate dropped money billed while the
                 // app was dead: background runs never entered the
                 // credit counter, so the cap could be exceeded in fact.)
-                double dBooked = spendLedgerBook(t.sid, fMid, fCost, fLive);
-                if (dBooked != 0) spendDelta(dBooked);
+                // P42-check: assistant-only, like the depth input — a
+                // future info shape stamping tokens on a user row must
+                // not touch the credit counter. The flush rides the same
+                // gate: disk ledger keeps pace with the pref or a process
+                // death re-books the difference.
+                if ("assistant".equals(role)) {
+                    double dBooked = spendLedgerBook(t.sid, fMid, fCost, fLive);
+                    if (dBooked != 0) { spendDelta(dBooked); persistToldSoon(); }
+                }
                 mi.cost = fCost;
                 mi.tok = fTok;
                 mi.cacheRead = fCacheRead;   // P27: Σ popover cache line
@@ -1899,7 +1948,11 @@ public final class RunHub implements ServerService.EventListener {
                 t.msgs.put(fMid, mi);
                 while (t.msgs.size() > MSG_CAP) {
                     String eldest = t.msgs.keySet().iterator().next();
-                    t.msgs.remove(eldest);
+                    MsgInfo ev = t.msgs.remove(eldest);
+                    // P42-check: remember what the sums already hold —
+                    // recreated rows delta against these, not zero.
+                    if (ev != null && (ev.cost != 0 || ev.tok != 0))
+                        t.evictedSums.put(eldest, new double[]{ev.cost, ev.tok});
                 }
             }
             // (P37 note: the card view already draws its own ✕.)
@@ -2740,13 +2793,19 @@ public final class RunHub implements ServerService.EventListener {
                 // below is a RENDERING cap, not an accounting cap. Sessions
                 // reopened after hundreds of turns used to paint the money
                 // of their last ~40 turns only.
+                // P42-check: pin the target Tx — a bare `cur` re-reads the
+                // field per call and would retarget the pass to a DIFFERENT
+                // session when the user switches mid-replay, applying A's
+                // messages to B's sums and ledger.
+                final Tx tx0 = cur;
                 for (int i = 0; i < arr.size(); i++) {
+                    if (!id.equals(sessionId)) return;   // switched mid-replay
                     Map<String, Object> item = Json.obj(arr.get(i));
                     if (item == null) continue;
                     Map<String, Object> info = Json.map(item, "info");
                     if (info == null) info = item;
                     if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
-                    applyMessageInfo(cur, info, false, false);
+                    applyMessageInfo(tx0, info, false, false);
                 }
                 int from = Math.max(0, arr.size() - 80);
                 for (int i = from; i < arr.size(); i++) {
@@ -2816,14 +2875,17 @@ public final class RunHub implements ServerService.EventListener {
                 // REAL server payloads replay through it in the JVM tests.
                 final boolean lastAssistantDone = Resilience.lastAssistantDoneFrom(arr);
                 // P42: full-store accounting pass (see loadSession — the
-                // rendering cap must not be a money cap).
+                // rendering cap must not be a money cap). P42-check: pinned
+                // Tx + switch guard, same reasoning as loadSession.
+                final Tx tx0 = cur;
                 for (int i = 0; i < arr.size(); i++) {
+                    if (!id.equals(sessionId)) return;   // switched mid-pull
                     Map<String, Object> item = Json.obj(arr.get(i));
                     if (item == null) continue;
                     Map<String, Object> info = Json.map(item, "info");
                     if (info == null) info = item;
                     if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
-                    applyMessageInfo(cur, info, false, false);
+                    applyMessageInfo(tx0, info, false, false);
                 }
                 int from = Math.max(0, arr.size() - 80);
                 for (int i = from; i < arr.size(); i++) {
