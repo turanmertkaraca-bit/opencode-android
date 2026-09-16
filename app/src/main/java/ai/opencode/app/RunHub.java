@@ -1282,6 +1282,14 @@ public final class RunHub implements ServerService.EventListener {
     /** Sessions with a repair in flight (server stop → store edit →
      *  restart → verify). Sends for these are politely held. */
     private static final java.util.Set<String> poisonCuring = new java.util.HashSet<>();
+    /** P44: sessions with a pending post-compaction anchor. Armed when
+     *  a compaction summary is FIRST seen for the session (live SSE or
+     *  replay); consumed only by that session's next REAL user send —
+     *  never by cache beats (they post their own block directly) and
+     *  never on a failed POST (the retry path rides it again). */
+    private static final java.util.HashSet<String> compactAnchorPending =
+            new java.util.HashSet<>();
+
     /** P41: compaction-summary message ids already announced in the
      *  chat. The summarize row would otherwise paint as an ordinary
      *  assistant bubble while it actually rewrote the model's memory —
@@ -1920,6 +1928,7 @@ public final class RunHub implements ServerService.EventListener {
         if (mid == null) return;
         String role = Json.str(info, "role");
         boolean becameSummary = false;   // P41: set live, inside the lock
+        boolean summaryFirstSight = false;   // P44: live OR replay, in the lock
         synchronized (LOCK) {
             MsgInfo mi = t.msgs.get(mid);
             if (mi == null) {
@@ -1946,6 +1955,10 @@ public final class RunHub implements ServerService.EventListener {
             // sessions show the summary row when reopened).
             becameSummary = live && "assistant".equals(role) && t == cur
                     && !wasSummary && mi.summary;
+            // P44: the summary's FIRST arrival in this store — live or
+            // replayed — arms the post-compaction anchor for this
+            // session, so its next real send re-rides the thread.
+            summaryFirstSight = !wasSummary && mi.summary;
         }
         final boolean fCompactionLanded = becameSummary
                 && compactionNoted.add(mid);
@@ -2026,7 +2039,17 @@ public final class RunHub implements ServerService.EventListener {
         // P41: say it once, in the open chat, the moment the memory
         // rewrite lands — before the next send can be answered from the
         // shrunken context while the user wonders why it forgot.
-        if (fCompactionLanded) sys(CompactionPolicy.summaryNote());
+        if (fCompactionLanded) sys(CompactionPolicy.summaryNote(userContextCap()));
+        // P44: arm the anchor on first sight of a summary — live SSE or
+        // a replay discovering it on reopen. The visible note above stays
+        // live-and-open only (P41); the anchor must survive reopens,
+        // because the amnesia it cures is exactly what a reopened,
+        // compacted session resumes with.
+        if (summaryFirstSight && t.sid != null) {
+            synchronized (compactAnchorPending) {
+                compactAnchorPending.add(t.sid);
+            }
+        }
         // P42: the accounting moved INLINE (was inside the main lambda) —
         // the replay sums pass must book every message even when it skips
         // repainting. Only the row repaint stays on the main thread.
@@ -2198,6 +2221,13 @@ public final class RunHub implements ServerService.EventListener {
                 // user's bubble stays clean (NoteStrip knows the signature).
                 final String recap = contextRepair(sid);
                 if (recap != null) wire = recap + "\n\n" + wire;
+                // P44: the post-compaction anchor — the first real send
+                // after a summary lands re-rides the thread recap and the
+                // sandbox ground rules the summary just thinned away.
+                final boolean anchorArmed = anchorPending(sid);
+                final String anchor = anchorArmed
+                        ? compactionAnchorBlock(sid, text) : null;
+                if (anchor != null) wire = anchor + "\n\n" + wire;
                 // P43: the greeting-context guard — a bare "hello world"
                 // mid-task used to get a fresh-chat "Hello! What would you
                 // like help with?" back (the history REACHED the model; it
@@ -2255,6 +2285,7 @@ public final class RunHub implements ServerService.EventListener {
                     sys("note: the server ignored the picked model for this "
                             + "message — it answered with its default model");
                 styleMark(sid, tp);              // P30: this session is in sync now
+                if (anchorArmed) anchorConsume(sid);   // P44: delivered — once
                 if (rNote != null) {             // P35: note delivered — once
                     synchronized (renderTold) { renderTold.put(sid, Boolean.TRUE); }
                     persistTold();
@@ -2413,6 +2444,86 @@ public final class RunHub implements ServerService.EventListener {
         }
     }
 
+    // ------------------------------------- P44 post-compaction anchor
+
+    /** P44: true when {@code sid} has a pending post-compaction anchor. */
+    static boolean anchorPending(String sid) {
+        if (sid == null) return false;
+        synchronized (compactAnchorPending) {
+            return compactAnchorPending.contains(sid);
+        }
+    }
+
+    /** P44: the anchor was delivered on a successful POST — clear it. */
+    static void anchorConsume(String sid) {
+        if (sid == null) return;
+        synchronized (compactAnchorPending) {
+            compactAnchorPending.remove(sid);
+        }
+    }
+
+    /** The user's context-window cap for the selected model (the Σ
+     *  slider override), 0 when none — any thread, never throws. */
+    static long userContextCap() {
+        try {
+            String[] pm = Models.selected(appCtx);
+            if (pm == null) return 0;
+            return AuthStore.contextLimit(appCtx, pm[0], pm[1]);
+        } catch (Throwable e) {
+            return 0;
+        }
+    }
+
+    /** P44: the post-compaction anchor block for {@code sid}, built
+     *  from the real thread. Null when the store is not this session or
+     *  the thread has no opening request. Never throws. */
+    static String compactionAnchorBlock(String sid, String skipText) {
+        try {
+            if (sid == null) return null;
+            final Tx t;
+            synchronized (LOCK) { t = cur; }
+            if (t == null || !sid.equals(t.sid)) return null;
+            return compactionAnchorBlockTx(t, skipText);
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    /** The pure core — a scan over one transcript (package-private so
+     *  the JVM suite pins it without hub state). Unlike the greeting
+     *  guard there is NO minimum depth: a compaction summary landing IS
+     *  the depth proof; a thread too young to anchor cannot have been
+     *  compacted in the first place. */
+    static String compactionAnchorBlockTx(Tx t, String skipText) {
+        try {
+            if (t == null) return null;
+            String firstUser = null, lastUser = null, lastAssistant = null;
+            int turns = 0;
+            String skip = skipText == null ? "" : skipText.trim();
+            synchronized (LOCK) {
+                for (Row r : t.rows) {
+                    if (r == null || r.text.length() == 0) continue;
+                    if (r.kind == K_USER) {
+                        String shown = r.text.toString();
+                        if (skip.isEmpty() || !shown.trim().equals(skip)) {
+                            if (firstUser == null) firstUser = shown;
+                            lastUser = shown;
+                        }
+                        turns++;
+                    } else if (r.kind == K_ASSISTANT) {
+                        lastAssistant = r.text.toString();
+                        turns++;
+                    }
+                }
+            }
+            if (firstUser == null) return null;
+            return CompactionPolicy.anchorBlock(turns, firstUser, lastUser,
+                    lastAssistant, userContextCap());
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
     /** Fire-and-track the same text again (self-heal / stream-flake retry).
      *  P31: the caller's run claim is still held — retries never re-claim. */
     private static void sendText(final String sid, final String q) {
@@ -2428,6 +2539,10 @@ public final class RunHub implements ServerService.EventListener {
                 String wire = TerseMode.wrap(q, tp, told);
                 final String recap = contextRepair(sid);   // P39: ride here too
                 if (recap != null) wire = recap + "\n\n" + wire;
+                final boolean anchorArmed = anchorPending(sid);   // P44
+                final String anchor = anchorArmed
+                        ? compactionAnchorBlock(sid, q) : null;
+                if (anchor != null) wire = anchor + "\n\n" + wire;
                 else if (GreetGuard.isBareGreeting(q)) {   // P43: same guard
                     String greet = threadContextBlock(sid, q);
                     if (greet != null) wire = greet + "\n\n" + wire;
@@ -2448,6 +2563,7 @@ public final class RunHub implements ServerService.EventListener {
                     return;
                 }
                 styleMark(sid, tp);              // P30
+                if (anchorArmed) anchorConsume(sid);   // P44: delivered — once
                 reconcile(r.body);
                 H.removeCallbacks(watchdog);
                 H.postDelayed(watchdog, 2000);

@@ -86,11 +86,14 @@ public final class Theme {
 
     // ---------------------------------------------------- P31 palettes ----
 
-    /** P33: the DEFAULT face of the app — the user picked Graphite ("the
-     *  graphite theme is cool make it default"). This is the palette a
-     *  fresh install (or a wiped theme pref) lands on; a device that has
-     *  ever picked a theme keeps its choice. */
-    public static final String DEFAULT_PALETTE = "graphite";
+    /** P44: the DEFAULT face of the app — the user asked for the Claude
+     *  look ("make it more claude + google like") on the chat, startup
+     *  and cold-boot surfaces. Warm paper + terracotta, Material-3
+     *  shapes. This is the palette a fresh install (or a wiped theme
+     *  pref) lands on; a device that has explicitly picked another theme
+     *  keeps its choice. (P33's graphite default rides the one-time
+     *  theme_migrated_p44 migration in currentId.) */
+    public static final String DEFAULT_PALETTE = "claude";
 
     /** Palette ids, in menu order. Fields per entry (order matters):
      *  BG SURFACE SURFACE2 STROKE ACCENT ACCENT_LT ACCENT_BG
@@ -98,7 +101,8 @@ public final class Theme {
      *  TINT_ACCENT TINT_OK TINT_DANGER ON_DISC RIM_USER ICON_DISC
      *  DOT_IDLE ON_CARD RIPPLE */
     public static final String[] PALETTES = {
-            "oled", "midnight", "graphite", "ember", "forest", "paper"
+            "oled", "midnight", "graphite", "ember", "forest", "paper",
+            "claude"
     };
 
     public static String paletteName(String id) {
@@ -109,6 +113,7 @@ public final class Theme {
             case "ember":     return "Ember";
             case "forest":    return "Forest";
             case "paper":     return "Paper (light)";
+            case "claude":    return "Claude (light)";
             default:          return "OLED black";
         }
     }
@@ -145,6 +150,11 @@ public final class Theme {
          0xFFE4EAF9, 0xFF1B1D24, 0xFF565B66, 0xFF8A8F99, 0xFF2E7D53, 0xFFB3424A,
          0xFF96691F, 0xFFFFFFFF, 0xFFDCE4F8, 0xFFDDF0E2, 0xFFF6DBDD, 0xFF22242A,
          0xFFC9D2EE, 0x143D63D8, 0x33998FA0, 0xE6222630, 0x24304460},
+        // claude — P44: warm paper + terracotta (the Claude face, light)
+        {0xFFFAF9F5, 0xFFFFFFFF, 0xFFF1EFE7, 0xFFE5E1D5, 0xFFD97757, 0xFFB8552F,
+         0xFFF6E9E1, 0xFF27241E, 0xFF6E6A5E, 0xFF9C978A, 0xFF2E7D53, 0xFFB3424A,
+         0xFF96691F, 0xFFFFFFFF, 0xFFF3E1D8, 0xFFDDEEDF, 0xFFF6DBDD, 0xFF3D2B22,
+         0xFFEAD5C6, 0x14D97757, 0x339C978A, 0xE63D2B22, 0x24D97757},
     };
 
     private static final int[][][] GRAD_DATA = {
@@ -166,6 +176,9 @@ public final class Theme {
         // paper
         {{0xFFFDFCF9, 0xFFEFEBE0}, {0xFFF8F5EE, 0xFFEAE6D9}, {0xFFFFFEFB, 0xFFF2EEE3},
          {0xFFF6F3EB, 0xFFE9E4D6}, {0xFFFBF9F3, 0xFFEDE9DE}, {0xFFF9F6F0, 0xFFEBE7DB}},
+        // claude — P44: soft warm-paper steps, near-flat
+        {{0xFFFDFBF7, 0xFFF3EFE4}, {0xFFFBF8F2, 0xFFEFEADF}, {0xFFFFFEFB, 0xFFF5F1E7},
+         {0xFFFAF7F0, 0xFFEEE9DB}, {0xFFFCFAF5, 0xFFF1EDE2}, {0xFFF9F6EF, 0xFFEDE8DA}},
     };
 
     /** The gradient table for a palette id (index into GRAD_DATA). */
@@ -194,18 +207,28 @@ public final class Theme {
         return legacyNotAmoled ? "midnight" : DEFAULT_PALETTE;
     }
 
-    /** The current palette id: the "theme" pref, else the P33 default
-     *  (Graphite) with the legacy amoled carve-out honored. The old
-     *  boolean meant "AMOLED black on" (true = the pre-P31 default face);
-     *  an explicit OFF was a deliberate "not near-black" choice, which is
-     *  the only case that keeps Midnight. */
+    /** The current palette id: the "theme" pref, else the default (P44:
+     *  Claude) with the legacy amoled carve-out honored. The old boolean
+     *  meant "AMOLED black on" (true = the pre-P31 default face); an
+     *  explicit OFF was a deliberate "not near-black" choice, which is
+     *  the only case that keeps Midnight. P44: a one-time migration
+     *  moves riders of the OLD default (graphite, the P33 pick) to the
+     *  Claude face — the user asked for it on the chat/startup/cold-boot
+     *  surfaces; every other explicit choice stands untouched. */
     public static String currentId(Context c) {
-        String t = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
-                .getString("theme", null);
+        android.content.SharedPreferences sp =
+                c.getSharedPreferences("oc", Context.MODE_PRIVATE);
+        String t = sp.getString("theme", null);
         if (t == null) {
-            boolean amoled = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
-                    .getBoolean("amoled", true);
-            return defaultId(!amoled);   // an explicit OFF was a real choice
+            boolean amoled = sp.getBoolean("amoled", true);
+            t = defaultId(!amoled);   // an explicit OFF was a real choice
+        }
+        if (!sp.getBoolean("theme_migrated_p44", false)) {
+            sp.edit().putBoolean("theme_migrated_p44", true).apply();
+            if ("graphite".equals(t)) {
+                t = "claude";
+                sp.edit().putString("theme", "claude").apply();
+            }
         }
         return t;
     }
@@ -216,11 +239,11 @@ public final class Theme {
         int[] dp = {0, 2, 4, 8, 12, 16, 24, 32};
         return dp(c, dp[Math.max(0, Math.min(step, dp.length - 1))]);
     }
-    public static int radiusCard(Context c)   { return dp(c, 16); }
-    public static int radiusSheet(Context c)  { return dp(c, 22); }
-    public static int radiusRow(Context c)    { return dp(c, 12); }
-    public static int radiusChip(Context c)   { return dp(c, 20); }
-    public static int radiusWell(Context c)   { return dp(c, 10); }
+    public static int radiusCard(Context c)   { return dp(c, 18); }
+    public static int radiusSheet(Context c)  { return dp(c, 24); }
+    public static int radiusRow(Context c)    { return dp(c, 14); }
+    public static int radiusChip(Context c)   { return dp(c, 22); }
+    public static int radiusWell(Context c)   { return dp(c, 12); }
 
     // ---- apply / AMOLED switch --------------------------------------------
 
@@ -239,14 +262,20 @@ public final class Theme {
         TINT_ACCENT = p[14]; TINT_OK = p[15]; TINT_DANGER = p[16]; ON_DISC = p[17];
         RIM_USER = p[18]; ICON_DISC = p[19]; DOT_IDLE = p[20]; ON_CARD = p[21];
         RIPPLE = p[22];
-        LIGHT = "paper".equals(id);
+        LIGHT = "paper".equals(id) || "claude".equals(id);
         currentIdStatic = id;
         CARD_GRADS = GRAD_DATA[paletteIndex(id)];
         Markdown.setLinkColor(ACCENT_LT);
         Markdown.setCodeColors(SURFACE2, TXT);
     }
 
-    /** True when the active palette is the light one (status-bar icons,
+    /** P44: light palettes — Paper and the new Claude face (status-bar
+     *  icons, ripple polarity, home glow follow this). */
+    public static String lightPalette(String id) {
+        return ("paper".equals(id) || "claude".equals(id)) ? id : null;
+    }
+
+    /** True when the active palette is a light one (status-bar icons,
      *  ripple polarity, home glow follow this). */
     public static boolean isLight() { return LIGHT; }
 
@@ -741,11 +770,12 @@ public final class Theme {
     }
 
     /** User bubble — accent-subtle fill + hairline accent rim (the one
-     *  loud element is the assistant's world, not a rainbow). */
+     *  loud element is the assistant's world, not a rainbow). P44:
+     *  18dp — the Claude/Material-3 softness. */
     public static GradientDrawable userBubble(Context c) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(ACCENT_BG);
-        d.setCornerRadius(dp(c, 16));
+        d.setCornerRadius(dp(c, 18));
         d.setStroke(1, RIM_USER);
         return d;
     }
@@ -756,7 +786,7 @@ public final class Theme {
     public static GradientDrawable userBubbleTail(Context c) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(ACCENT_BG);
-        float r = dp(c, 20), tail = dp(c, 6);
+        float r = dp(c, 22), tail = dp(c, 7);
         d.setCornerRadii(new float[]{r, r, r, r, r, r, r, tail});
         d.setStroke(dp(c, 1), RIM_USER);
         return d;
@@ -779,29 +809,29 @@ public final class Theme {
         return d;
     }
 
-    /** Thinking/live card (was bg_thought_card). */
+    /** Thinking/live card (was bg_thought_card). P44: 16dp corners. */
     public static GradientDrawable thoughtCard(Context c) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE);
-        d.setCornerRadius(dp(c, 14));
+        d.setCornerRadius(dp(c, 16));
         d.setStroke(dp(c, 1), (TINT_ACCENT & 0x00FFFFFF) | 0x33000000);
         return d;
     }
 
-    /** Error/failed card (was bg_err_card: frozen #2A151C). */
+    /** Error/failed card (was bg_err_card: frozen #2A151C). P44: 16dp. */
     public static GradientDrawable errCard(Context c) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(TINT_DANGER);
-        d.setCornerRadius(dp(c, 14));
+        d.setCornerRadius(dp(c, 16));
         d.setStroke(dp(c, 1), (ERR & 0x00FFFFFF) | 0x66000000);
         return d;
     }
 
-    /** Plain tool card (was bg_tool_card). */
+    /** Plain tool card (was bg_tool_card). P44: 16dp corners. */
     public static GradientDrawable toolCard(Context c) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE);
-        d.setCornerRadius(dp(c, 14));
+        d.setCornerRadius(dp(c, 16));
         d.setStroke(dp(c, 1), STROKE);
         return d;
     }

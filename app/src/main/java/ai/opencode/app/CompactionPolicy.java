@@ -183,6 +183,72 @@ public final class CompactionPolicy {
     }
 
     /**
+     * P44: the one honest chat line when a compaction summary lands,
+     * with the window cap named when one is active — the slider
+     * override is the one compaction trigger a user can set without
+     * realizing it, and "the context randomly collapses" is exactly
+     * what an unnamed active cap reads like from the outside. Pure;
+     * the suite pins both branches.
+     */
+    public static String summaryNote(long userCap) {
+        String base = summaryNote();
+        if (userCap <= 0) return base;
+        return base + ". A window cap of " + Resilience.fmtTok(userCap)
+                + " tokens is active on this model (set from the Σ "
+                + "popover) — summarizing will keep firing near that "
+                + "size until the cap is raised or cleared";
+    }
+
+    /**
+     * P44 — the post-compaction anchor. When a summary lands, the model
+     * keeps the summary plus a verbatim tail; the OLDEST part of the
+     * thread (the original task) is exactly what got thinned into that
+     * summary, and the sandbox ground rules (the P42 session-start note)
+     * can be summarized away with it. That is the field loop, end to
+     * end: summarize → forget the rules → re-probe the sandbox →
+     * refill → summarize again, each cycle re-billing the payload at
+     * full price. The anchor rides the FIRST real user send after the
+     * summary: it re-names the thread (opening request, latest real
+     * user message, last assistant reply), re-states the ground rules,
+     * names an active window cap, and instructs continuation — never
+     * restart. Same NoteStrip signature as the greeting recap, so the
+     * user's bubble stays clean. Pure; the suite pins the branches.
+     */
+    public static String anchorBlock(int turns, String firstUser,
+                                     String lastUser, String lastAssistant,
+                                     long userCap) {
+        StringBuilder b = new StringBuilder();
+        b.append("<system-reminder>\n").append(GreetGuard.SIG)
+         .append(": your memory of this chat was just summarized — it is ")
+         .append(Math.max(0, turns))
+         .append(" messages deep and the older turns now exist only in ")
+         .append("the summary above");
+        String first = GreetGuard.clip(firstUser, 140);
+        if (first != null)
+            b.append("; the task opened with: \"").append(first).append("\"");
+        String last = GreetGuard.clip(lastUser, 140);
+        if (last != null)
+            b.append("; the user's latest real request was: \"")
+             .append(last).append("\"");
+        String asst = GreetGuard.clip(lastAssistant, 160);
+        if (asst != null)
+            b.append("; you last said: \"").append(asst).append("\"");
+        if (userCap > 0)
+            b.append("; a window cap of ").append(Resilience.fmtTok(userCap))
+             .append(" tokens is set for this model (Σ popover), so this ")
+             .append("summarizing repeats near that size");
+        b.append(". The sandbox ground rules stand unchanged: TLS is ")
+         .append("provisioned and working, raw DNS cannot work by design, ")
+         .append("and a probe that fails twice is reported and dropped — ")
+         .append("never re-probed, never re-explored. Continue this ")
+         .append("exact task from the recap; do not restart it unless ")
+         .append("the user asks. If the message below is only a ")
+         .append("greeting, acknowledge it briefly and offer to ")
+         .append("continue.\n</system-reminder>");
+        return b.toString();
+    }
+
+    /**
      * The Σ popover line while compaction is imminent: within 30% of
      * the window the server actually enforces, the next big turn can
      * summarize memory without warning. Null while there is room.
