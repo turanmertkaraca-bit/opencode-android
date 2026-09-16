@@ -1911,6 +1911,17 @@ public class ChatActivity extends Activity
          .append("what the provider billed for the whole session so far.\n\n");
         long limit = Models.resolveLimit(this, Models.lastFetch(),
                 RunHub.selProviderPub(), RunHub.selModelPub());
+        // P41: when the two window sources disagree beyond ~20%, say so —
+        // the catalog can advertise several times more room than the
+        // sandbox enforces, and compaction fires on the SMALLER number
+        // (the one the meter now shows). The line sits right where the
+        // number is explained, before any cost talk.
+        String mismatch = CompactionPolicy.mismatchNote(
+                Models.serverLimitFor(Models.lastFetch(),
+                        RunHub.selProviderPub(), RunHub.selModelPub()),
+                Models.catalogLimitFor(Models.lastFetch(),
+                        RunHub.selProviderPub(), RunHub.selModelPub()));
+        if (mismatch != null) m.append(mismatch).append("\n\n");
         if (lastTok > 0) {
             m.append("Now: ~").append(Resilience.fmtTok(lastTok));
             if (limit > 0) m.append(" of ").append(Resilience.fmtTok(limit));
@@ -1939,6 +1950,12 @@ public class ChatActivity extends Activity
         }
         String verdict = Resilience.contextVerdict(lastTok);
         boolean heavy = limit > 0 ? lastTok * 100 / limit >= 50 : lastTok >= 50_000;
+        // P41: the warning the field never got — within 30% of the
+        // window the sandbox enforces, the next big turn can silently
+        // summarize this chat's memory. Named before it happens, in the
+        // same breath as the numbers it comes from.
+        String risk = CompactionPolicy.riskNote(lastTok, limit);
+        if (risk != null) m.append(risk).append("\n");
         if (!verdict.isEmpty()) m.append(verdict).append("\n");
         Sheet s = Sheet.show(this, "Σ " + (Resilience.contextMeter(lastTok, limit).isEmpty()
                         ? Resilience.fmtCost(sumCost)

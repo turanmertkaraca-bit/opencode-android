@@ -1033,6 +1033,12 @@ public final class RunHub implements ServerService.EventListener {
     /** Sessions with a repair in flight (server stop → store edit →
      *  restart → verify). Sends for these are politely held. */
     private static final java.util.Set<String> poisonCuring = new java.util.HashSet<>();
+    /** P41: compaction-summary message ids already announced in the
+     *  chat. The summarize row would otherwise paint as an ordinary
+     *  assistant bubble while it actually rewrote the model's memory —
+     *  the field report was exactly that silence. Per-message dedupe;
+     *  bounded by the same session lifetime as poisonKnown. */
+    private static final java.util.Set<String> compactionNoted = new java.util.HashSet<>();
     /** sid → victim message ids the repair will delete. */
     private static final Map<String, List<String>> poisonVictims = new HashMap<>();
 
@@ -1655,6 +1661,7 @@ public final class RunHub implements ServerService.EventListener {
         String mid = Json.str(info, "id");
         if (mid == null) return;
         String role = Json.str(info, "role");
+        boolean becameSummary = false;   // P41: set live, inside the lock
         synchronized (LOCK) {
             MsgInfo mi = t.msgs.get(mid);
             if (mi == null) {
@@ -1664,6 +1671,7 @@ public final class RunHub implements ServerService.EventListener {
             if (role != null) mi.role = role;
             // P39: sticky — a summary flag arriving on any update marks the
             // message for the detector, live SSE and replay alike.
+            boolean wasSummary = mi.summary;
             if (Boolean.TRUE.equals(info.get("summary"))) mi.summary = true;
             // P40: sticky agent — "compaction" marks the root row the
             // model's context starts from. Replayed GET infos carry it
@@ -1672,7 +1680,17 @@ public final class RunHub implements ServerService.EventListener {
             String agent = Json.str(info, "agent");
             if (agent != null && !agent.isEmpty()) mi.agent = agent;
             if ("compaction".equals(mi.agent)) mi.summary = true;
+            // P41: a compaction summary landing LIVE means the model's
+            // memory was just rewritten — the transcript kept painting
+            // it as an ordinary message and the user had no way to
+            // know. One honest line, once per summary message, only for
+            // the chat the user is actually looking at (background
+            // sessions show the summary row when reopened).
+            becameSummary = live && "assistant".equals(role) && t == cur
+                    && !wasSummary && mi.summary;
         }
+        final boolean fCompactionLanded = becameSummary
+                && compactionNoted.add(mid);
         Map<String, Object> tk = Json.map(info, "tokens");
         long total = 0;
         long cacheRead = 0;
@@ -1727,6 +1745,10 @@ public final class RunHub implements ServerService.EventListener {
         final String fMeta = meta;
         final boolean fLive = live;
         final boolean fAssistant = "assistant".equals(role);
+        // P41: say it once, in the open chat, the moment the memory
+        // rewrite lands — before the next send can be answered from the
+        // shrunken context while the user wonders why it forgot.
+        if (fCompactionLanded) sys(CompactionPolicy.summaryNote());
         if (meta != null || e != null) main(() -> {
             boolean showError;
             synchronized (LOCK) {

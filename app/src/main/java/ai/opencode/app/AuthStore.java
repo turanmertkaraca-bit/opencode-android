@@ -180,6 +180,28 @@ public final class AuthStore {
         writeConfig(c, cfg);
     }
 
+    /**
+     * P41: pin the post-compaction memory floor in opencode.json — the
+     * server reads compaction.preserve_recent_tokens at boot and keeps
+     * that many tokens of recent turns VERBATIM when it summarizes a
+     * full context (the server default keeps only 2k–15k, which is how
+     * the field lost its thread after every silent compaction). The
+     * merge rule lives in {@link CompactionPolicy#mergePreserve} (pure,
+     * suite-pinned): write-if-absent, hands off any existing value,
+     * nothing written for unknown or tiny windows. True when the key
+     * was added by this call. Throws only on a failed file write —
+     * callers treat that as one diagnostics line, never a boot blocker.
+     */
+    public static boolean ensureCompactionPreserve(Context c, long limit)
+            throws IOException {
+        Map<String, Object> cfg = readConfig(c);
+        if (CompactionPolicy.mergePreserve(cfg, limit)) {
+            writeConfig(c, cfg);
+            return true;
+        }
+        return false;
+    }
+
     /** Stored default model as {providerID, modelID}, or null. */
     public static String[] defaultModel(Context c) {
         String s = Json.str(readConfig(c), "model");

@@ -7,13 +7,13 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.40.0 — P40)
+## Install (v0.41.0 — P41)
 
-1. Grab `opencode-p40-v0.40.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p41-v0.41.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
    Note: v0.38.0 was built and field-tested but never published here —
-   its fixes ride inside v0.39.0, so this one release carries both.
+   its fixes ride inside v0.39.0, so that release carries both.
 2. Open the app: the project deck opens, tap a card → that project's
    sandbox → chat. **＋** adds a project, **long-press** a card → the project
    sheet (Open / Rename / Remove card / **Delete project** — the app's own
@@ -55,6 +55,74 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.41.0 (P41 — the memory the meter couldn't see)
+
+The field report that opened this phase: a long agentic session where
+the agent kept re-exploring the same project folder it had already
+checked many times, burning real money, while the Σ pill read "16% —
+light, nothing to worry about". This time the answer was not in the
+app's behavior but in the bundled server's own source (opencode
+1.18.25) — read line by line, and the whole mechanism fell out.
+
+WHY A LONG CHAT LOSES ITS MEMORY (the actual mechanism): every turn,
+the model re-reads the whole conversation. When a turn's billed tokens
+reach the context window **the server believes** (its own model
+metadata, not any app number), the server compacts SILENTLY: the
+thread is summarized, and the model's working set becomes that summary
+plus at most a couple thousand to fifteen thousand tokens of recent
+turns kept verbatim. The on-screen store keeps the full history — so
+the human sees everything — while the model is left holding a
+paragraph. A fast model writes shallow summaries; the agent loses its
+map of the project; it re-lists the folder it already listed; the
+payload refills; the server compacts again. Each cycle also
+invalidates the provider's prompt cache, so the whole payload re-bills
+at full input price — that is where the money went.
+
+WHY THE APP MISSED IT THREE TIMES: the Σ meter's denominator came from
+the online catalog (which advertises 1.3M for the field's model) while
+compaction fires on the server's own, possibly much smaller line — the
+meter could reassure at 16% while the sandbox was near its own edge.
+The P39 detector watches for flat token totals; this failure mode
+grows normally, so it never flagged. The P40 cure removes only EMPTY
+summaries; a shallow-but-nonempty summary is "healthy" by that
+definition. Detection was the wrong shape — the governance was wrong
+at the source.
+
+THE FIX, AT THE SOURCE (no detectors, no ride-along patches):
+
+- **The memory floor is pinned where the server reads it.** At every
+  boot the app writes `compaction.preserve_recent_tokens` into the
+  sandbox's own opencode.json — scaled from the picked model's window
+  (30% of the usable space, clamped 8k–60k, never written for unknown
+  or tiny windows). After ANY compaction the model now keeps tens of
+  thousands of tokens of real recent turns verbatim, not 15k at best.
+  Write-if-absent: a value already in the file (yours or a future
+  release's) always wins, and the merge rule is pinned pure.
+- **One truth for the window.** The Σ pill and popover now use the
+  LIVE server's limit — the exact number the sandbox's overflow logic
+  enforces — with the catalog only as fallback when the server never
+  listed the model.
+- **The two sources are named when they disagree.** When the catalog
+  advertises more than ~20% more room than the sandbox enforces, the
+  Σ popover says both numbers and which one matters. The field case is
+  exactly this shape (1.3M advertised; the P27 log itself recorded a
+  server claiming five times less than a catalog for one model).
+- **Compaction warns before it lands.** From 70% of the enforced
+  window the popover carries a plain line: compaction is close, finish
+  the task or start a fresh chat to keep the details.
+- **Compaction is announced when it happens.** A summary landing live
+  in the open chat now says so — one honest line about what was kept,
+  what now lives only in the summary, and that the screen shows more
+  than the model remembers. No more ordinary-looking bubble quietly
+  rewriting the model's memory.
+
+P41Test pins the floor table and its safety property (the floor stays
+below the usable space for every window from 64k to 2M — a compaction
+always frees something, the tail stays history), the write-if-absent
+merge (user keys, even malformed ones, are never touched), the server-
+first window precedence, and every note text (no token-shaped strings,
+ever).
 
 ## What's in v0.40.0 (P40 — the amnesia cured at its source)
 
@@ -943,15 +1011,16 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P37 empty chat gaps gone, the environment map, plain git push, single error cross | shipped |
 | P38 notes stop painting in your bubble, told-ledgers persist, tail-void trimmed (field-tested; folded into v0.39.0) | shipped |
 | P39 the context-integrity release: amnesia detector, automatic context repair, honest empty-store note, the server's own log in Diagnostics | shipped |
-| P40 the amnesia cured at its source: poisoned compaction root found on the rig, repaired in the store, prevented at the compact button | **current** |
-| Next: P41 — keys copy/reveal in the keys screen; the preset rename (name pending) | reserved |
+| P40 the amnesia cured at its source: poisoned compaction root found on the rig, repaired in the store, prevented at the compact button | shipped |
+| P41 the memory the meter couldn't see: compaction floor pinned at the source, the meter uses the server's own window, compaction warned and announced | **current** |
+| Next: P42 — keys copy/reveal in the keys screen; the preset rename (name pending) | reserved |
 
 ## Credits
 
 **[@turanmertkaraca-bit](https://github.com/turanmertkaraca-bit) — Founder & Project Lead**
 
 Ran development end to end: spec'd every feature, called every design
-decision, tested every build in the field, and shipped 37 releases
-(P1 → P40).
+decision, tested every build in the field, and shipped 38 releases
+(P1 → P41).
 
 Developed with AI assistance under their direction.
