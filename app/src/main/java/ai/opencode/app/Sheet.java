@@ -103,7 +103,7 @@ public final class Sheet {
             // leave a bright strip)
             w.setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
-            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED);
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
             boolean motion = Theme.motionOn(a);
             if (motion) w.setWindowAnimations(R.style.OcSheetWindow);
 
@@ -407,19 +407,20 @@ public final class Sheet {
         return !dead && !dismissing && dlg != null && dlg.isShowing();
     }
 
-    /** Raise the keyboard for the given input once the window is up. */
+    /** P43 — the keyboard NEVER opens by itself, anywhere. The field
+     *  report was explicit: not only in the model picker — every sheet,
+     *  every screen. A sheet that opens with a text field used to raise
+     *  the IME the moment it appeared; now the field simply sits there
+     *  (the window is pinned STATE_ALWAYS_HIDDEN) and the keyboard
+     *  appears only when the user actually taps the field. The old
+     *  focus-raising body is gone; the method stays so call sites keep
+     *  compiling and the intent reads clearly. */
     public void focus(EditText in) {
-        if (dead || in == null) return;
-        dlg.getWindow().setSoftInputMode(
-                WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
-        in.requestFocus();
-        in.postDelayed(() -> {
-            try {
-                InputMethodManager im = (InputMethodManager)
-                        act.getSystemService(Activity.INPUT_METHOD_SERVICE);
-                if (im != null) im.showSoftInput(in, InputMethodManager.SHOW_IMPLICIT);
-            } catch (Throwable ignored) {}
-        }, 120);
+        if (dead || dlg == null) return;
+        try {
+            dlg.getWindow().setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        } catch (Throwable ignored) {}
     }
 
     // ------------------------------------------------------------- helpers

@@ -118,6 +118,47 @@ public class ChatActivity extends Activity
     private final Map<String, TextView> metaByKey = new HashMap<>();
     private final Handler smoother = new Handler(Looper.getMainLooper());
     private boolean smootherRunning;
+    /** P43: one pacer per streaming row — the arrival-rate reveal that
+     *  turns provider bursts into a continuous glide (StreamPacer). */
+    private final Map<String, StreamPacer> pacerByKey = new HashMap<>();
+
+    /** P43: pacer for a row, with a bounded map (long sessions must not
+     *  accumulate entries). */
+    private StreamPacer pacerFor(String key) {
+        if (key == null) key = "";
+        StreamPacer p = pacerByKey.get(key);
+        if (p == null) {
+            if (pacerByKey.size() > 256) pacerByKey.clear();
+            p = new StreamPacer();
+            pacerByKey.put(key, p);
+        }
+        return p;
+    }
+
+    /** P43: the cache-beat clock — a 20 s poll while this screen is
+     *  open. RunHub.cacheBeatTick does the whole decision (idle past 4
+     *  quiet minutes + policy rails) and fires the beat when earned;
+     *  the poll itself is one map read, no IO. */
+    private final Handler beatClock = new Handler(Looper.getMainLooper());
+    private boolean beatClockRunning;
+    private final Runnable beatTick = new Runnable() {
+        @Override public void run() {
+            Throwable t = Resilience.guard(() -> RunHub.cacheBeatTick());
+            if (t != null) contained("cache beat", t);
+            if (beatClockRunning) beatClock.postDelayed(this, 20_000);
+        }
+    };
+
+    private void startBeatClock() {
+        if (beatClockRunning) return;
+        beatClockRunning = true;
+        beatClock.postDelayed(beatTick, 20_000);
+    }
+
+    private void stopBeatClock() {
+        beatClockRunning = false;
+        beatClock.removeCallbacks(beatTick);
+    }
     // P8 polish
     private View veil;
     private View veilDot;                   // P17: direct handle for the pulse
@@ -333,6 +374,7 @@ public class ChatActivity extends Activity
         // a healthy stream), restore the interrupted-run note, render.
         RunHub.bindUi(this);
         rows = RunHub.rows();
+        startBeatClock();                    // P43: cache-beat clock (screen-open only)
         String interrupted = RunHub.consumeInterruptedNote();
         // P26: reconcile is now the ONLY resume path. The old empty-start
         // branch called loadSession, which SWAPS the transcript for a fresh
@@ -401,6 +443,7 @@ public class ChatActivity extends Activity
     @Override
     protected void onPause() {
         RunHub.unbindUi(this);
+        stopBeatClock();                     // P43: beats live only on the open screen
         // P42 keyboard fix, second half: drop input focus on pause so a
         // return to the chat (or the renderAll guard re-grabbing focus
         // after reconcile) can never re-open the IME the user did not
@@ -736,9 +779,19 @@ public class ChatActivity extends Activity
                             boolean wasBehind = r.shown < len;
                             r.shown = len;      // a newer row appeared: snap
                             if (wasBehind) requestPaint(r);
+                            if (r.key != null) pacerByKey.remove(r.key);
                         } else {
-                            int step = 3 + (len - r.shown) / 8;
-                            r.shown = Math.min(len, r.shown + step);
+                            // P43: pace by ARRIVAL RATE, not by backlog.
+                            // The old step = 3 + (len-shown)/8 emptied each
+                            // multi-kB burst in ~0.5 s of rapid repaints and
+                            // then froze until the next burst — the field's
+                            // "it all flashes so fast … it thinks it's
+                            // realtime streaming but it's just a burst".
+                            // StreamPacer tracks how fast bytes arrive and
+                            // reveals just behind that, with a lag ceiling
+                            // so every burst still finishes within ~2 s.
+                            long now = android.os.SystemClock.elapsedRealtime();
+                            r.shown = (int) pacerFor(r.key).tick(now, len);
                         }
                         // P24: a row that can't paint must not kill the
                         // whole ticker — quarantine it like a flush failure.
@@ -767,9 +820,11 @@ public class ChatActivity extends Activity
         int len = r.text.length();
         int upto = Math.min(r.shown, len);
         if (r.kind == K_REASON && !r.open) {
-            // P20: collapsed thinking card → one live line of the FRESHEST
-            // thinking under the header (a sliding window, token-by-token)
-            String win = Resilience.thinkWindow(r.text.toString(), upto, 110);
+            // P20: collapsed thinking card → a live window of the FRESHEST
+            // thinking under the header (tail-anchored, token-by-token).
+            // P43: window widened 110 → 240 to match the 3-line build —
+            // a part of its actual thought, not one flashing line.
+            String win = Resilience.thinkWindow(r.text.toString(), upto, 240);
             body.setText(win.length() == 0 ? "…" : win + "▍");
         } else {
             String s = r.text.substring(0, upto);
@@ -2034,6 +2089,10 @@ public class ChatActivity extends Activity
              .append("provider's cache (billed at the discounted rate) — ")
              .append("caching is on and working.\n\n");
         }
+        // P43: cache beats — the keepalive the field pointed at (the
+        // cachebeat idea), visible exactly where cache health is discussed.
+        String beatLine = CacheBeat.popoverLine(RunHub.beatsEnabled(), cachedTok);
+        if (!beatLine.isEmpty()) m.append(beatLine).append("\n");
         // P31: the credit limit, where the money talk already lives.
         double cap = RunHub.spendCap();
         if (cap > 0) {
@@ -2346,6 +2405,7 @@ public class ChatActivity extends Activity
             snapshot = new ArrayList<>(rows);
             needFullRender = false;
             viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
+            pacerByKey.clear();                 // P43: fresh render, fresh pace
             for (RunHub.Row r : snapshot) r.shown = r.text.length(); // history: no caret
         }
         list.removeAllViews();
@@ -2552,12 +2612,16 @@ public class ChatActivity extends Activity
                     viewByKey.put(key, c);
                     bodyByKey.put(key, body);
                 } else if (streaming) {
+                    // P43: the live thought is now a REAL window — three
+                    // lines of the freshest reasoning, tail-anchored, not
+                    // a single flashing line. Raw thought (never a
+                    // summary), gliding via the pacer.
                     TextView live = text(12, R.color.text_secondary, false);
                     live.setTypeface(Typeface.create("sans-serif", Typeface.ITALIC));
-                    live.setSingleLine(true);
+                    live.setMaxLines(3);
                     live.setEllipsize(android.text.TextUtils.TruncateAt.START);
                     String win = Resilience.thinkWindow(r.text.toString(),
-                            Math.min(r.shown, r.text.length()), 110);
+                            Math.min(r.shown, r.text.length()), 240);
                     live.setText(win.length() == 0 ? "…" : win + "▍");
                     live.setPadding(dp(2), dp(6), 0, 0);
                     live.setAlpha(0.85f);
