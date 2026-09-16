@@ -113,6 +113,11 @@ public class ServerService extends Service {
      *  opens ITS OWN sandbox rooted at that folder. Null → app home. */
     private static volatile File startDir;
     private static volatile File servingDir;
+    /** P42: set when a chosen project folder could not be served and the
+     *  sandbox fell back to app home — the agent must be TOLD (env note),
+     *  or it writes to the project path it was given, ENOENTs, and burns
+     *  the session probing mounts. Null = serving the real folder. */
+    public static volatile String servingFallback;
     /** True between restart() and the next spawn — screens must not
      *  "helpfully" auto-start the service in that window. */
     private static volatile boolean pendingRestart;
@@ -312,6 +317,10 @@ public class ServerService extends Service {
         File cwd = (startDir != null && startDir.isDirectory())
                 ? startDir : Binaries.homeDir(this);
         servingDir = cwd;
+        // P42: a silent fallback teaches the agent nothing — surface it
+        // through the env note instead of letting it become a probe loop.
+        servingFallback = (startDir != null && !startDir.isDirectory())
+                ? startDir.getAbsolutePath() : null;
         RenderServer.setRoot(cwd);   // P35: the render endpoint serves THIS root
         // P26: tell the hub which root this server owns — a DECK SWITCH
         // lands here as a different root and the hub resets to a fresh

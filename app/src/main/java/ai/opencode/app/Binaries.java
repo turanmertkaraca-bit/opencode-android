@@ -229,6 +229,8 @@ public final class Binaries {
         e.put("TMPDIR", c.getCacheDir().getAbsolutePath());
         // P7 native shims (no proot): bin/ (user + busybox) → P9 wrappers/ (alpine)
         // → shims/ (bash/git/pkg fallbacks) → system.
+        // P42: build the CA bundle FIRST so shim generation can point at it.
+        String caPem = CaBundle.ensure(c);
         Shims.ensure(c);
         e.put("PATH", files + "/bin:" + files + "/wrappers:" + files
                 + "/shims:" + files
@@ -236,6 +238,20 @@ public final class Binaries {
         e.put("XDG_DATA_HOME", home + "/.local/share");
         e.put("XDG_CONFIG_HOME", home + "/.config");
         e.put("XDG_CACHE_HOME", home + "/.cache");
+        // P42 TLS truth: export the standard CA variables for every tool
+        // family in the shell (curl / git / python / pip / node / npm).
+        // The field failure had NONE of these — every https call died and
+        // the agent burned sessions probing the broken environment.
+        if (caPem != null) {
+            e.put("SSL_CERT_FILE", caPem);
+            e.put("SSL_CERT_DIR", home + "/etc/ssl");
+            e.put("CURL_CA_BUNDLE", caPem);
+            e.put("REQUESTS_CA_BUNDLE", caPem);
+            e.put("GIT_SSL_CAINFO", caPem);
+            e.put("NODE_EXTRA_CA_CERTS", caPem);
+            e.put("NPM_CONFIG_CAFILE", caPem);
+            e.put("PIP_CERT", caPem);
+        }
         // P9: alpine toolkit — refresh the musl-world proxy file when ready;
         // otherwise kick a one-shot background extraction (never blocks spawn).
         try {

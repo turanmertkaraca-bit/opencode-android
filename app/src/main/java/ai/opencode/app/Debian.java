@@ -669,6 +669,17 @@ public final class Debian {
         e.put("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         e.put("TMPDIR", "/tmp");
         e.put("TERM", "xterm-256color");
+        // P42 TLS truth: once the merged CA bundle is seeded into the
+        // rootfs (writeLauncher) or apt's ca-certificates lands, point
+        // every tool family at it — pre-bootstrap git/curl/pip work too.
+        if (new File(rootfs, "etc/ssl/certs/ca-certificates.crt").isFile()) {
+            String ca = "/etc/ssl/certs/ca-certificates.crt";
+            e.put("SSL_CERT_FILE", ca);
+            e.put("CURL_CA_BUNDLE", ca);
+            e.put("GIT_SSL_CAINFO", ca);
+            e.put("REQUESTS_CA_BUNDLE", ca);
+            e.put("PIP_CERT", ca);
+        }
         String gh = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
                 .getString("gh_token", null);
         if (gh != null && !gh.trim().isEmpty())
@@ -729,6 +740,23 @@ public final class Debian {
                 }
             } catch (Exception ignored) {}
 
+            // P42 TLS truth: seed the host's merged CA bundle into the
+            // rootfs BEFORE apt ever runs — pre-bootstrap git/curl/pip
+            // then work, and the "apt-get install ca-certificates" probe
+            // loop the field agent burned money on loses its reason to
+            // exist. Write-if-absent: apt's own (newer) bundle wins once
+            // bootstrap has run.
+            try {
+                File hostBundle = CaBundle.bundleFile(c);
+                File guestBundle = new File(rootfs, "etc/ssl/certs/ca-certificates.crt");
+                if (hostBundle.isFile() && hostBundle.length() > 0
+                        && !guestBundle.isFile()) {
+                    guestBundle.getParentFile().mkdirs();
+                    byte[] b = readAll(hostBundle);
+                    try (OutputStream o = new FileOutputStream(guestBundle)) { o.write(b); }
+                }
+            } catch (Exception ignored) {}
+
             StringBuilder s = new StringBuilder();
             s.append("#!/system/bin/sh\n")
              .append("# P12 Debian launcher — generated; edits get overwritten.\n")
@@ -754,7 +782,13 @@ public final class Debian {
             s.append("DEBIAN_FRONTEND=noninteractive\n")
              .append("HOME=/root\nUSER=root\nTMPDIR=/tmp\nTERM=xterm-256color\n")
              .append("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n")
-             .append("export DEBIAN_FRONTEND HOME USER TMPDIR TERM PATH\n");
+             .append("export DEBIAN_FRONTEND HOME USER TMPDIR TERM PATH\n")
+             .append("# P42 TLS truth: guest CA bundle (seeded or apt-installed)\n")
+             .append("if [ -r /etc/ssl/certs/ca-certificates.crt ]; then\n")
+             .append("  export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt\n")
+             .append("  export CURL_CA_BUNDLE=\"$SSL_CERT_FILE\" GIT_SSL_CAINFO=\"$SSL_CERT_FILE\"\n")
+             .append("  export REQUESTS_CA_BUNDLE=\"$SSL_CERT_FILE\" PIP_CERT=\"$SSL_CERT_FILE\"\n")
+             .append("fi\n");
             String gh = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
                     .getString("gh_token", null);
             if (gh != null && !gh.trim().isEmpty())

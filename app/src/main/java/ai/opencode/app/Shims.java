@@ -84,6 +84,11 @@ public final class Shims {
                     "if [ -x \"" + f + "/bin/git\" ]; then\n" +
                     "  export HOME=" + f + "/home\n" +
                     "  export TMPDIR=" + c.getCacheDir().getAbsolutePath() + "\n" +
+                    // P42 TLS truth: user-imported git gets the merged CA
+                    // bundle when it exists — https clone/push stop dying on
+                    // a missing /etc/ssl path that Android never had.
+                    "  CA=" + f + "/home/etc/ssl/cert.pem\n" +
+                    "  [ -r \"$CA\" ] && export GIT_SSL_CAINFO=\"$CA\"\n" +
                     "  exec \"" + f + "/bin/git\" \"$@\"\n" +
                     "fi\n" +
                     "echo \"git is not installed in this app. Import a static\" >&2\n" +

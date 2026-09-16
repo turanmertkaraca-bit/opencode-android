@@ -122,6 +122,19 @@ public class ChatActivity extends Activity
     private View veil;
     private View veilDot;                   // P17: direct handle for the pulse
     private ObjectAnimator veilPulse;       // P17: CANCELED when the veil hides —
+    private TextView veilElapsed;           // P42: live "N s" line — the static
+    //                                          "≈ 5 s" read as a lie on slow
+    //                                          boots and frozen UI
+    private long veilStartMs;
+    private final Runnable veilTicker = new Runnable() {
+        public void run() {
+            if (veilElapsed == null || veil == null
+                    || veil.getVisibility() != View.VISIBLE) return;
+            long s = Math.max(0, (System.currentTimeMillis() - veilStartMs) / 1000);
+            veilElapsed.setText("elapsed · " + s + " s");
+            ui.postDelayed(this, 1000);
+        }
+    };
     //                                          the P16 code pulsed the veil dot
     //                                          with an INFINITE animator while
     //                                          the veil sat GONE 24/7: real idle
@@ -178,6 +191,14 @@ public class ChatActivity extends Activity
         setContentView(R.layout.activity_chat);
         Theme.window(this);              // P31: palette owns the window + dialogs
         list = findViewById(R.id.list);
+        // P42 keyboard fix: the EditText must never be the activity's
+        // INITIAL focus target — on session open the IME used to slide up
+        // over a chat the user had not touched yet. The list takes initial
+        // focus instead; tapping the input still focuses it (and only
+        // that opens the keyboard, which is exactly the field ask).
+        list.setFocusable(true);
+        list.setFocusableInTouchMode(true);
+        list.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
         scroll = findViewById(R.id.scroll);
         liveSlot = findViewById(R.id.liveSlot);
         tvTitle = findViewById(R.id.tvTitle);
@@ -380,6 +401,12 @@ public class ChatActivity extends Activity
     @Override
     protected void onPause() {
         RunHub.unbindUi(this);
+        // P42 keyboard fix, second half: drop input focus on pause so a
+        // return to the chat (or the renderAll guard re-grabbing focus
+        // after reconcile) can never re-open the IME the user did not
+        // ask for. Mid-stream typing is unaffected — that path re-grabs
+        // only while the input STILL holds focus.
+        try { if (input != null) input.clearFocus(); } catch (Exception ignored) {}
         // P31: the hibernate-resume anchor — "the user was HERE". Stamped
         // on pause so the last surface the user left wins; MainActivity
         // reads it after an idle hibernation (or any cold open) and drops
@@ -837,12 +864,21 @@ public class ChatActivity extends Activity
         card.addView(t2);
 
         TextView t3 = new TextView(this);
-        t3.setText("cold start ≈ 5 s · sessions and tools are rooted at\nyour project folder");
+        t3.setText("elapsed · 0 s");
         t3.setTextSize(11);
         t3.setTextColor(Theme.TXT_DIM);
         t3.setGravity(Gravity.CENTER);
         t3.setPadding(0, Theme.dp(this, 8), 0, 0);
         card.addView(t3);
+        veilElapsed = t3;
+
+        TextView t4 = new TextView(this);
+        t4.setText("sessions and tools are rooted at\nyour project folder");
+        t4.setTextSize(10);
+        t4.setTextColor(Theme.TXT_DIM);
+        t4.setGravity(Gravity.CENTER);
+        t4.setPadding(0, Theme.dp(this, 3), 0, 0);
+        card.addView(t4);
 
         fl.addView(card, clp);
         content.addView(fl, new FrameLayout.LayoutParams(
@@ -857,17 +893,42 @@ public class ChatActivity extends Activity
     private void syncVeil(int st) {
         if (veil == null) return;
         boolean show = st != ServerService.ST_HEALTHY;
-        int vis = show ? View.VISIBLE : View.GONE;
-        if (veil.getVisibility() != vis) {
-            veil.setVisibility(vis);
-            if (show) {
+        boolean shown = veil.getVisibility() == View.VISIBLE;
+        if (show) {
+            // P42: a restart race flips STARTING→HEALTHY→STARTING — the
+            // old code re-ran the entry animation on every flap (strobe).
+            // Re-shows cancel any pending fade-out and reuse the veil.
+            veil.animate().cancel();
+            if (!shown) {
+                veil.setAlpha(1f);
+                veil.setVisibility(View.VISIBLE);
+                veilStartMs = System.currentTimeMillis();
                 if (Theme.motionOn(this)) {
                     if (veilPulse != null) veilPulse.cancel();
                     if (veilDot != null) veilPulse = Theme.pulse(veilDot);
                 }
                 Theme.appear(veil);
-            } else if (veilPulse != null) {
-                veilPulse.cancel(); veilPulse = null;   // P17: stop the burn
+                ui.removeCallbacks(veilTicker);
+                veilTicker.run();
+            }
+        } else if (shown) {
+            if (veilPulse != null) {
+                veilPulse.cancel();
+                veilPulse = null;   // P17: stop the burn
+            }
+            ui.removeCallbacks(veilTicker);
+            // P42: fade out instead of popping GONE — the transcript no
+            // longer flashes in at full brightness under a vanishing veil.
+            if (Theme.motionOn(this)) {
+                veil.animate().alpha(0f).setDuration(150)
+                        .withEndAction(() -> {
+                            if (veil != null) {
+                                veil.setVisibility(View.GONE);
+                                veil.setAlpha(1f);
+                            }
+                        }).start();
+            } else {
+                veil.setVisibility(View.GONE);
             }
         }
     }
@@ -1640,7 +1701,10 @@ public class ChatActivity extends Activity
         p.setText(e.rel + (e.hits > 1 ? "  ×" + e.hits : ""));
 
         TextView age = (TextView) row.getChildAt(2);
-        age.setText(relTime((System.currentTimeMillis() - e.ts) / 1000.0));
+        // P42: e.ts is epoch-ms; the old call passed an AGE in seconds into
+        // a helper that read it as epoch-seconds → every row painted
+        // "20090 d ago". ago() takes epoch-ms directly.
+        age.setText(Resilience.ago(e.ts, System.currentTimeMillis()));
 
         TextView fresh = (TextView) row.getChildAt(3);
         fresh.setVisibility(isNewest ? View.VISIBLE : View.GONE);
@@ -1900,9 +1964,15 @@ public class ChatActivity extends Activity
         long sumTok = RunHub.sessionTok();
         double sumCost = RunHub.sessionCost();
         long cachedTok = RunHub.sessionCacheRead();
-        long lastTok;
-        synchronized (lock) { lastTok = RunHub.tx().lastAssistantTok; }
-        if (sumTok <= 0 && sumCost <= 0) return;
+        // P42: the popover's "Now" must be the SAME number the pill shows
+        // — the run high-water while busy (raw last-turn reads low mid-run
+        // and the two surfaces disagreed until the run settled).
+        long lastTok = RunHub.ctxTokens();
+        // P42: the window cap must be reachable on a FRESH chat too — the
+        // early return below used to make the whole popover dead until
+        // the first turn billed something.
+        boolean noUsage = sumTok <= 0 && sumCost <= 0;
+        if (noUsage && RunHub.selModelPub() == null) return;
         StringBuilder m = new StringBuilder();
         m.append("The meter is CONTEXT DEPTH: how much of the model's ")
          .append("window this conversation already fills. Every new turn ")
@@ -1957,11 +2027,29 @@ public class ChatActivity extends Activity
         String risk = CompactionPolicy.riskNote(lastTok, limit);
         if (risk != null) m.append(risk).append("\n");
         if (!verdict.isEmpty()) m.append(verdict).append("\n");
-        Sheet s = Sheet.show(this, "Σ " + (Resilience.contextMeter(lastTok, limit).isEmpty()
-                        ? Resilience.fmtCost(sumCost)
-                        : Resilience.contextMeter(lastTok, limit)
-                          + (sumCost > 0 ? " · " + Resilience.fmtCost(sumCost) : "")))
-                .msg(m.toString());
+        // P42: when a user cap is in force, say so right where the
+        // window numbers are explained — it changes what "full" means.
+        long userCap = RunHub.selModelPub() == null ? 0
+                : AuthStore.contextLimit(this, RunHub.selProviderPub(),
+                        RunHub.selModelPub());
+        if (userCap > 0)
+            m.append("Your cap: ").append(Resilience.fmtTok(userCap))
+             .append(" tokens — this chat summarizes memory at that "
+             + "ceiling, not at the model's full window.\n\n");
+        // P42: the title mirrors the pill honestly — a fresh chat with no
+        // numbers yet shows just "Σ" instead of a fake "$0.0000".
+        String meterTxt = Resilience.contextMeter(lastTok, limit);
+        String sumTitle;
+        if (meterTxt.isEmpty() && sumCost <= 0) sumTitle = "Σ";
+        else if (meterTxt.isEmpty()) sumTitle = "Σ " + Resilience.fmtCost(sumCost);
+        else sumTitle = "Σ " + meterTxt
+                + (sumCost > 0 ? " · " + Resilience.fmtCost(sumCost) : "");
+        Sheet s = Sheet.show(this, sumTitle).msg(m.toString());
+        // P42: the slider — the cap belongs beside the meter that shows
+        // its effect (reachable even with no usage yet, see above).
+        if (s.showing()) {
+            s.pill("◈ Window cap", Sheet.QUIET, this::limitSheet);
+        }
         // P29: /compact lives where the cost question is asked. The window
         // drains WITHOUT losing the thread — the middle ground between
         // "keep paying" and "fresh chat".
@@ -1979,6 +2067,133 @@ public class ChatActivity extends Activity
             });
         }
         s.pill("Got it", Sheet.QUIET, null);
+    }
+
+    // ===================================================== P42 window cap
+
+    /** P42: the context-window cap editor — the slider the field asked
+     *  for. What it moves is the picked model's {@code limit.context}
+     *  in opencode.json (the exact number the sandbox believes and
+     *  enforces): the silent compaction fires at this ceiling and the Σ
+     *  meter's denominator follows once the server reports it back. The
+     *  write IS the user's own config edit; ContextPolicy keeps it in
+     *  sane bounds and tidies the config shells when cleared. */
+    private void limitSheet() {
+        final String pid = RunHub.selProviderPub();
+        final String mid = RunHub.selModelPub();
+        if (pid == null || mid == null) {
+            Toast.makeText(this, "pick a model first — the cap is per model",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final long effective = Models.resolveLimit(this, Models.lastFetch(), pid, mid);
+        final long saved = AuthStore.contextLimit(this, pid, mid);
+        Sheet sh = Sheet.show(this, "Context window cap");
+        if (!sh.showing()) return;
+        StringBuilder m = new StringBuilder();
+        m.append("The cap decides where this model's memory gets summarized: ")
+         .append("at the ceiling below instead of the model's full window (")
+         .append(effective > 0 ? Resilience.fmtTok(effective) : "unknown")
+         .append("). Lower cap = cheaper turns and earlier summarizing; ")
+         .append("higher = more room before compaction. It belongs to ")
+         .append(pid).append("/").append(mid)
+         .append(" and takes effect when the sandbox restarts.\n");
+        if (saved > 0)
+            m.append("\nCurrent cap: ").append(Resilience.fmtTok(saved))
+             .append(" tokens — Clear follows the model's own window again.");
+        sh.msg(m.toString());
+
+        final long min = ContextPolicy.MIN, max = ContextPolicy.MAX,
+                step = ContextPolicy.STEP;
+        final int maxProgress = (int) ((max - min) / step);
+        final long start = saved > 0 ? ContextPolicy.normalize(saved)
+                : (effective >= min && effective <= max ? effective : 200_000L);
+
+        final TextView val = new TextView(this);
+        val.setTypeface(Typeface.MONOSPACE);
+        val.setTextColor(Theme.cr(this, R.color.accent_light));
+        val.setTextSize(16);
+        val.setPadding(0, Theme.dp(this, 6), 0, Theme.dp(this, 2));
+
+        final android.widget.SeekBar bar = new android.widget.SeekBar(this);
+        bar.setMax(maxProgress);
+        int tint = Theme.cr(this, R.color.accent);
+        bar.getProgressDrawable().setColorFilter(tint, android.graphics.PorterDuff.Mode.SRC_IN);
+        bar.getThumb().setColorFilter(tint, android.graphics.PorterDuff.Mode.SRC_IN);
+
+        Runnable showVal = () -> val.setText(Resilience.fmtTok(
+                ContextPolicy.normalize(min + (long) bar.getProgress() * step))
+                + " tokens");
+        bar.setProgress((int) ((start - min) / step));
+        showVal.run();
+        bar.setOnSeekBarChangeListener(new android.widget.SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(android.widget.SeekBar b, int p, boolean u) {
+                showVal.run();
+            }
+            public void onStartTrackingTouch(android.widget.SeekBar b) {}
+            public void onStopTrackingTouch(android.widget.SeekBar b) {}
+        });
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.addView(val, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        box.addView(bar, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+
+        // presets — the house style: tap-first, type-never
+        LinearLayout presets = new LinearLayout(this);
+        presets.setOrientation(LinearLayout.HORIZONTAL);
+        for (long p : ContextPolicy.PRESETS) {
+            TextView chip = new TextView(this);
+            chip.setText(Resilience.fmtTok(p));
+            chip.setTypeface(Typeface.MONOSPACE);
+            chip.setTextSize(12);
+            chip.setTextColor(Theme.cr(this, R.color.text_secondary));
+            chip.setPadding(Theme.dp(this, 10), Theme.dp(this, 6),
+                    Theme.dp(this, 10), Theme.dp(this, 6));
+            chip.setBackground(Theme.ghostCard(this));
+            chip.setOnClickListener(v -> {
+                bar.setProgress((int) ((p - min) / step));
+                showVal.run();
+            });
+            presets.addView(chip, new LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        }
+        box.addView(presets, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        sh.add(box);
+
+        sh.pill("Apply & restart sandbox", Sheet.PRIMARY, () -> {
+            long n = ContextPolicy.normalize(min + (long) bar.getProgress() * step);
+            try {
+                AuthStore.setContextLimit(this, pid, mid, n);
+                Toast.makeText(this, "cap → " + Resilience.fmtTok(n)
+                        + " · restarting the sandbox", Toast.LENGTH_SHORT).show();
+                sh.dismiss();
+                ServerService.restart(this);
+            } catch (Exception ex) {
+                Toast.makeText(this, "could not write the cap: " + ex.getMessage(),
+                        Toast.LENGTH_LONG).show();
+            }
+        });
+        if (saved > 0) {
+            sh.pill("Clear cap", Sheet.QUIET, () -> {
+                try {
+                    AuthStore.setContextLimit(this, pid, mid, 0);
+                    Toast.makeText(this, "cap cleared — the model's own window "
+                            + "applies after a restart", Toast.LENGTH_LONG).show();
+                    sh.dismiss();
+                } catch (Exception ex) {
+                    Toast.makeText(this, "could not clear the cap: " + ex.getMessage(),
+                            Toast.LENGTH_LONG).show();
+                }
+            });
+        }
+        sh.pill("Got it", Sheet.QUIET, null);
     }
 
     private void sys(String s) {
@@ -3220,7 +3435,8 @@ public class ChatActivity extends Activity
             boolean run = RunHub.busyFor(s.id);
             items.add(new Object[]{
                     (run ? "● " : "") + s.title,
-                    run ? "RUNNING NOW · " + relTime(s.updated) : relTime(s.updated),
+                    run ? "RUNNING NOW · " + Resilience.ago((long) s.updated, System.currentTimeMillis())
+                            : Resilience.ago((long) s.updated, System.currentTimeMillis()),
                     s});
         }
         lv.setAdapter(new BaseAdapter() {
@@ -3764,6 +3980,18 @@ public class ChatActivity extends Activity
             // body) hostage to a model the catalog can rotate away.
             // Server-wide default stays in Settings → Default model.
             refreshChips();
+            // P42: the pill's denominator is model-shaped — repaint NOW,
+            // or it keeps the previous model's limit until the next hub
+            // event while the popover (fresh read) already disagrees.
+            refreshServerUi();
+            // P42: the compaction floor is also model-shaped — re-pin it
+            // for the newly picked model (lands on the next server boot;
+            // the ownership rule updates only app-written values, never
+            // the user's own).
+            try {
+                long lim = Models.bundledLimit(this, pr.id, m.id);
+                if (lim > 0) AuthStore.ensureCompactionPreserve(this, lim);
+            } catch (Exception ignored) {}
             Toast.makeText(this, (!pr.configured && !"opencode".equals(pr.id)
                     ? "no key yet for " + pr.name + " — ⌘ → API keys · " : "")
                     + "model → " + pr.id + "/" + m.id
@@ -3905,16 +4133,7 @@ public class ChatActivity extends Activity
         return (s == null || s.isEmpty()) ? dflt : s;
     }
 
-    private static String relTime(double sec) {
-        if (sec <= 0) return "";
-        long ms = (long) (sec * 1000.0);
-        long diff = System.currentTimeMillis() - ms;
-        if (diff < 0) diff = 0;
-        long m = diff / 60000;
-        if (m < 1) return "just now";
-        if (m < 60) return m + " min ago";
-        long h = m / 60;
-        if (h < 24) return h + " h ago";
-        return (h / 24) + " d ago";
-    }
+    // P42: relTime(double sec) deleted — its implicit epoch-seconds contract
+    // was the root cause of the "20000 days ago" field bug; Resilience.ago()
+    // is the single, unit-explicit, JVM-tested renderer now.
 }

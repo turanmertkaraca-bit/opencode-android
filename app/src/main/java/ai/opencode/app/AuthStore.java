@@ -186,17 +186,30 @@ public final class AuthStore {
      * that many tokens of recent turns VERBATIM when it summarizes a
      * full context (the server default keeps only 2k–15k, which is how
      * the field lost its thread after every silent compaction). The
-     * merge rule lives in {@link CompactionPolicy#mergePreserve} (pure,
-     * suite-pinned): write-if-absent, hands off any existing value,
-     * nothing written for unknown or tiny windows. True when the key
-     * was added by this call. Throws only on a failed file write —
-     * callers treat that as one diagnostics line, never a boot blocker.
+     * merge rule lives in {@link CompactionPolicy} (pure, suite-pinned):
+     * P42 upgraded it to merge-OR-MOVE — the app may update a value it
+     * previously wrote (ownership tracked in the
+     * {@code compaction_app_written} pref) so a model switch can drag
+     * the floor to the new window, while a user-edited value stays
+     * untouchable. True when the key was added or moved by this call.
+     * Throws only on a failed file write — callers treat that as one
+     * diagnostics line, never a boot blocker.
      */
     public static boolean ensureCompactionPreserve(Context c, long limit)
             throws IOException {
         Map<String, Object> cfg = readConfig(c);
-        if (CompactionPolicy.mergePreserve(cfg, limit)) {
+        long appWritten = 0;
+        try {
+            appWritten = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .getLong("compaction_app_written", 0);
+        } catch (Exception ignored) {}
+        long v = CompactionPolicy.mergeOrMovePreserve(cfg, limit, appWritten);
+        if (v > 0) {
             writeConfig(c, cfg);
+            try {
+                c.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
+                        .putLong("compaction_app_written", v).apply();
+            } catch (Exception ignored) {}
             return true;
         }
         return false;
@@ -209,6 +222,27 @@ public final class AuthStore {
         int i = s.indexOf('/');
         if (i <= 0 || i == s.length() - 1) return null;
         return new String[]{s.substring(0, i), s.substring(i + 1)};
+    }
+
+    /** P42: the user's context-window cap (the Σ-popover slider) — the
+     *  current override in opencode.json, 0 when none. */
+    public static long contextLimit(Context c, String pid, String mid) {
+        try {
+            return ContextPolicy.readContextLimit(readConfig(c), pid, mid);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /** P42: write (or clear, n ≤ 0) the override. The server reports it
+     *  through /config/providers on its next boot, so the Σ meter's
+     *  denominator and the compaction trigger follow automatically. */
+    public static boolean setContextLimit(Context c, String pid, String mid,
+                                          long n) throws IOException {
+        Map<String, Object> cfg = readConfig(c);
+        if (!ContextPolicy.mergeContextLimit(cfg, pid, mid, n)) return false;
+        writeConfig(c, cfg);
+        return true;
     }
 
     /**

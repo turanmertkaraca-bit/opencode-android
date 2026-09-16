@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.41.0 — P41)
+## Install (v0.42.0 — P42)
 
-1. Grab `opencode-p41-v0.41.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p42-v0.42.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
    Note: v0.38.0 was built and field-tested but never published here —
@@ -55,6 +55,79 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.42.0 (P42 — the honesty release)
+
+The v0.41.0 field session held its thread for hours — the compaction
+floor worked. But real money still went into loops that had nothing to
+do with the task, and three of the numbers on screen could not be
+fully trusted. Each one traced to a source:
+
+**The environment-fix loops.** The agent's shell had NO working TLS
+trust: nothing ever exported a CA bundle, Android's system trust store
+sits at a path Linux-compiled tools never look at, and the shipped
+alpine/debian bundles were never pointed at by any wrapper. Every
+curl/git-https died the same way — and an agent that cannot reach the
+network probes, retries, and "fixes". Worse, the environment note the
+agent reads at session start claimed the shell was always a Debian
+guest, claimed a GitHub token was exported in the native shell, and
+recommended `apt-get install ca-certificates` — the exact loop the
+money went into. Now: one merged CA bundle (Android system store + the
+shipped Mozilla set) is built at every spawn and exported through the
+standard variables every tool family honors (SSL_CERT_FILE,
+CURL_CA_BUNDLE, GIT_SSL_CAINFO, REQUESTS_CA_BUNDLE, PIP_CERT,
+NODE_EXTRA_CA_CERTS, NPM_CONFIG_CAFILE); it is preseeded into the
+Debian rootfs before the first apt call and exported in the alpine
+wrappers and the git shim. The env note is rewritten mode-aware and
+honest: certificates are provisioned and fixing them is not a step
+here, raw DNS cannot work by design (and the one real remedy is named:
+DNS bridge), and — the money saver — if a probe fails twice, report it
+and move on. A sandbox-root fallback announces itself instead of
+letting the agent discover it by ENOENT.
+
+**The meter and the money.** Sessions reopened after many turns
+under-counted (replays booked only the last 80 stored messages — the
+rendering cap was silently an accounting cap); money billed while the
+app was closed never reached the all-time counter (a background run's
+spend vanished, so the credit cap could be exceeded in fact); after a
+compaction the meter kept the pre-compaction depth (95% painted on a
+freshly shrunken window); a model switch left the pill on the old
+model's window; and a compaction floor pinned for one model rode along
+to a smaller-window model, making every compaction a no-op. The
+fixes: full-store bookkeeping with the 80-window kept as a rendering
+cap only, a persisted per-message cost ledger that books exactly once
+(live or replayed; unseen sessions seed silently), the summary message
+no longer feeding the high-water, model switches repainting the meter
+and MOVING the app-owned floor (a user-edited value is never touched),
+one percent rule (floor) across pill, hint, warning and popover, and
+the server's own tokens.total preferred when present.
+
+**The context-limit slider.** Σ pill → ◈ Window cap: a real slider
+(plus presets and Clear) that writes the picked model's
+`limit.context` — the exact number the sandbox believes and enforces —
+in opencode.json, in the models.dev shape the bundled server parses
+natively (verified in the binary itself). Applying offers a sandbox
+restart so the meter's denominator and the compaction trigger follow
+at once. Reachable on a fresh chat, and the popover states plainly
+when a cap is in force.
+
+**The small stuff the field actually felt.** The keyboard no longer
+opens by itself (the input is never the initial focus target, focus
+drops on pause, and tapping the input is what opens the IME); the back
+button has a fixed 40dp floor and the Σ pill caps its own width so a
+long meter line cannot crush the title on narrow screens; the startup
+veil shows a live elapsed counter instead of a static "≈ 5 s" that
+read as a lie on slow boots, fades out instead of popping, and no
+longer strobes on restart flaps; and the "20000 days ago" class of bug
+is structurally impossible now — deleted watcher rows, stale file
+listings and the sessions sheet all render through one unit-explicit,
+JVM-tested time helper ("—" for unknown time, never an epoch
+accident: the old code passed an AGE where an EPOCH was expected, so
+every row painted ~20090 days).
+
+423 JVM tests green (11 new: the time helper's unit contract, the
+shared percent rule, the window-cap bounds/quantize/merge/clear/
+junk-handoff table, and the floor's move-only-what-you-own rule).
 
 ## What's in v0.41.0 (P41 — the memory the meter couldn't see)
 
@@ -1012,7 +1085,8 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P38 notes stop painting in your bubble, told-ledgers persist, tail-void trimmed (field-tested; folded into v0.39.0) | shipped |
 | P39 the context-integrity release: amnesia detector, automatic context repair, honest empty-store note, the server's own log in Diagnostics | shipped |
 | P40 the amnesia cured at its source: poisoned compaction root found on the rig, repaired in the store, prevented at the compact button | shipped |
-| P41 the memory the meter couldn't see: compaction floor pinned at the source, the meter uses the server's own window, compaction warned and announced | **current** |
+| P41 the memory the meter couldn't see: compaction floor pinned at the source, the meter uses the server's own window, compaction warned and announced | shipped |
+| P42 the honesty release: the agent shell gets real TLS trust + a note that stops the probe loops, the meter and the money are honest in every path, a context-limit slider, the keyboard only opens on tap, and time that cannot read 20000 days | **current** |
 | Next: P42 — keys copy/reveal in the keys screen; the preset rename (name pending) | reserved |
 
 ## Credits

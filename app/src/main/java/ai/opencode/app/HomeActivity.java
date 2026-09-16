@@ -748,13 +748,8 @@ public class HomeActivity extends Activity implements ServerService.Evt {
     // ------------------------------------------------------------- misc
 
     private static String relTime(long ms) {
-        long diff = System.currentTimeMillis() - ms;
-        if (diff < 0) diff = 0;
-        long m = diff / 60000;
-        if (m < 1) return "just now";
-        if (m < 60) return m + " min ago";
-        long h = m / 60;
-        if (h < 24) return h + " h ago";
-        return (h / 24) + " d ago";
+        // P42: delegate to the unit-explicit helper (single source of truth;
+        // also makes a never-opened card render "—" if ever unguarded).
+        return Resilience.ago(ms, System.currentTimeMillis());
     }
 }

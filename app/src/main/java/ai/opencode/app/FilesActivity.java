@@ -553,11 +553,10 @@ public class FilesActivity extends Activity {
         String sz = len < 1024 ? len + " B"
                 : len < 1048576 ? String.format(Locale.US, "%.1f kB", len / 1024.0)
                 : String.format(Locale.US, "%.1f MB", len / 1048576.0);
-        long age = System.currentTimeMillis() - f.lastModified();
-        String when = age < 60_000 ? "just now"
-                : age < 3_600_000 ? (age / 60_000) + " min ago"
-                : age < 86_400_000 ? (age / 3_600_000) + " h ago"
-                : (age / 86_400_000) + " d ago";
+        // P42: a stale row can reference a deleted file — lastModified() is
+        // then 0 and the raw age math rendered "20090 d ago". ago() renders
+        // "—" for unknown time instead.
+        String when = Resilience.ago(f.lastModified(), System.currentTimeMillis());
         return sz + " · " + when;
     }
 
