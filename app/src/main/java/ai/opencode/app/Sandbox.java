@@ -268,11 +268,19 @@ public final class Sandbox {
     }
 
     private static String prolog(Context c) {
+        // P42: the rootfs ships a full Mozilla CA bundle at the path
+        // musl/gnu tools compiled for Linux expect — point every wrapper
+        // at it so apk/curl/git/pip inside the alpine layer get TLS too.
         return "#!/system/bin/sh\n"
              + "AL=" + alpineDir(c).getAbsolutePath() + "\n"
              + "LB=\"$AL/lib/ld-musl-aarch64.so.1\"\n"
              + "LP=\"$AL/lib:$AL/usr/lib\"\n"
              + "[ -r \"$AL/.proxy\" ] && . \"$AL/.proxy\"\n"
+             + "if [ -r \"$AL/etc/ssl/certs/ca-certificates.crt\" ]; then\n"
+             + "  export SSL_CERT_FILE=\"$AL/etc/ssl/certs/ca-certificates.crt\"\n"
+             + "  export CURL_CA_BUNDLE=\"$SSL_CERT_FILE\" GIT_SSL_CAINFO=\"$SSL_CERT_FILE\"\n"
+             + "  export REQUESTS_CA_BUNDLE=\"$SSL_CERT_FILE\" PIP_CERT=\"$SSL_CERT_FILE\"\n"
+             + "fi\n"
              + "export LD_LIBRARY_PATH=\"$LP\"\n";
     }
 

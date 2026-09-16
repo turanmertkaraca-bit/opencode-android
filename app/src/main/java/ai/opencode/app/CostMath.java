@@ -78,10 +78,12 @@ public final class CostMath {
         return total / 1_000_000.0 * costInPerMtok;
     }
 
-    /** Context fill as a whole percent, 0 when either side is unknown. */
+    /** Context fill as a whole percent, 0 when either side is unknown.
+     *  P42: floors via Resilience.pctFloor — the same rule as the meter
+     *  and the compaction warning (rounding here let the hint's
+     *  "/compact saves" appear a turn before the pill caught up). */
     public static int windowPct(long ctxTok, long limit) {
-        if (ctxTok <= 0 || limit <= 0) return 0;
-        return (int) Math.round(ctxTok * 100.0 / limit);
+        return Resilience.pctFloor(ctxTok, limit);
     }
 
     /**

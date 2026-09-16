@@ -173,6 +173,42 @@ public final class Resilience {
         return String.format(java.util.Locale.US, "$%.4f", cost);
     }
 
+    /** P42: relative age from an absolute epoch-millisecond timestamp —
+     *  units are EXPLICIT in the signature because the field bug ("20000
+     *  days ago" on watcher rows) came from callers passing an AGE in
+     *  seconds where an epoch was expected, and vice versa. One helper,
+     *  both call shapes gone.
+     *    now - 30s      → "just now"
+     *    now - 5min     → "5 min ago"
+     *    now - 3h       → "3 h ago"
+     *    now - 2d       → "2 d ago"
+     *    ts <= 0        → "—"   (deleted/stale row, unknown time)
+     *    ts in future   → "just now"   (clock skew, never negative) */
+    public static String ago(long epochMs, long nowMs) {
+        if (epochMs <= 0) return "—";
+        long diff = nowMs - epochMs;
+        if (diff < 0) diff = 0;
+        long m = diff / 60000;
+        if (m < 1) return "just now";
+        if (m < 60) return m + " min ago";
+        long h = m / 60;
+        if (h < 24) return h + " h ago";
+        return (h / 24) + " d ago";
+    }
+
+    /** P42: ONE percent rule for every surface — integer FLOOR, clamped
+     *  to [0,100]. The field had four surfaces mixing round and floor:
+     *  at 69.5% the pill rounded to "70%" while the compaction warning
+     *  (floored) stayed silent — the meter warned one turn late. Floor
+     *  everywhere means the warning can never lag the number shown.
+     *  Pure; the suite pins the boundary. */
+    public static int pctFloor(long part, long whole) {
+        if (whole <= 0 || part <= 0) return 0;
+        long pct = part * 100 / whole;
+        if (pct > 100) pct = 100;
+        return (int) pct;
+    }
+
     /** P25: the token pill now reads as CONTEXT DEPTH, not a cumulative
      *  sum — "how full is the model's window right now". Computed from
      *  the last turn's reported token count (what every new turn re-reads)
@@ -187,7 +223,8 @@ public final class Resilience {
         // whole-number tails only (48.7k stays 48.7k)
         String depth = compact(fmtTok(lastTurnTok));
         if (limit <= 0) return depth;
-        int pct = (int) Math.round(lastTurnTok * 100.0 / limit);
+        // P42: floor via the shared rule — one percent contract everywhere
+        int pct = pctFloor(lastTurnTok, limit);
         String pctTxt;
         if (pct >= 100) {
             // over the window: the provider truncates or errors — say so

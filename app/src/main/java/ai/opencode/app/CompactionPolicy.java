@@ -112,6 +112,47 @@ public final class CompactionPolicy {
         return true;
     }
 
+    /**
+     * P42: merge-or-move. The floor is a FUNCTION OF THE WINDOW, so a
+     * model switch must be able to MOVE an app-written value (a 60k
+     * floor riding along to a newly-picked 64k-window model would make
+     * every compaction a no-op — the exact hazard mergePreserve's
+     * hands-off rule created). Ownership rule: an existing value is
+     * updated ONLY when it is exactly the value the app previously
+     * wrote ({@code appWritten}, tracked by AuthStore in prefs); a
+     * user-edited value — anything else, even a malformed one — is
+     * never touched. Returns the value written this call (0 = nothing
+     * changed). Pure; the suite pins the table.
+     */
+    static long mergeOrMovePreserve(Map<String, Object> root, long limit,
+                                    long appWritten) {
+        if (root == null) return 0;
+        long v = preserveRecentTokensFor(limit);
+        Object cur = root.get("compaction");
+        if (cur != null && !(cur instanceof Map)) return 0;
+        Map<String, Object> comp = Json.obj(cur);
+        if (comp == null) {
+            if (v <= 0) return 0;
+            comp = new java.util.LinkedHashMap<>();
+            root.put("compaction", comp);
+            comp.put("preserve_recent_tokens", v);
+            return v;
+        }
+        if (!comp.containsKey("preserve_recent_tokens")) {
+            if (v <= 0) return 0;
+            comp.put("preserve_recent_tokens", v);
+            return v;
+        }
+        Object curV = comp.get("preserve_recent_tokens");
+        if (v > 0 && appWritten > 0 && curV instanceof Number
+                && ((Number) curV).longValue() == appWritten
+                && ((Number) curV).longValue() != v) {
+            comp.put("preserve_recent_tokens", v);
+            return v;
+        }
+        return 0;
+    }
+
     // ------------------------------------------------------------ notes
 
     /** The one honest chat line when a compaction summary lands. Says

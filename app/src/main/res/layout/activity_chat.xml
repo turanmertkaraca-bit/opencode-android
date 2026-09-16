@@ -20,16 +20,20 @@
         android:paddingTop="12dp"
         android:paddingBottom="10dp">
 
+        <!-- P42: 40dp + minWidth — the 36dp chip was both sub-a11y and
+             visually crushed when the weighted title shrank on narrow
+             screens; the fixed floor keeps the back affordance stable. -->
         <TextView
             android:id="@+id/btnBack"
-            android:layout_width="36dp"
-            android:layout_height="36dp"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:minWidth="40dp"
             android:layout_marginEnd="10dp"
             android:background="@drawable/bg_chip"
             android:gravity="center"
             android:text="‹"
             android:textColor="@color/accent_light"
-            android:textSize="20sp"
+            android:textSize="22sp"
             android:textStyle="bold"/>
 
         <LinearLayout
@@ -61,17 +65,23 @@
         </LinearLayout>
 
         <!-- P14: session spend — its OWN pill so ⇅ tokens and $ cost are
-             never ellipsized away by the one-line subtitle again. -->
+             never ellipsized away by the one-line subtitle again.
+             P42: maxWidth + middle ellipsize — a long meter line can no
+             longer squeeze the weighted title to zero (the "back button
+             squish" field report); wider tap padding (7dp) makes the
+             Σ popover discoverable. -->
         <TextView
             android:id="@+id/tvSpend"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginEnd="8dp"
             android:background="@drawable/bg_chip"
+            android:maxWidth="120dp"
+            android:ellipsize="middle"
             android:paddingStart="9dp"
             android:paddingEnd="9dp"
-            android:paddingTop="5dp"
-            android:paddingBottom="5dp"
+            android:paddingTop="7dp"
+            android:paddingBottom="7dp"
             android:fontFamily="monospace"
             android:text="⇅ 0 · $0"
             android:textColor="@color/text_secondary"
@@ -185,7 +195,7 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|center_horizontal"
-        android:layout_marginBottom="10dp"
+        android:layout_marginBottom="14dp"
         android:background="@drawable/bg_chip"
         android:paddingStart="16dp"
         android:paddingEnd="16dp"
