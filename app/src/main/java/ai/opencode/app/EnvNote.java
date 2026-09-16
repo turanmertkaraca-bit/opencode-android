@@ -149,6 +149,15 @@ public final class EnvNote {
         s.append("task another way. This sandbox is intentionally ");
         s.append("minimal — the map in this note is complete, and ");
         s.append("re-probing it wastes the user's money.\n");
+        // P43 git resilience — the field watched long clones die midway
+        // (the proxy drops big transfers) and the agent re-cloned from
+        // scratch, burning turns. Teach the two moves that never re-pay:
+        s.append("Git: for any repo that might be large, clone with ");
+        s.append("--depth 1 first (widen later with git fetch ");
+        s.append("--unshallow if history is actually needed). If a ");
+        s.append("clone or fetch dies midway, do NOT delete and ");
+        s.append("re-clone: run git fetch inside the half-cloned ");
+        s.append("directory and it resumes from what it already has.\n");
         // P42: the silent-fallback confession (set by ServerService).
         String fb = ServerService.servingFallback;
         if (fb != null) {

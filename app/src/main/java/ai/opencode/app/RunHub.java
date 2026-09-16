@@ -148,11 +148,27 @@ public final class RunHub implements ServerService.EventListener {
          *  fresh chat). Lets message-level errors release the right run
          *  when several run in parallel. */
         public String sid;
+        /** P43: last time THIS session produced an event (part delta,
+         *  message update, idle) or carried a send — the cache-beat
+         *  scheduler reads it as "the provider's cache was refreshed
+         *  then". Per-session on purpose: another chat streaming does
+         *  not keep THIS chat's cache warm. */
+        public volatile long lastEventAt;
     }
 
     private static final int TRIMMED_KEY_CAP = 4096;
     // package-private: the JVM suite pins these walls
-    static final int TRIM_OVER = 450, TRIM_KEEP = 350;
+    // P43: 450/350 → 1200/900 — the field report was "the tools keep
+    // going away": a session that ran for hours shed its older tool
+    // cards at the 450-row wall while it streamed, and a reopened chat
+    // painted only the last 80 stored messages. Rendering must keep up
+    // with real sessions; memory stays bounded and the money ledger is
+    // unaffected (accounting walks the full store regardless).
+    static final int TRIM_OVER = 1200, TRIM_KEEP = 900;
+    /** P43: how many stored messages a (re)open renders — was 80, which
+     *  amputated hours of tool history the moment the user left and came
+     *  back. The full store still reaches the model and the ledger. */
+    static final int REPLAY_RENDER = 600;
     static final int ARCHIVE_CAP = 4;
     /** P26 long-run caps: message bookkeeping per session, pid-less part
      *  counters, edit-focus snippets. A month/year run grows INTO these
@@ -310,6 +326,108 @@ public final class RunHub implements ServerService.EventListener {
         if (sid == null) return;
         Long prev = runs.get(sid);
         if (prev != null) runs.put(sid, System.currentTimeMillis());
+        noteActivity(sid);                        // P43: cache-beat clock
+    }
+
+    // ------------------------------------------------ P43 cache beats
+
+    /** Session → last activity ms (event or send). The beat decision
+     *  reads "how long has THIS session been quiet". */
+    private static final Map<String, Long> lastActivity = new HashMap<>();
+    /** Session → beats fired in the current quiet stretch. */
+    private static final Map<String, Integer> beatCount = new HashMap<>();
+    /** Session → consecutive failed beats (drives the backoff). */
+    private static final Map<String, Long> beatFails = new HashMap<>();
+    /** Session → activity value the beat counter was armed on; when real
+     *  activity lands past it, the stretch resets and the count zeroes. */
+    private static final Map<String, Long> beatArmedAt = new HashMap<>();
+
+    /** Record that {@code sid} just did something (any event, any send,
+     *  any part delta) — the provider's prompt cache was refreshed now. */
+    private static void noteActivity(String sid) {
+        if (sid == null) return;
+        synchronized (lastActivity) {
+            lastActivity.put(sid, System.currentTimeMillis());
+        }
+        Tx t = txnFor(sid);
+        if (t != null) t.lastEventAt = System.currentTimeMillis();
+    }
+
+    /** The Settings switch (default ON — the field asked for exactly
+     *  this behavior; the switch is the off-ramp). */
+    public static boolean beatsEnabled() {
+        try {
+            return appCtx.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .getBoolean("cache_beat", true);
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    /** Called every ~20 s by the open chat screen. Fires a cache beat
+     *  when the displayed session has been quiet past the idle window
+     *  and the policy says a beat is worth it. Cheap when idle-early:
+     *  one map read, no IO. */
+    public static void cacheBeatTick() {
+        try {
+            final String sid = sessionId;
+            if (sid == null || !beatsEnabled()) return;
+            long now = System.currentTimeMillis();
+            long act;
+            synchronized (lastActivity) {
+                Long v = lastActivity.get(sid);
+                act = v == null ? now : v;
+            }
+            // stretch reset: real activity landed since the last beat →
+            // this is a NEW quiet stretch, the per-stretch cap restarts.
+            synchronized (beatArmedAt) {
+                Long armed = beatArmedAt.get(sid);
+                if (armed == null || act > armed) {
+                    beatCount.put(sid, 0);
+                    beatArmedAt.put(sid, act);
+                }
+            }
+            int beats;
+            synchronized (beatCount) { Integer b = beatCount.get(sid); beats = b == null ? 0 : b; }
+            long fails;
+            synchronized (beatFails) { Long f = beatFails.get(sid); fails = f == null ? 0 : f; }
+            long ctx = ctxTokens();
+            if (!CacheBeat.shouldFire(now, act, beats, fails, ctx,
+                    busyFor(sid), true)) return;
+            sendCacheBeat(sid);
+        } catch (Throwable ignored) {}
+    }
+
+    /** One beat: a two-word reply that re-reads the whole prefix at the
+     *  cached rate and restarts the TTL clock. Hub-owned like every
+     *  send; claims NO run slot (a beat must never block the user's
+     *  next real message), but yields to any run already in flight. */
+    private static void sendCacheBeat(final String sid) {
+        synchronized (beatCount) {
+            Integer b = beatCount.get(sid);
+            beatCount.put(sid, (b == null ? 0 : b) + 1);
+        }
+        IO.execute(() -> {
+            try {
+                touchRun(sid);
+                List<String> bodies = buildBodies(CacheBeat.beatBlock(),
+                        Models.selected(appCtx), agent);
+                Api.Resp r = null;
+                for (String body : bodies) {
+                    r = Api.post("/session/" + sid + "/message", body, 120_000);
+                    if (r.ok()) break;
+                }
+                if (r == null || !r.ok()) {
+                    synchronized (beatFails) {
+                        Long f = beatFails.get(sid);
+                        beatFails.put(sid, (f == null ? 0 : f) + 1);
+                    }
+                    return;                    // quiet backoff — never spam
+                }
+                synchronized (beatFails) { beatFails.remove(sid); }
+                noteActivity(sid);             // the beat itself is activity
+            } catch (Throwable ignored) {}
+        });
     }
 
     /** Snapshot views for the pure re-arm rule (RunBook.shouldRearm). */
@@ -889,7 +1007,12 @@ public final class RunHub implements ServerService.EventListener {
             last = (busyFor(sessionId) && cur.depthPeak > cur.lastAssistantTok)
                     ? cur.depthPeak : cur.lastAssistantTok;
         }
-        String meter = Resilience.contextMeter(last, Models.resolveLimit(
+        // P43: the pill paints the COMPACT meter — "211k · 39%" — not
+        // the full "211k / 1.3M · 39%": on a narrow screen the window
+        // half was ellipsized away and the cost tail ("…0.3897") read
+        // like a fraction, which the field spent an evening debugging.
+        // Depth + percent at a glance; the full form lives in the popover.
+        String meter = Resilience.pillMeter(last, Models.resolveLimit(
                 appCtx, Models.lastFetch(), selProvider(), selModel()));
         double cost = sessionCost();
         if (meter.isEmpty() && cost <= 0) return "";
@@ -1047,7 +1170,9 @@ public final class RunHub implements ServerService.EventListener {
             } else if ("message.updated".equals(type)) {
                 Map<String, Object> minfo = Json.map(props, "info");
                 if (minfo != null) {
-                    applyMessageInfo(txnFor(Json.str(minfo, "sessionID")),
+                    String msid = Json.str(minfo, "sessionID");
+                    if (msid != null) noteActivity(msid);   // P43 beat clock
+                    applyMessageInfo(txnFor(msid),
                             minfo, true);          // P31: live SSE → spend counts
                 }
             } else if ("session.updated".equals(type)) {
@@ -1062,6 +1187,7 @@ public final class RunHub implements ServerService.EventListener {
                 }
             } else if ("session.idle".equals(type)) {
                 String sid = Json.str(props, "sessionID");
+                if (sid != null) noteActivity(sid);   // P43: the run ended
                 // P25→P31: a session's idle releases THAT session's run —
                 // and only that one. Other sessions' runs are untouched.
                 if (sid == null) {
@@ -2020,6 +2146,7 @@ public final class RunHub implements ServerService.EventListener {
                         + "(⌘ → Restart server if it persists)");
                 return;
             }
+            noteActivity(sid);                    // P43: a send refreshes the cache
             int claim = claimRun(sid);
             if (claim != RunBook.CLAIM_OK) {
                 sys(claim == RunBook.CLAIM_BUSY
@@ -2071,6 +2198,15 @@ public final class RunHub implements ServerService.EventListener {
                 // user's bubble stays clean (NoteStrip knows the signature).
                 final String recap = contextRepair(sid);
                 if (recap != null) wire = recap + "\n\n" + wire;
+                // P43: the greeting-context guard — a bare "hello world"
+                // mid-task used to get a fresh-chat "Hello! What would you
+                // like help with?" back (the history REACHED the model; it
+                // just read the short line as a new-conversation opener).
+                // The recap names the thread so the answer stays in it.
+                else if (GreetGuard.isBareGreeting(text)) {
+                    String greet = threadContextBlock(sid, text);
+                    if (greet != null) wire = greet + "\n\n" + wire;
+                }
                 List<String> bodies = buildBodies(
                         wire, Models.selected(appCtx), agent);
                 Api.Resp r = null;
@@ -2225,6 +2361,58 @@ public final class RunHub implements ServerService.EventListener {
         }
     }
 
+    /** P43: the session-context block for bare-greeting sends, built
+     *  from the REAL thread — the opening request, the previous real
+     *  user message, the last assistant reply. Null when the thread is
+     *  too young to anchor (a fresh chat greeting must stay a normal
+     *  greeting) or the current send is the only user turn. {@code
+     *  skipText} excludes a trailing user row that IS this send (the
+     *  retry path replays after the echo already painted the row).
+     *  Never throws. */
+    static String threadContextBlock(String sid, String skipText) {
+        try {
+            if (sid == null) return null;
+            final Tx t;
+            synchronized (LOCK) { t = cur; }
+            if (t == null || !sid.equals(t.sid)) return null;
+            return threadContextBlockTx(t, skipText);
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    /** The pure core of the greeting guard — a scan over one transcript
+     *  (package-private so the JVM suite pins it without hub state). */
+    static String threadContextBlockTx(Tx t, String skipText) {
+        try {
+            if (t == null) return null;
+            String firstUser = null, lastUser = null, lastAssistant = null;
+            int turns = 0;
+            String skip = skipText == null ? "" : skipText.trim();
+            synchronized (LOCK) {
+                for (Row r : t.rows) {
+                    if (r == null || r.text.length() == 0) continue;
+                    if (r.kind == K_USER) {
+                        String shown = r.text.toString();
+                        if (skip.isEmpty() || !shown.trim().equals(skip)) {
+                            if (firstUser == null) firstUser = shown;
+                            lastUser = shown;
+                        }
+                        turns++;
+                    } else if (r.kind == K_ASSISTANT) {
+                        lastAssistant = r.text.toString();
+                        turns++;
+                    }
+                }
+            }
+            if (turns < 6 || firstUser == null) return null;
+            return GreetGuard.recapBlock(turns, firstUser, lastUser,
+                    lastAssistant);
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
     /** Fire-and-track the same text again (self-heal / stream-flake retry).
      *  P31: the caller's run claim is still held — retries never re-claim. */
     private static void sendText(final String sid, final String q) {
@@ -2240,6 +2428,10 @@ public final class RunHub implements ServerService.EventListener {
                 String wire = TerseMode.wrap(q, tp, told);
                 final String recap = contextRepair(sid);   // P39: ride here too
                 if (recap != null) wire = recap + "\n\n" + wire;
+                else if (GreetGuard.isBareGreeting(q)) {   // P43: same guard
+                    String greet = threadContextBlock(sid, q);
+                    if (greet != null) wire = greet + "\n\n" + wire;
+                }
                 List<String> bodies = buildBodies(
                         wire,
                         Models.selected(appCtx), agent);
@@ -2807,7 +2999,23 @@ public final class RunHub implements ServerService.EventListener {
                     if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
                     applyMessageInfo(tx0, info, false, false);
                 }
-                int from = Math.max(0, arr.size() - 80);
+                int from = Math.max(0, arr.size() - REPLAY_RENDER);
+                // P43: when the render cap actually bites, say so once —
+                // "the tools keep going away" must never be silent again.
+                // Only on a fresh bind (rows empty) so the note lands at
+                // the top of the painted transcript, never mid-history.
+                if (from > 0) {
+                    final int hidden = from;
+                    main(() -> {
+                        synchronized (LOCK) {
+                            if (!cur.rows.isEmpty()) return;
+                        }
+                        sys("… " + hidden + " earlier messages stay out of "
+                                + "view in this very long chat (render cap) — "
+                                + "the thread itself is whole, the model and "
+                                + "the ledger still hold all of it");
+                    });
+                }
                 for (int i = from; i < arr.size(); i++) {
                     if (!id.equals(sessionId)) return;  // switched mid-replay
                     Map<String, Object> item = Json.obj(arr.get(i));
@@ -2887,7 +3095,23 @@ public final class RunHub implements ServerService.EventListener {
                     if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
                     applyMessageInfo(tx0, info, false, false);
                 }
-                int from = Math.max(0, arr.size() - 80);
+                int from = Math.max(0, arr.size() - REPLAY_RENDER);
+                // P43: when the render cap actually bites, say so once —
+                // "the tools keep going away" must never be silent again.
+                // Only on a fresh bind (rows empty) so the note lands at
+                // the top of the painted transcript, never mid-history.
+                if (from > 0) {
+                    final int hidden = from;
+                    main(() -> {
+                        synchronized (LOCK) {
+                            if (!cur.rows.isEmpty()) return;
+                        }
+                        sys("… " + hidden + " earlier messages stay out of "
+                                + "view in this very long chat (render cap) — "
+                                + "the thread itself is whole, the model and "
+                                + "the ledger still hold all of it");
+                    });
+                }
                 for (int i = from; i < arr.size(); i++) {
                     if (!id.equals(sessionId)) return;  // switched mid-replay
                     Map<String, Object> item = Json.obj(arr.get(i));
@@ -3284,6 +3508,12 @@ public final class RunHub implements ServerService.EventListener {
             String text;
             if (deleted) {
                 text = "  (deleted)";
+            } else if (f.isDirectory()) {
+                // P43: a directory "edit" is a folder touch (mkdir / a
+                // clone landing) — the old path tried to OPEN it and the
+                // live card printed the raw "open failed: EISDIR (Is a
+                // directory)" the field screenshotted.
+                text = "  (folder — no file to preview)";
             } else {
                 try {
                     if (flen > 2_000_000) {
@@ -3317,7 +3547,14 @@ public final class RunHub implements ServerService.EventListener {
                         text = EditPulse.peek(content, focus, EditPulse.PEEK_LINES);
                     }
                 } catch (Exception e2) {
-                    text = "  (can't peek: " + e2.getMessage() + ")";
+                    // P43: a folder that appeared mid-flight (TOCTOU) must
+                    // not print the raw exception either.
+                    if (e2.getMessage() != null
+                            && e2.getMessage().contains("EISDIR")) {
+                        text = "  (folder — no file to preview)";
+                    } else {
+                        text = "  (can't peek: " + e2.getMessage() + ")";
+                    }
                 }
             }
             final String t = text;

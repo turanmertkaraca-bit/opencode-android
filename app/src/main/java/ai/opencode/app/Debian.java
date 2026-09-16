@@ -456,8 +456,16 @@ public final class Debian {
               + "Acquire::Retries \"3\";\n"
               + "Dpkg::Options { \"--force-confnew\"; };\n");
         // git safe.directory for the bound project paths (different uid)
+        // P43: resilience — big clones through the proxy can drop
+        // mid-transfer; these two lines make git give up early on a dead
+        // link and retry, instead of hanging forever (the agent then
+        // resumes with git fetch per the env note instead of re-cloning).
         writeText(new File(rootfs, "root/.gitconfig"),
-                "[safe]\n\tdirectory = *\n");
+                "[safe]\n\tdirectory = *\n"
+              + "[http]\n"
+              + "\tlowSpeedLimit = 1000\n"
+              + "\tlowSpeedTime = 30\n"
+              + "\tpostBuffer = 524288000\n");
         new File(rootfs, "root/project").mkdirs();
         new File(rootfs, "tmp").mkdirs();
     }

@@ -30,8 +30,13 @@ public final class NoteStrip {
      *  AmnesiaGuard.recapBlock → "Context repair". */
     static final String[] SIGNATURES = {
             "Environment:", "App capability", "User preference updated",
-            "Context repair"
+            "Context repair", "Session context", "Cache beat"
     };
+
+    /** P43: the cache-beat signature renders as a one-line label instead
+     *  of vanishing — the user must SEE that a keepalive fired (it is
+     *  their money the beat spends), without the raw reminder block. */
+    static final String BEAT_SIG = "Cache beat";
 
     static final String OPEN = "<system-reminder>";
     static final String CLOSE = "</system-reminder>";
@@ -67,20 +72,40 @@ public final class NoteStrip {
     public static String display(String wire) {
         if (wire == null || wire.isEmpty()) return wire;
         String t = wire;
+        boolean beat = false;
         while (true) {
             // leading whitespace before a block is part of the seam
             int i = 0;
             while (i < t.length() && Character.isWhitespace(t.charAt(i))) i++;
-            if (i >= t.length()) return "";          // nothing but notes
+            if (i >= t.length()) { t = ""; break; }  // nothing but notes
             if (!appNote(t, i)) {
                 t = t.substring(i);                  // trim the seam only
                 break;
             }
             int close = indexOfClose(t, i + OPEN.length());
             if (close < 0) break;                    // unterminated → keep
+            // P43: a beat block never disappears silently — it paints
+            // as its one-line label (and rides ahead of any real text).
+            String sig = signatureAt(t, i + OPEN.length());
+            if (BEAT_SIG.equals(sig)) beat = true;
             t = t.substring(close + CLOSE.length());
         }
+        if (beat) {
+            String label = CacheBeat.rowLabel();
+            return t.length() == 0 ? label : label + "\n\n" + t;
+        }
         return t;
+    }
+
+    /** Which app signature opens at {@code p} (just past the OPEN tag,
+     *  optional newline consumed by the caller's rules), or null. */
+    static String signatureAt(CharSequence s, int p) {
+        if (s == null) return null;
+        if (p < s.length() && s.charAt(p) == '\n') p++;
+        for (String sig : SIGNATURES) {
+            if (matchesAt(s, p, sig)) return sig;
+        }
+        return null;
     }
 
     /** The closing tag from offset {@code from}, or -1. */

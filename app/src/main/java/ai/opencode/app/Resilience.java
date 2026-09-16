@@ -246,6 +246,28 @@ public final class Resilience {
         return v != null ? v.replace(".0k", "k").replace(".0M", "M") : null;
     }
 
+    /**
+     * P43 — the PILL's compact meter: "48k · 24%". The full
+     * {@link #contextMeter} ("48k / 200k · 24%") still feeds the Σ
+     * popover, but on the pill the window half was the first thing
+     * middle-ellipsize ate on narrow screens, leaving "Σ 211k …0.3897" —
+     * the tail of the cost, which reads exactly like a fraction and sent
+     * the field hunting for a bug that wasn't there. The pill now leads
+     * with depth and percent (the two numbers that matter at a glance);
+     * cost follows; the full form lives one tap away.
+     * Pure; formats:
+     *   48000 tok + 200000 limit → "48k · 24%"
+     *   limit <= 0 (unknown)     → "48k"
+     *   lastTurnTok <= 0         → ""
+     */
+    public static String pillMeter(long lastTurnTok, long limit) {
+        if (lastTurnTok <= 0) return "";
+        String depth = compact(fmtTok(lastTurnTok));
+        if (limit <= 0) return depth;
+        int pct = pctFloor(lastTurnTok, limit);
+        return depth + " · " + (pct >= 100 ? "99%+" : pct + "%");
+    }
+
     /** Context-health verdict for the spend popover. Thresholds tuned to
      *  the P18 field report (86k/turn context → runaway cumulative cost):
      *  the model re-reads the WHOLE conversation every turn, so a heavy

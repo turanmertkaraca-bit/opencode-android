@@ -225,6 +225,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         ka.addView(switchRow("Auto-hibernate (save RAM)", "hibernate",
                 "app in the background + no runs + nothing waiting \u2192 the sandbox stops itself; reopening restores your chat from disk"));
         ka.addView(divider());
+        // P43: cache beats — the idle keepalive that keeps the provider's
+        // prompt cache warm so the next real message reads at the cached
+        // rate instead of re-billing the whole chat cold.
+        ka.addView(switchRow("Cache beats", "cache_beat",
+                "after 4 quiet minutes a tiny automatic ping keeps the prompt cache warm — the next message reads at the discounted rate (max 6 per quiet stretch)"));
+        ka.addView(divider());
         ka.addView(rowLink("Hibernate after", hibernateLabel(),
                 "\u25F4", v -> pickHibernate()));
         ka.addView(divider());
