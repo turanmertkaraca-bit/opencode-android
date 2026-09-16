@@ -271,13 +271,22 @@ public final class Sandbox {
         // P42: the rootfs ships a full Mozilla CA bundle at the path
         // musl/gnu tools compiled for Linux expect — point every wrapper
         // at it so apk/curl/git/pip inside the alpine layer get TLS too.
+        // P42-check: the app-merged bundle (system store ∪ Mozilla) wins
+        // when present — pointing at the rootfs-only set here silently
+        // undid Binaries.applyEnv's export for vendor-ROM union certs.
+        String merged = CaBundle.bundleFile(c).getAbsolutePath();
         return "#!/system/bin/sh\n"
              + "AL=" + alpineDir(c).getAbsolutePath() + "\n"
+             + "MB=" + merged + "\n"
              + "LB=\"$AL/lib/ld-musl-aarch64.so.1\"\n"
              + "LP=\"$AL/lib:$AL/usr/lib\"\n"
              + "[ -r \"$AL/.proxy\" ] && . \"$AL/.proxy\"\n"
-             + "if [ -r \"$AL/etc/ssl/certs/ca-certificates.crt\" ]; then\n"
+             + "if [ -r \"$MB\" ]; then\n"
+             + "  export SSL_CERT_FILE=\"$MB\"\n"
+             + "elif [ -r \"$AL/etc/ssl/certs/ca-certificates.crt\" ]; then\n"
              + "  export SSL_CERT_FILE=\"$AL/etc/ssl/certs/ca-certificates.crt\"\n"
+             + "fi\n"
+             + "if [ -n \"$SSL_CERT_FILE\" ]; then\n"
              + "  export CURL_CA_BUNDLE=\"$SSL_CERT_FILE\" GIT_SSL_CAINFO=\"$SSL_CERT_FILE\"\n"
              + "  export REQUESTS_CA_BUNDLE=\"$SSL_CERT_FILE\" PIP_CERT=\"$SSL_CERT_FILE\"\n"
              + "fi\n"

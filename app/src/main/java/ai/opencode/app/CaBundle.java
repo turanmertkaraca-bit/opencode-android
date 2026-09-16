@@ -92,19 +92,34 @@ public final class CaBundle {
             String merged = merge(pems);
             if (merged.isEmpty()) return null;
 
-            // short-circuit: unchanged source count + non-empty bundle
+            // short-circuit: unchanged source count AND unchanged merged
+            // length — the length catches a refreshed rootfs shipping a
+            // different Mozilla set under the same source count, which a
+            // count-only marker would let go stale forever. (P42-check)
+            String expect = srcCount + ":" + merged.length();
             File marker = new File(ssl, ".bundle-n");
             String cur = out.isFile() && out.length() > 0 ? readText(marker) : null;
-            if (cur != null && cur.trim().equals(String.valueOf(srcCount))
+            if (cur != null && cur.trim().equals(expect)
                     && out.isFile() && out.length() > 0) {
                 return out.getAbsolutePath();
             }
 
+            // P42-check: write to .part and rename — a truncate-in-place
+            // write killed mid-stream leaves a CORRUPT trust store (worse
+            // than none: every TLS call fails with a bundle present). The
+            // marker lands only after the rename, so a torn write is
+            // always rebuilt on the next spawn.
             ssl.mkdirs();
-            try (FileOutputStream o = new FileOutputStream(out)) {
+            File part = new File(ssl, out.getName() + ".part");
+            try (FileOutputStream o = new FileOutputStream(part)) {
                 o.write(merged.getBytes(StandardCharsets.US_ASCII));
             }
-            writeText(marker, String.valueOf(srcCount));
+            if (out.exists()) out.delete();
+            if (!part.renameTo(out)) {
+                part.delete();
+                return null;
+            }
+            writeText(marker, expect);
             return out.getAbsolutePath();
         } catch (Exception e) {
             return null;

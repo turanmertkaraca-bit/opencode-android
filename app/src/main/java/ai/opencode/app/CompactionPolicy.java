@@ -86,6 +86,20 @@ public final class CompactionPolicy {
     }
 
     /**
+     * The window the compaction floor should assume. P42-check: the
+     * user's window cap (ContextPolicy) shrinks what the server actually
+     * enforces — a floor pinned to the model's full window on a capped
+     * model clamps to CAP and makes every compaction a no-op (the exact
+     * hazard the floor exists to prevent). The smaller of the two wins;
+     * either alone stands; both unknown = 0 (do not write). Pure.
+     */
+    public static long effectiveWindow(long modelWindow, long userCap) {
+        boolean m = modelWindow > 0, c = userCap > 0;
+        if (m && c) return Math.min(modelWindow, userCap);
+        return m ? modelWindow : (c ? userCap : 0);
+    }
+
+    /**
      * Merge the floor into an opencode.json root map IN PLACE. The rule
      * is hands-off by construction: an existing compaction block that
      * already carries a preserve_recent_tokens key — ours, the user's,

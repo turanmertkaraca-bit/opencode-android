@@ -117,17 +117,26 @@ public final class EnvNote {
                 s.append("on PATH via wrappers.\n");
             }
         }
-        // P42 TLS truth — one paragraph for every mode.
+        // P42 TLS truth — one paragraph for every mode. P42-check: the
+        // verify promise is scoped to INSTALLED/package tools — the bare
+        // native layer ships neither curl nor git, and the note must not
+        // promise what is not on PATH.
         s.append("TLS: a CA bundle is provisioned and exported for you — ");
         s.append("SSL_CERT_FILE, CURL_CA_BUNDLE, GIT_SSL_CAINFO, ");
         s.append("REQUESTS_CA_BUNDLE and PIP_CERT all point at it, so ");
-        s.append("curl, git, pip and friends verify https out of the box. ");
-        s.append("You never need to install or repair certificates; ");
-        s.append("apt-get install ca-certificates is NOT a step here.\n");
+        s.append("any installed curl, git, pip and friends verify https ");
+        s.append("out of the box. You never need to install or repair ");
+        s.append("certificates; apt-get install ca-certificates is NOT a ");
+        s.append("step here.\n");
         // P42 network truth — raw DNS is dead by design; name the remedy.
-        s.append("Network: there is no /etc/resolv.conf and raw DNS ");
-        s.append("(ping, nslookup, host, name-resolving wget) cannot ");
-        s.append("work by design — every lookup rides the in-app proxy. ");
+        // P42-check: honest about the decoy — a resolv.conf EXISTS (the
+        // alpine rootfs ships one, the Debian guest writes one) but it
+        // points at 127.0.0.1 where nothing listens; an agent that cats
+        // it must not conclude this note lies.
+        s.append("Network: /etc/resolv.conf, where present, points at ");
+        s.append("127.0.0.1 — nothing listens there, so raw DNS (ping, ");
+        s.append("nslookup, host, name-resolving wget) cannot work by ");
+        s.append("design; every lookup rides the in-app proxy. ");
         s.append("When http_proxy/https_proxy are set in your env, https ");
         s.append("works through them (NO_PROXY already exempts the local ");
         s.append("server). If they are unset and a task needs https, ");

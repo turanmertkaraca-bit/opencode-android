@@ -158,10 +158,15 @@ public final class Resilience {
 
     // ------------------------------------------------------------- formats
 
-    /** ⇅ token footer formatting, shared by rows and the pill. */
+    /** ⇅ token footer formatting, shared by rows and the pill.
+     *  P42-check: the %.0fk branch rounds 999.999k up to "1000k" —
+     *  the 995k–1M step hands those to a 2-decimal M format instead;
+     *  the ≥1M shape is untouched (P18's pins hold). */
     public static String fmtTok(long tok) {
         return tok >= 1_000_000
                 ? String.format(java.util.Locale.US, "%.1fM", tok / 1_000_000.0)
+                : tok >= 995_000
+                ? String.format(java.util.Locale.US, "%.2fM", tok / 1_000_000.0)
                 : tok >= 100_000
                 ? String.format(java.util.Locale.US, "%.0fk", tok / 1000.0)
                 : tok >= 1000
@@ -216,7 +221,8 @@ public final class Resilience {
      *    48000 tok + 200000 limit → "48k / 200k · 24%"
      *    limit <= 0 (unknown)     → "48k"          (depth only, honest)
      *    lastTurnTok <= 0         → ""            (nothing measured yet)
-     *  Percent rounds to nearest whole; >100% clamps to 99+% wording. */
+     *  Percent floors (P42's one-rule; a floored warning can never lag
+     *  the pill); >100% clamps to 99+% wording. */
     public static String contextMeter(long lastTurnTok, long limit) {
         if (lastTurnTok <= 0) return "";
         // compact form: "48.0k" reads worse than "48k" in a ratio — strip

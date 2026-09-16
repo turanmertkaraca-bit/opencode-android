@@ -179,4 +179,38 @@ public class P42Test {
         assertEquals(0, CompactionPolicy.mergeOrMovePreserve(root2, 64_000, 0));
         assertEquals(v2, ((Number) comp2.get("preserve_recent_tokens")).longValue());
     }
+
+    // --------------------------------- 12. P42-check final-pass pins
+
+    @Test public void effectiveWindow_theCapShrinksWhatTheFloorAssumes() {
+        // the check-pass hazard: the slider caps a 200k model at 64k but
+        // the floor still pinned from the full window → preserve_recent
+        // clamps to 60k on a 64k enforced window → every compaction a
+        // no-op. The SMALLER of model window and user cap must win.
+        assertEquals(64_000, CompactionPolicy.effectiveWindow(200_000, 64_000));
+        assertEquals(128_000, CompactionPolicy.effectiveWindow(200_000, 128_000));
+        assertEquals(200_000, CompactionPolicy.effectiveWindow(200_000, 0));
+        assertEquals(64_000, CompactionPolicy.effectiveWindow(64_000, 200_000));
+        // unknown model window with a cap → the cap alone is the truth
+        assertEquals(128_000, CompactionPolicy.effectiveWindow(0, 128_000));
+        // both unknown → 0 (do not write)
+        assertEquals(0, CompactionPolicy.effectiveWindow(0, 0));
+        // and the produced window always yields a live floor or none
+        long win = CompactionPolicy.effectiveWindow(200_000, 64_000);
+        long floor = CompactionPolicy.preserveRecentTokensFor(win);
+        assertTrue(floor > 0 && floor < win);
+    }
+
+    @Test public void fmtTok_neverRoundsUpTo1000k() {
+        // the check-pass find: %.0fk rounded 999.999k up to "1000k"
+        assertEquals("1.00M", Resilience.fmtTok(999_999));
+        assertEquals("1.00M", Resilience.fmtTok(996_000));
+        // below the step the old shapes hold exactly
+        assertEquals("994k", Resilience.fmtTok(994_000));
+        assertEquals("990k", Resilience.fmtTok(990_000));
+        assertEquals("48.0k", Resilience.fmtTok(48_000));
+        assertEquals("48.7k", Resilience.fmtTok(48_700));
+        assertEquals("999", Resilience.fmtTok(999));
+        assertEquals("2.0M", Resilience.fmtTok(2_000_000));
+    }
 }

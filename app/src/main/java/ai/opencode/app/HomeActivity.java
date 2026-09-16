@@ -150,6 +150,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
 
         TextView gear = new TextView(this);
         gear.setText("⚙");
+        gear.setContentDescription("Settings");
         gear.setTextSize(20);
         gear.setTextColor(Theme.ACCENT_LT);
         gear.setGravity(Gravity.CENTER);
