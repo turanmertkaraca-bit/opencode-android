@@ -318,6 +318,26 @@ public class ServerService extends Service {
         // chat instead of POSTing into a session this server never had.
         RunHub.onProjectRoot(cwd.getAbsolutePath());
 
+        // P41: pin the post-compaction memory floor BEFORE the server
+        // reads its config. When the sandbox summarizes a full context,
+        // compaction.preserve_recent_tokens decides how many tokens of
+        // real recent turns the model keeps verbatim — the server's own
+        // default (2k–15k) is how long chats lost their thread after
+        // every silent compaction. Write-if-absent from the bundled
+        // snapshot's window for the picked model (pure rule in
+        // CompactionPolicy); a user's own compaction block always wins
+        // and a failure is one diagnostics line, never a boot blocker.
+        try {
+            String[] sel = Models.selected(this);
+            long lim = sel == null ? 0
+                    : Models.bundledLimit(this, sel[0], sel[1]);
+            if (AuthStore.ensureCompactionPreserve(this, lim))
+                appendDiag("config", "compaction preserve_recent_tokens pinned ("
+                        + lim + " tok window)");
+        } catch (Throwable t) {
+            appendDiag("config", "compaction policy not written: " + t);
+        }
+
         // P19: pick a bindable port BEFORE spawning. Verified on the rig:
         // opencode maps --port 0 to its own default (4096), so a true
         // ephemeral spawn is impossible — the app asks the kernel instead.

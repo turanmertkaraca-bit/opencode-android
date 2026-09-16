@@ -53,6 +53,13 @@ public final class Models {
         /** P25: context window (tokens) from the models.dev `limit.context`
          *  shape — drives the chat's context-depth meter. 0 = unknown. */
         public long ctx;
+        /** P41: the window the RUNNING SERVER reported for this model
+         *  (its own /config/providers entry — the number its overflow
+         *  logic actually enforces). The catalog's claim can disagree
+         *  wildly (P27 saw server 200k vs catalog 1M); compaction fires
+         *  on the server's number, so the meter must prefer it. 0 when
+         *  the server never listed the model. */
+        public long ctxServer;
         /** P15 RESTORES the P12 flag the P14 rework dropped — the exact
          *  regression the user kept reporting ("the working model picker is
          *  in the first p12"). true when the RUNNING SERVER listed this
@@ -258,7 +265,10 @@ public final class Models {
 
     /** P27: let the models.dev catalog correct an already-merged model's
      *  context window. Pure rule, JVM-pinned: catalog limit (>0) always
-     *  wins; otherwise the first-seen value stands. */
+     *  wins; otherwise the first-seen value stands. P41: the catalog
+     *  only corrects the DISPLAY catalog value — the server's own
+     *  ctxServer stays untouched, because the sandbox enforces ITS
+     *  number, not the catalog's. */
     static void upgradeCtx(Prov prov, String mid, Map<String, Object> mm) {
         if (prov == null || mid == null || mm == null) return;
         long cat = parseCtx(mm);
@@ -290,6 +300,7 @@ public final class Models {
             }
         } catch (Exception ignored) {}
         mdl.ctx = parseCtx(mm);             // P25: context window
+        if (live) mdl.ctxServer = mdl.ctx;  // P41: the server's own claim
         prov.models.add(mdl);
     }
 
@@ -325,6 +336,39 @@ public final class Models {
         return 0;
     }
 
+    /** P41: the window the RUNNING SERVER reported for this model, or 0.
+     *  This is the number the sandbox's overflow/compaction logic
+     *  enforces; the meter's denominator must be the same number to be
+     *  honest about how close a compaction is. Package-private so the
+     *  JVM suite pins the lookup. */
+    static long serverLimitFor(List<Prov> provs, String provider, String id) {
+        if (provs == null || provider == null || id == null) return 0;
+        for (Prov p : provs) {
+            if (!provider.equals(p.id)) continue;
+            for (Mdl m : p.models) {
+                if (id.equals(m.id)) return m.ctxServer;
+            }
+        }
+        return 0;
+    }
+
+    /** P41: the CATALOG window (display/discovery truth), or 0 — the
+     *  counterpart of {@link #serverLimitFor} for the disagreement note. */
+    static long catalogLimitFor(List<Prov> provs, String provider, String id) {
+        return contextLimitFor(provs, provider, id);
+    }
+
+    /** P41: the window that decides compaction for the picked model —
+     *  the server's own claim first (that is what the sandbox enforces),
+     *  the catalog's when the server never listed the model (catalog-
+     *  only picks still work through custom providers), 0 when neither
+     *  source knows. Pure; the suite pins the precedence. */
+    static long overflowLimitFor(List<Prov> provs, String provider, String id) {
+        long srv = serverLimitFor(provs, provider, id);
+        if (srv > 0) return srv;
+        return catalogLimitFor(provs, provider, id);
+    }
+
     // ------------------------------------------------- P27: sticky window
 
     private static final String KEY_CTXWIN = "ctxwin";
@@ -332,14 +376,16 @@ public final class Models {
     static final int CTXWIN_CAP = 64;
 
     /** The context window for the Σ pill, DETERMINISTIC for a session:
-     *  the live fetch decides; when this fetch knows nothing (server blip,
-     *  catalog offline) the last KNOWN window for this exact model stands
-     *  in — the denominator can flicker between sources, never within a
-     *  session once a value is on record. Known values are stashed for the
-     *  next cold start. Never network. */
+     *  P41 — the LIVE SERVER's number decides (the exact value the
+     *  sandbox's overflow/compaction logic enforces — the field saw the
+     *  meter reassure "16% of 1.3M" while the server compacted at its
+     *  own much smaller line); the catalog stands in only when the
+     *  server never listed the model, and the last KNOWN value stands
+     *  in for a server blip. Known values are stashed for the next cold
+     *  start. Never network. */
     public static long resolveLimit(Context c, List<Prov> provs,
                                     String provider, String id) {
-        long v = contextLimitFor(provs, provider, id);
+        long v = overflowLimitFor(provs, provider, id);
         if (v > 0) {
             stashLimit(c, provider, id, v);
             return v;
@@ -390,6 +436,49 @@ public final class Models {
             String v = c.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                     .getString(KEY_CTXWIN + ":" + provider + "/" + id, null);
             return v == null ? 0 : Long.parseLong(v);
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    // ---------------------------------------------- P41 bundled snapshot
+
+    /** The bundled models.dev snapshot, parsed once per process. */
+    private static volatile Map<String, Object> bundledRoot;
+    private static final Object BUNDLED_LOCK = new Object();
+
+    /**
+     * P41: the context window for (provider, id) straight from the
+     * BUNDLED models.dev snapshot in the APK — available before the
+     * server ever boots, so the compaction floor can be pinned in
+     * opencode.json on the very first start. The live server's number
+     * still wins for the METER once a fetch lands; this offline lookup
+     * only seeds the boot-time write, and the safety analysis in
+     * {@link CompactionPolicy#preserveRecentTokensFor} holds whenever
+     * the catalog overstates the real window. Never network, never
+     * throws; 0 when anything is missing. */
+    public static long bundledLimit(Context c, String provider, String id) {
+        if (c == null || provider == null || id == null) return 0;
+        try {
+            Map<String, Object> root = bundledRoot;
+            if (root == null) {
+                synchronized (BUNDLED_LOCK) {
+                    if (bundledRoot == null) {
+                        String raw = readAsset(c, "models-dev.json");
+                        Object parsed = raw == null ? null : Json.parse(raw);
+                        bundledRoot = Json.obj(parsed);
+                    }
+                    root = bundledRoot;
+                }
+            }
+            if (root == null) return 0;
+            Map<String, Object> p = Json.obj(root.get(provider));
+            if (p == null) return 0;
+            Map<String, Object> models = Json.obj(p.get("models"));
+            if (models == null) return 0;
+            Map<String, Object> m = Json.obj(models.get(id));
+            if (m == null) return 0;
+            return parseCtx(m);
         } catch (Exception e) {
             return 0;
         }
