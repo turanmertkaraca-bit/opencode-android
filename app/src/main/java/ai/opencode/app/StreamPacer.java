@@ -24,6 +24,24 @@ package ai.opencode.app;
  *     the stream then goes silent.
  * Pure: feed (now, targetLen), read back the new shown count. No
  * Android imports — the JVM suite drives the whole contract.
+ *
+ * P48 — two PROFILES, because the field came back with the other
+ * complaint: the glide was real but VIOLENT ("tokens come and go so
+ * fast it glitches the ui, it goes up and down"). The lag ceiling
+ * allows unbounded drain rates (a 4 kB burst ⇒ ~1800 chars/s), and
+ * fast providers arrive faster still. So the pacer now carries a hard
+ * MAX_RATE per profile:
+ *   - ANSWER  (forAnswer): the P43 behavior with a 900 chars/s cap —
+ *     still clearly faster than reading, never a strobe.
+ *   - THINKING (forThinking): the collapsed thought card is a window,
+ *     not a transcript — it reveals at a calm ≤170 chars/s (faster
+ *     than reading speed, slow enough to follow), with a long lag
+ *     ceiling instead of the aggressive 2.2 s drain. The backlog can
+ *     grow freely while the model thinks; when the answer row arrives
+ *     the ticker snaps the thought row settled in one paint — the
+ *     thinking text never races the answer.
+ * The no-arg constructor keeps the exact legacy (P43) behavior — the
+ * P43 pins run against it unchanged.
  */
 public final class StreamPacer {
 
@@ -40,8 +58,60 @@ public final class StreamPacer {
      *  a glide, not a flash. */
     public static final long MAX_LAG_MS = 2200;
 
+    /** P48: hard ceiling for the ANSWER profile. The lag ceiling alone
+     *  allows arbitrary drain rates; this keeps the reveal human. 0 =
+     *  uncapped (the legacy constructor). */
+    public static final double ANSWER_MAX_RATE = 900.0;
+
+    /** P48: the THINKING profile — a calm crawl, not a strobe. At 24 ms
+     *  ticks that is ≤5 chars/tick; faster than reading speed (~20
+     *  chars/s), so a long thought streams like a live feed without
+     *  shaking the list. */
+    public static final double THINK_MAX_RATE = 170.0;
+    public static final double THINK_MIN_RATE = 60.0;
+    /** Thinking has no deadline — the answer's arrival settles the row.
+     *  The ceiling only exists to bound the required-drain term. */
+    public static final long THINK_LAG_MS = 30_000;
+
     /** Arrival-rate EWMA weight for the fresh sample. */
     static final double ALPHA = 0.35;
+
+    private final double minRate;
+    private final double catchup;
+    private final long maxLagMs;
+    private final double maxRate;
+
+    /** P48: which profile this pacer serves (the ChatActivity cache
+     *  re-creates a pacer if a row's kind flips). */
+    public final boolean thinkingRow;
+
+    /** Legacy P43 profile — uncapped drain, the exact pinned behavior. */
+    public StreamPacer() {
+        this(MIN_RATE, CATCHUP, MAX_LAG_MS, 0, false);
+    }
+
+    private StreamPacer(double minRate, double catchup, long maxLagMs,
+                        double maxRate, boolean thinkingRow) {
+        this.minRate = minRate;
+        this.catchup = catchup;
+        this.maxLagMs = maxLagMs;
+        this.maxRate = maxRate;
+        this.thinkingRow = thinkingRow;
+    }
+
+    /** P48: the reply-glide profile — P43 pacing with a 900 chars/s
+     *  hard cap so a fast provider can never strobe the screen. */
+    public static StreamPacer forAnswer() {
+        return new StreamPacer(MIN_RATE, CATCHUP, MAX_LAG_MS,
+                ANSWER_MAX_RATE, false);
+    }
+
+    /** P48: the thought-window profile — ≤170 chars/s, gentle floor,
+     *  no aggressive drain. The answer's arrival snaps the row. */
+    public static StreamPacer forThinking() {
+        return new StreamPacer(THINK_MIN_RATE, 1.0, THINK_LAG_MS,
+                THINK_MAX_RATE, true);
+    }
 
     private long lastNow = -1;
     private long lastTarget = -1;
@@ -101,8 +171,11 @@ public final class StreamPacer {
         //   • the drain rate that empties the backlog inside the lag
         //     ceiling (a huge burst becomes a fast-but-readable glide —
         //     4 kB over ~2 s, never a one-frame flash).
-        double required = allowed * 1000.0 / MAX_LAG_MS;
-        double eff = Math.max(MIN_RATE, Math.max(rate * CATCHUP, required));
+        // P48: then capped by the profile's MAX_RATE — the drain term
+        // may DEMAND speed, but the profile decides how fast is human.
+        double required = allowed * 1000.0 / maxLagMs;
+        double eff = Math.max(minRate, Math.max(rate * catchup, required));
+        if (maxRate > 0 && eff > maxRate) eff = maxRate;
 
         long step = (long) Math.ceil(eff * dt / 1000.0);
         if (step < 1) step = 1;
