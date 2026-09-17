@@ -2373,17 +2373,24 @@ public class ChatActivity extends Activity
         int len = r.text.length();
         if (r.shown > len) r.shown = len;
 
+        // P47: deltas grow the row at token rate (message.part.delta).
+        // Once the row's view exists, hand every further growth to the
+        // smoother and let the ticker paint it IN PLACE — a full view
+        // rebuild per token is the jank path; the P20 collapsed-thought
+        // fast path proved the pattern, this generalizes it to every
+        // streamed row (motion on or off — the ticker is a plain text
+        // painter, not an animation).
+        if ((r.kind == K_ASSISTANT || r.kind == K_REASON)
+                && r.shown < len
+                && bodyByKey.containsKey(r.key)
+                && viewByKey.containsKey(r.key)) {
+            startSmoother();
+            autoscroll();
+            return;
+        }
+
         if ((r.kind == K_ASSISTANT || r.kind == K_REASON)
                 && r.shown < len && isStreamingTail(r)) {
-            // P20: collapsed thinking card whose live ticker is already on
-            // screen — skip the rebuild, the ticker paints the delta.
-            if (r.kind == K_REASON && !r.open && r.livePreview
-                    && bodyByKey.containsKey(r.key)
-                    && viewByKey.containsKey(r.key)) {
-                startSmoother();
-                autoscroll();
-                return;
-            }
             // hand the row to the smoother: first paint shows the tail view
             View nv = buildRowView(r);
             if (idx < list.getChildCount()) {

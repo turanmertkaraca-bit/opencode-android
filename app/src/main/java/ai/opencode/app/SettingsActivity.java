@@ -44,7 +44,7 @@ import java.util.Locale;
 public class SettingsActivity extends Activity implements ServerService.Evt {
 
     /** P46: single version source for the About row — JVM tests pin it. */
-    static final String VERSION_TAG = "0.46.0-p46";
+    static final String VERSION_TAG = "0.47.0-p47";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout root;
@@ -285,7 +285,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", VERSION_TAG + " · real-time stream governor, git clone fixed on shared storage, new projects in private storage, long-session caps", "◆", v -> {}));
+        ab.addView(rowLink("Version", VERSION_TAG + " · true token streaming (message.part.delta), FUSE-repo git tuning, snapshot governor kept as backstop", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {

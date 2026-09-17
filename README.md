@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.46.0 — P46)
+## Install (v0.47.0 — P47)
 
-1. Grab `opencode-p46-v0.46.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p47-v0.47.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
    Note: v0.38.0 was built and field-tested but never published here —
@@ -57,6 +57,52 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.47.0 (P47 — the live token release)
+
+The field report: the reply still arrived all at once — not even a burst,
+just the finished text appearing the moment it was done — and the agent's
+git work in cloned repos kept fighting it. Both are cured at the source
+this time, with a timestamped probe against the real server as the
+witness instead of a guess.
+
+**1. True token-by-token streaming.** The probe (a mock provider that
+emits one token every 30 ms into a real opencode v1.18.25 server, with
+every /event frame timestamped) settled what the wire actually carries:
+the big `message.part.updated` snapshots only fire at part BOUNDARIES —
+an empty part at creation, then the complete text at the end — while
+every individual token rides its own tiny `message.part.delta` frame in
+real time. The app had been consuming only the snapshots, so the screen
+saw nothing while the model spoke and the whole reply materialized at
+once. P47 consumes the deltas: they append straight onto the message row
+(keyed exactly where the snapshots land, so both streams meet in the
+same text), the snapshot governor stays as a bounded backstop, and the
+boundary snapshots still reconcile the final state. The chat also stops
+rebuilding the message view on every token — once a row's view exists,
+growth is painted in place by the existing smoother, so even long
+thinking-heavy replies glide at the model's own pace. Verified against
+the live server: deltas arrive every ~30 ms and paint as they arrive.
+
+**2. git work in cloned repos stops fighting the filesystem.** P46 made
+clone itself work on shared storage (private .git via
+`--separate-git-dir`); the leftover pain was what came AFTER: FUSE stat
+jitter makes git see phantom changes and re-hash the whole tree on every
+command. The shim now tunes every fresh FUSE-worktree repo in the same
+breath as the clone: `core.filemode=false`, `core.trustctime=false`,
+`core.checkstat=minimal`, `core.untrackedcache=false`,
+`core.fsmonitor=false`, `gc.auto=0` — all stamped into the PRIVATE git
+dir (ext4), where the repo's config actually lives. Status/add/commit
+stop re-scanning and lying about modified files; nothing changes for
+repos on plain ext4.
+
+**3. The honest bookkeeping around it.** Delta frames count as run
+output (the one-shot stream-flake retry only fires when nothing was
+rendered — it must know), they keep the run's liveness and wake lock
+fresh, and the governor's correction is documented where the old wrong
+diagnosis lived. All 503 JVM tests green (13 new P47 pins: delta wire
+shape, governor passthrough, append/create-on-demand/guards, the full
+snapshot→deltas→snapshot turn, shim tuning incl. a behavioral run
+against real git, version).
 
 ## What's in v0.46.0 (P46 — the keep-it-alive-and-honest release)
 
@@ -1178,8 +1224,12 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P39 the context-integrity release: amnesia detector, automatic context repair, honest empty-store note, the server's own log in Diagnostics | shipped |
 | P40 the amnesia cured at its source: poisoned compaction root found on the rig, repaired in the store, prevented at the compact button | shipped |
 | P41 the memory the meter couldn't see: compaction floor pinned at the source, the meter uses the server's own window, compaction warned and announced | shipped |
-| P42 the honesty release: the agent shell gets real TLS trust + a note that stops the probe loops, the meter and the money are honest in every path, a context-limit slider, the keyboard only opens on tap, and time that cannot read 20000 days | **current** |
-| Next: P42 — keys copy/reveal in the keys screen; the preset rename (name pending) | reserved |
+| P42 the honesty release: real TLS trust + honest money + context-limit slider | shipped |
+| P43 the realtime-feel release: arrival-rate pacer, thinking tail window, keyboard calm, cache beats, history caps | shipped |
+| P44 the quiet-collapse release: post-compaction anchor re-grounds the thread, window cap named, Claude face + M3 shapes | shipped |
+| P45 the act-normal release: auto-compaction off at the source, Graphite default again, Claude-Android chat layout, deck-only cold boot | shipped |
+| P46 the keep-it-alive-and-honest release: snapshot governor, git clone fixed on FUSE via private gitdir, private-first projects, long-session caps | shipped |
+| P47 the live token release: the real per-token delta stream consumed at last (true token-by-token rendering), FUSE-repo git tuning, in-place paint at token rate | **current** |
 
 ## Credits
 

@@ -143,7 +143,20 @@ public final class Shims {
                     "        [ -n \"$H\" ] || H=\"g$$\"\n" +
                     "        GD=\"$SEPGIT/$H.git\"\n" +
                     "        if [ ! -e \"$GD\" ]; then\n" +
-                    "          exec \"$REAL\" \"$@\" --separate-git-dir=\"$GD\"\n" +
+                    "          \"$REAL\" \"$@\" --separate-git-dir=\"$GD\" || exit $?\n" +
+                    "          # P47: tune the fresh repo for its FUSE worktree.\n" +
+                    "          # Shared-storage stat jitter makes git see phantom\n" +
+                    "          # changes and re-hash the whole tree on every command\n" +
+                    "          # (the field's 'agent always has issues doing stuff').\n" +
+                    "          # These live in the PRIVATE gitdir (ext4); the worktree\n" +
+                    "          # stays on FUSE. Idempotent, standard, boring.\n" +
+                    "          \"$REAL\" -C \"$DEST\" config core.filemode false 2>/dev/null || :\n" +
+                    "          \"$REAL\" -C \"$DEST\" config core.trustctime false 2>/dev/null || :\n" +
+                    "          \"$REAL\" -C \"$DEST\" config core.checkstat minimal 2>/dev/null || :\n" +
+                    "          \"$REAL\" -C \"$DEST\" config core.untrackedcache false 2>/dev/null || :\n" +
+                    "          \"$REAL\" -C \"$DEST\" config core.fsmonitor false 2>/dev/null || :\n" +
+                    "          \"$REAL\" -C \"$DEST\" config gc.auto 0 2>/dev/null || :\n" +
+                    "          exit 0\n" +
                     "        fi\n" +
                     "      fi\n" +
                     "      ;;\n" +
