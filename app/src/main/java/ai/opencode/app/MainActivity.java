@@ -146,31 +146,15 @@ public class MainActivity extends Activity implements ServerService.Evt {
         diag.setVisibility(View.GONE);
     }
 
-    /** P31: route to WHERE THE USER LEFT OFF — the last chat when a chat
-     *  screen was last paused (the hibernation promise: reopen → the same
-     *  chat, straight from disk), the deck otherwise. The chat path only
-     *  fires when the folder still exists; anything odd falls back to the
-     *  deck, never a dead end. */
+    /** P45: the deck is the ONLY cold-open destination. The P31
+     *  "resume the last chat" route is gone — the field verdict: the
+     *  app reopening straight into the last project's chat (agent,
+     *  session and all) reads as the app doing things behind the user's
+     *  back and burns money on confusion. Like the opencode TUI: the
+     *  launcher opens the picker; opening a PROJECT is the user's
+     *  explicit act. The last-project sandbox pre-warm stays (pure
+     *  infrastructure — no session, no run, no screen). */
     private void routeByLastScreen() {
-        try {
-            String[] last = Resume.parseLastScreen(getSharedPreferences(
-                    "oc", MODE_PRIVATE).getString(Resume.KEY, null));
-            if ("chat".equals(last[0]) && Projects.validDir(last[2])) {
-                // keep "last opened" honest for the deck order
-                for (Projects.P p : Projects.list(this)) {
-                    if (last[2].equals(p.path)) { Projects.touch(this, p.id); break; }
-                }
-                if (ServerService.needsSwitch(new File(last[2]))) {
-                    ServerService.setStartDir(new File(last[2]));
-                }
-                Intent i = new Intent(this, ChatActivity.class);
-                i.putExtra("project", last[1]);
-                i.putExtra("path", last[2]);
-                startActivity(i);
-                finish();
-                return;
-            }
-        } catch (Exception ignored) {}
         startActivity(new Intent(this, HomeActivity.class));
         finish();
     }

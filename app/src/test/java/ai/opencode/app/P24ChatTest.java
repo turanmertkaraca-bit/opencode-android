@@ -130,7 +130,8 @@ public class P24ChatTest {
                     1, a.attempts);
 
             // the sibling AFTER the poison row actually shows its text
-            TextView body = (TextView) ((LinearLayout) list.getChildAt(2)).getChildAt(0);
+            // (P45: child 0 is the ✦ marker, the body is child 1)
+            TextView body = (TextView) ((LinearLayout) list.getChildAt(2)).getChildAt(1);
             assertTrue("the row behind the poison must be painted",
                     body.getText().toString().contains("world"));
         }
@@ -185,7 +186,8 @@ public class P24ChatTest {
                     2, a.attempts);
 
             // the healthy sibling is untouched by all of this
-            TextView ok = (TextView) ((LinearLayout) list.getChildAt(1)).getChildAt(0);
+            // (P45: child 0 is the ✦ marker, the body is child 1)
+            TextView ok = (TextView) ((LinearLayout) list.getChildAt(1)).getChildAt(1);
             assertTrue(ok.getText().toString().contains("fine"));
         }
     }

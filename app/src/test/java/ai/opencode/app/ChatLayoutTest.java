@@ -67,14 +67,23 @@ public class ChatLayoutTest {
             android.view.ViewGroup root = (android.view.ViewGroup) composerBar.getParent();
             assertTrue("typing dots above the composer",
                     root.indexOfChild(typingSlot) < root.indexOfChild(composerBar));
-            // inside the composer: tray first, input row LAST
+            // inside the composer: the cost hint first, then the pill
+            // (composerCard) holding tray → borderless input → controls row
             android.view.ViewGroup bar = (android.view.ViewGroup) composerBar;
-            assertEquals(attachScroll, bar.getChildAt(0));
-            View inputRow = (View) input.getParent();
-            assertEquals("the input row stays the composer's last child",
-                    bar.getChildCount() - 1, bar.indexOfChild(inputRow));
-            // and the hint sits directly ABOVE the input row
-            assertEquals(costHint, bar.getChildAt(bar.indexOfChild(inputRow) - 1));
+            android.view.ViewGroup pill = (android.view.ViewGroup)
+                    a.findViewById(R.id.composerCard);
+            assertEquals(costHint, bar.getChildAt(0));
+            assertEquals(pill, bar.getChildAt(1));
+            assertEquals("the pill holds tray, input, controls row",
+                    3, pill.getChildCount());
+            assertEquals(attachScroll, pill.getChildAt(0));
+            assertEquals("the input floats borderless inside the pill",
+                    input, pill.getChildAt(1));
+            View controls = pill.getChildAt(2);
+            assertNotNull("send lives in the pill's controls row",
+                    controls.findViewById(R.id.btnSend));
+            assertNotNull("the model chip lives in the pill's controls row",
+                    controls.findViewById(R.id.chipModel));
         }
     }
 }

@@ -86,14 +86,17 @@ public final class Theme {
 
     // ---------------------------------------------------- P31 palettes ----
 
-    /** P44: the DEFAULT face of the app — the user asked for the Claude
-     *  look ("make it more claude + google like") on the chat, startup
-     *  and cold-boot surfaces. Warm paper + terracotta, Material-3
-     *  shapes. This is the palette a fresh install (or a wiped theme
-     *  pref) lands on; a device that has explicitly picked another theme
-     *  keeps its choice. (P33's graphite default rides the one-time
-     *  theme_migrated_p44 migration in currentId.) */
-    public static final String DEFAULT_PALETTE = "claude";
+    /** P45: the DEFAULT face of the app is Graphite again. The field
+     *  verdict on the P44 warm-paper face was final ("the default pallet
+     *  is graphite — change it back"): "claude" was understood as the
+     *  chat INTERFACE layout, never the colors, and the terracotta
+     *  palette itself was rejected outright. P45 removes the claude
+     *  palette entirely (table row, gradient, name, launcher alias) and
+     *  re-points the default here; the P45 migration in currentId
+     *  carries devices the theme_migrated_p44 push had dragged onto
+     *  claude back to Graphite. The Claude LAYOUT work stays — built on
+     *  these graphite tokens. */
+    public static final String DEFAULT_PALETTE = "graphite";
 
     /** Palette ids, in menu order. Fields per entry (order matters):
      *  BG SURFACE SURFACE2 STROKE ACCENT ACCENT_LT ACCENT_BG
@@ -101,8 +104,7 @@ public final class Theme {
      *  TINT_ACCENT TINT_OK TINT_DANGER ON_DISC RIM_USER ICON_DISC
      *  DOT_IDLE ON_CARD RIPPLE */
     public static final String[] PALETTES = {
-            "oled", "midnight", "graphite", "ember", "forest", "paper",
-            "claude"
+            "oled", "midnight", "graphite", "ember", "forest", "paper"
     };
 
     public static String paletteName(String id) {
@@ -113,7 +115,6 @@ public final class Theme {
             case "ember":     return "Ember";
             case "forest":    return "Forest";
             case "paper":     return "Paper (light)";
-            case "claude":    return "Claude (light)";
             default:          return "OLED black";
         }
     }
@@ -150,11 +151,6 @@ public final class Theme {
          0xFFE4EAF9, 0xFF1B1D24, 0xFF565B66, 0xFF8A8F99, 0xFF2E7D53, 0xFFB3424A,
          0xFF96691F, 0xFFFFFFFF, 0xFFDCE4F8, 0xFFDDF0E2, 0xFFF6DBDD, 0xFF22242A,
          0xFFC9D2EE, 0x143D63D8, 0x33998FA0, 0xE6222630, 0x24304460},
-        // claude — P44: warm paper + terracotta (the Claude face, light)
-        {0xFFFAF9F5, 0xFFFFFFFF, 0xFFF1EFE7, 0xFFE5E1D5, 0xFFD97757, 0xFFB8552F,
-         0xFFF6E9E1, 0xFF27241E, 0xFF6E6A5E, 0xFF9C978A, 0xFF2E7D53, 0xFFB3424A,
-         0xFF96691F, 0xFFFFFFFF, 0xFFF3E1D8, 0xFFDDEEDF, 0xFFF6DBDD, 0xFF3D2B22,
-         0xFFEAD5C6, 0x14D97757, 0x339C978A, 0xE63D2B22, 0x24D97757},
     };
 
     private static final int[][][] GRAD_DATA = {
@@ -176,9 +172,6 @@ public final class Theme {
         // paper
         {{0xFFFDFCF9, 0xFFEFEBE0}, {0xFFF8F5EE, 0xFFEAE6D9}, {0xFFFFFEFB, 0xFFF2EEE3},
          {0xFFF6F3EB, 0xFFE9E4D6}, {0xFFFBF9F3, 0xFFEDE9DE}, {0xFFF9F6F0, 0xFFEBE7DB}},
-        // claude — P44: soft warm-paper steps, near-flat
-        {{0xFFFDFBF7, 0xFFF3EFE4}, {0xFFFBF8F2, 0xFFEFEADF}, {0xFFFFFEFB, 0xFFF5F1E7},
-         {0xFFFAF7F0, 0xFFEEE9DB}, {0xFFFCFAF5, 0xFFF1EDE2}, {0xFFF9F6EF, 0xFFEDE8DA}},
     };
 
     /** The gradient table for a palette id (index into GRAD_DATA). */
@@ -207,14 +200,15 @@ public final class Theme {
         return legacyNotAmoled ? "midnight" : DEFAULT_PALETTE;
     }
 
-    /** The current palette id: the "theme" pref, else the default (P44:
-     *  Claude) with the legacy amoled carve-out honored. The old boolean
-     *  meant "AMOLED black on" (true = the pre-P31 default face); an
-     *  explicit OFF was a deliberate "not near-black" choice, which is
-     *  the only case that keeps Midnight. P44: a one-time migration
-     *  moves riders of the OLD default (graphite, the P33 pick) to the
-     *  Claude face — the user asked for it on the chat/startup/cold-boot
-     *  surfaces; every other explicit choice stands untouched. */
+    /** The current palette id: the "theme" pref, else the default (P45:
+     *  Graphite again) with the legacy amoled carve-out honored. The old
+     *  boolean meant "AMOLED black on" (true = the pre-P31 default face);
+     *  an explicit OFF was a deliberate "not near-black" choice, which is
+     *  the only case that keeps Midnight. P45: a one-time migration
+     *  carries every device the P44 push had moved onto the removed
+     *  claude face back to Graphite — the palette no longer exists, so
+     *  landing on it would render garbage; EVERY other explicit choice
+     *  stands untouched. */
     public static String currentId(Context c) {
         android.content.SharedPreferences sp =
                 c.getSharedPreferences("oc", Context.MODE_PRIVATE);
@@ -223,11 +217,11 @@ public final class Theme {
             boolean amoled = sp.getBoolean("amoled", true);
             t = defaultId(!amoled);   // an explicit OFF was a real choice
         }
-        if (!sp.getBoolean("theme_migrated_p44", false)) {
-            sp.edit().putBoolean("theme_migrated_p44", true).apply();
-            if ("graphite".equals(t)) {
-                t = "claude";
-                sp.edit().putString("theme", "claude").apply();
+        if (!sp.getBoolean("theme_migrated_p45", false)) {
+            sp.edit().putBoolean("theme_migrated_p45", true).apply();
+            if ("claude".equals(t)) {
+                t = "graphite";
+                sp.edit().putString("theme", "graphite").apply();
             }
         }
         return t;
@@ -262,17 +256,18 @@ public final class Theme {
         TINT_ACCENT = p[14]; TINT_OK = p[15]; TINT_DANGER = p[16]; ON_DISC = p[17];
         RIM_USER = p[18]; ICON_DISC = p[19]; DOT_IDLE = p[20]; ON_CARD = p[21];
         RIPPLE = p[22];
-        LIGHT = "paper".equals(id) || "claude".equals(id);
+        LIGHT = "paper".equals(id);
         currentIdStatic = id;
         CARD_GRADS = GRAD_DATA[paletteIndex(id)];
         Markdown.setLinkColor(ACCENT_LT);
         Markdown.setCodeColors(SURFACE2, TXT);
     }
 
-    /** P44: light palettes — Paper and the new Claude face (status-bar
-     *  icons, ripple polarity, home glow follow this). */
+    /** P44 → P45: the one light palette — Paper (status-bar icons,
+     *  ripple polarity, home glow follow this). The P44 claude face is
+     *  gone; the flag keeps its single-entry shape. */
     public static String lightPalette(String id) {
-        return ("paper".equals(id) || "claude".equals(id)) ? id : null;
+        return "paper".equals(id) ? id : null;
     }
 
     /** True when the active palette is a light one (status-bar icons,
@@ -769,26 +764,15 @@ public final class Theme {
         return d;
     }
 
-    /** User bubble — accent-subtle fill + hairline accent rim (the one
-     *  loud element is the assistant's world, not a rainbow). P44:
-     *  18dp — the Claude/Material-3 softness. */
+    /** User bubble — the P45 Claude-Android shape: a FULLY rounded
+     *  (22dp, no tail) soft neutral surface with a hairline rim, the
+     *  quiet messenger look — the user's words sit in a calm graphite
+     *  pill, never an accent shout. Palette-owned end to end. */
     public static GradientDrawable userBubble(Context c) {
         GradientDrawable d = new GradientDrawable();
-        d.setColor(ACCENT_BG);
-        d.setCornerRadius(dp(c, 18));
-        d.setStroke(1, RIM_USER);
-        return d;
-    }
-
-    /** P32: the user bubble WITH the asymmetric tail (br 6dp) — the
-     *  P10 XML shape, now palette-owned end to end (the XML's stroke
-     *  color was build-time-frozen and stayed dark-blue on Paper). */
-    public static GradientDrawable userBubbleTail(Context c) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(ACCENT_BG);
-        float r = dp(c, 22), tail = dp(c, 7);
-        d.setCornerRadii(new float[]{r, r, r, r, r, r, r, tail});
-        d.setStroke(dp(c, 1), RIM_USER);
+        d.setColor(SURFACE2);
+        d.setCornerRadius(dp(c, 22));
+        d.setStroke(dp(c, 1), STROKE);
         return d;
     }
 
@@ -841,6 +825,19 @@ public final class Theme {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE2);
         d.setCornerRadius(dp(c, 12));
+        return d;
+    }
+
+    /** P45: the unified composer pill — ONE raised surface that holds
+     *  the input AND its control row (the Claude-Android composer: text
+     *  floats inside the well, the controls line sits at its bottom,
+     *  send is a compact accent circle at the row's end). Radius 26 —
+     *  softer than a card, matching the p45 chat rhythm. */
+    public static GradientDrawable composerWell(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(SURFACE);
+        d.setCornerRadius(dp(c, 26));
+        d.setStroke(dp(c, 1), STROKE);
         return d;
     }
 

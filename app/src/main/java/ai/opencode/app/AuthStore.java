@@ -215,6 +215,64 @@ public final class AuthStore {
         return false;
     }
 
+    /** P45: the auto-compact master switch's current state. DEFAULT
+     *  OFF — the field demand ("i dont want the app to randomly compact
+     *  the context for no reason") is the shipped behavior, not an
+     *  option buried three screens deep. */
+    public static boolean compactionAuto(Context c) {
+        try {
+            return c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .getBoolean("compact_auto", false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * P45: pin {@code compaction.auto} to the switch state — the boot
+     * path. Hands-off merge (CompactionPolicy.mergeAuto, force=false):
+     * a value the user hand-edited into opencode.json is never touched;
+     * an absent or app-written key is brought in line with the switch.
+     * True when the file changed. One diagnostics line on failure,
+     * never a boot blocker (same contract as ensureCompactionPreserve).
+     */
+    public static boolean ensureCompactionAuto(Context c) throws IOException {
+        boolean auto = compactionAuto(c);
+        Map<String, Object> cfg = readConfig(c);
+        int appWritten;
+        try {
+            appWritten = c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .getInt("compaction_auto_app", -1);
+        } catch (Exception e) {
+            appWritten = -1;
+        }
+        if (!CompactionPolicy.mergeAuto(cfg, auto, appWritten, false))
+            return false;
+        writeConfig(c, cfg);
+        c.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
+                .putInt("compaction_auto_app", auto ? 1 : 0).apply();
+        return true;
+    }
+
+    /**
+     * P45: the Settings toggle's write-through. The click IS the user's
+     * newest intent, so the write is FORCED (the switch owns the key
+     * from this moment — ownership recorded in compaction_auto_app) and
+     * the switch state is persisted first so a crash between the two
+     * writes converges on the clicked state at the next boot.
+     */
+    public static boolean setCompactionAuto(Context c, boolean auto)
+            throws IOException {
+        c.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
+                .putBoolean("compact_auto", auto).apply();
+        Map<String, Object> cfg = readConfig(c);
+        if (!CompactionPolicy.mergeAuto(cfg, auto, -1, true)) return false;
+        writeConfig(c, cfg);
+        c.getSharedPreferences("oc", Context.MODE_PRIVATE).edit()
+                .putInt("compaction_auto_app", auto ? 1 : 0).apply();
+        return true;
+    }
+
     /** Stored default model as {providerID, modelID}, or null. */
     public static String[] defaultModel(Context c) {
         String s = Json.str(readConfig(c), "model");

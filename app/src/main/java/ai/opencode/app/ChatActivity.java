@@ -112,6 +112,7 @@ public class ChatActivity extends Activity
     private LinearLayout permSlot;
     // P9: hero empty state + in-place view cache for smooth streaming
     private LinearLayout emptyHero, suggestBox;
+    private TextView heroTitle, heroSub;    // P45: the time-of-day greeting
     private TextView btnSessions;
     private final Map<String, View> viewByKey = new HashMap<>();
     private final Map<String, TextView> bodyByKey = new HashMap<>();
@@ -292,6 +293,26 @@ public class ChatActivity extends Activity
         });
         emptyHero = findViewById(R.id.emptyHero);
         suggestBox = findViewById(R.id.suggestBox);
+        // P45: the Claude-Android empty state — a time-of-day greeting
+        // over the one calm question, computed once per chat open.
+        try {
+            java.util.Calendar cal = java.util.Calendar.getInstance();
+            int h = cal.get(java.util.Calendar.HOUR_OF_DAY);
+            String part = h < 5 ? "evening" : h < 12 ? "morning"
+                    : h < 18 ? "afternoon" : "evening";
+            heroTitle = (TextView) findViewById(R.id.heroTitle);
+            heroSub = (TextView) findViewById(R.id.heroSub);
+            heroTitle.setText("Good " + part);
+            heroSub.setText("How can I help you today?");
+        } catch (Exception ignored) {}
+        // P45: the unified composer pill — ONE raised surface built from
+        // the LIVE palette tokens (the XML drawable's frozen colors can
+        // never follow a palette switch; this can). Radius 26, hairline
+        // rim — the Claude-Android composer on whatever face is active.
+        try {
+            View cc = findViewById(R.id.composerCard);
+            if (cc != null) cc.setBackground(Theme.composerWell(this));
+        } catch (Exception ignored) {}
         btnVision = findViewById(R.id.btnVision);
         if (btnVision != null) btnVision.setOnClickListener(v -> {
             Theme.haptic(v);
@@ -885,6 +906,17 @@ public class ChatActivity extends Activity
         synchronized (lock) { empty = rows.isEmpty(); }
         int vis = empty ? View.VISIBLE : View.GONE;
         if (emptyHero.getVisibility() != vis) emptyHero.setVisibility(vis);
+        // P45: the greeting follows the clock, not the process — a chat
+        // opened at 23:58 that sits idle past midnight greets correctly
+        // on the next return to the empty state.
+        if (empty && heroTitle != null) {
+            try {
+                java.util.Calendar cal = java.util.Calendar.getInstance();
+                int h = cal.get(java.util.Calendar.HOUR_OF_DAY);
+                heroTitle.setText("Good " + (h < 5 ? "evening"
+                        : h < 12 ? "morning" : h < 18 ? "afternoon" : "evening"));
+            } catch (Exception ignored) {}
+        }
     }
 
     // -------------------------------------------------------- P8 ui extras
@@ -2108,10 +2140,13 @@ public class ChatActivity extends Activity
         String verdict = Resilience.contextVerdict(lastTok);
         boolean heavy = limit > 0 ? lastTok * 100 / limit >= 50 : lastTok >= 50_000;
         // P41: the warning the field never got — within 30% of the
-        // window the sandbox enforces, the next big turn can silently
-        // summarize this chat's memory. Named before it happens, in the
-        // same breath as the numbers it comes from.
-        String risk = CompactionPolicy.riskNote(lastTok, limit);
+        // window the sandbox enforces. P45: the note now names the REAL
+        // consequence in the active mode — summarizing is close (auto on)
+        // or sends will fail with an overflow error (auto off, the
+        // default). Named before it happens, in the same breath as the
+        // numbers it comes from.
+        String risk = CompactionPolicy.riskNote(lastTok, limit,
+                AuthStore.compactionAuto(this));
         if (risk != null) m.append(risk).append("\n");
         if (!verdict.isEmpty()) m.append(verdict).append("\n");
         // P42: when a user cap is in force, say so right where the
@@ -2469,9 +2504,11 @@ public class ChatActivity extends Activity
                 LinearLayout wrap = new LinearLayout(this);
                 wrap.setOrientation(LinearLayout.HORIZONTAL);
                 TextView tv = text(15, R.color.user_text, false);
-                tv.setBackground(Theme.userBubbleTail(this));
-                int p = dp(13);
-                tv.setPadding(p, dp(9), p, dp(9));
+                // P45: the Claude-Android bubble — fully rounded neutral
+                // graphite pill (no tail, no accent shout), right-aligned.
+                tv.setBackground(Theme.userBubble(this));
+                int p = dp(14);
+                tv.setPadding(p, dp(10), p, dp(10));
                 tv.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.78));
                 tv.setText(r.text.toString());
                 tv.setTextIsSelectable(true);
@@ -2507,8 +2544,17 @@ public class ChatActivity extends Activity
                 }
                 LinearLayout box = new LinearLayout(this);
                 box.setOrientation(LinearLayout.VERTICAL);
-                box.setPadding(dp(2), blankText ? dp(4) : dp(8), 0, dp(2));
+                box.setPadding(dp(2), blankText ? dp(4) : dp(10), 0, dp(2));
                 boolean streaming = r.shown < r.text.length();
+                // P45: the Claude response marker — the small accent ✦ sits
+                // above the response text, the quiet signature of the
+                // assistant's block (the app's own glyph vocabulary, kept).
+                if (!blankText) {
+                    TextView mark = text(12, R.color.accent_light, false);
+                    mark.setText("✦");
+                    mark.setPadding(0, 0, 0, dp(3));
+                    box.addView(mark);
+                }
                 TextView body = text(15, R.color.text_primary, false);
                 body.setTextIsSelectable(true);
                 body.setLineSpacing(dp(1), 1f);

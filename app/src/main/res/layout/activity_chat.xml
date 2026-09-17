@@ -152,22 +152,24 @@
                     android:textSize="34sp"/>
 
                 <TextView
+                    android:id="@+id/heroTitle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:paddingTop="18dp"
-                    android:text="What are we building?"
+                    android:text="Good evening"
                     android:textColor="@color/text_primary"
-                    android:textSize="19sp"
+                    android:textSize="21sp"
                     android:textStyle="bold"/>
 
                 <TextView
+                    android:id="@+id/heroSub"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:gravity="center"
                     android:paddingTop="6dp"
-                    android:text="The agent reads, edits and runs code right inside\nthis project's sandbox. Pick a starting point:"
+                    android:text="How can I help you today?"
                     android:textColor="@color/text_secondary"
-                    android:textSize="13sp"
+                    android:textSize="14sp"
                     android:lineSpacingExtra="2dp"/>
 
                 <LinearLayout
@@ -184,8 +186,8 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
                 android:paddingTop="14dp"
                 android:paddingBottom="14dp"/>
         </LinearLayout>
@@ -225,7 +227,8 @@
         android:paddingTop="2dp"
         android:visibility="gone"/>
 
-    <!-- composer -->
+    <!-- permission card slot — pinned above the composer (filled by
+         checkPermissionQueue(); gone when no permission is pending). -->
     <LinearLayout
         android:id="@+id/permSlot"
         android:layout_width="match_parent"
@@ -250,12 +253,8 @@
         android:visibility="gone"/>
 
     <!-- P28: the three-dot typing indicator — a DECLARED slot in the root
-         column, directly above the composer. History: it used to be
-         parented at runtime via scroll.getParent() + indexOfChild(permSlot);
-         the P27 transcript FrameLayout changed scroll's parent, the lookup
-         returned -1 and the dots ended up as an overlay INSIDE the
-         transcript (field: "thinking animation is in the middle"). A
-         declared slot can never drift again. -->
+         column, directly above the composer. A declared slot can never
+         drift into the transcript again. -->
     <LinearLayout
         android:id="@+id/typingSlot"
         android:layout_width="match_parent"
@@ -268,117 +267,28 @@
         android:paddingBottom="2dp"
         android:visibility="gone"/>
 
-    <!-- composer (P16: id added so DeX wide layout can cap it) -->
+    <!-- composer. P45: the Claude-Android shape — ONE unified pill
+         (composerCard, backgrounded at runtime from the live palette
+         tokens via Theme.composerWell) that holds the tray, the
+         borderless input, and a bottom control row: attach + palette on
+         the left, Build/Plan + model chips and the send circle on the
+         right. The old two-box layout (chip strip ABOVE a separate
+         input well) is gone. -->
     <LinearLayout
         android:id="@+id/composerBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:background="@drawable/bg_composer"
-        android:paddingStart="12dp"
-        android:paddingEnd="12dp"
-        android:paddingTop="8dp"
-        android:paddingBottom="10dp">
-
-        <!-- P29: pending image attachments — the messenger-style tray.
-             One 64dp thumb per picked photo, an ✕ badge on each, gone
-             when empty. Filled by renderAttachTray(); the send button
-             ships every tray image in ONE message. -->
-        <HorizontalScrollView
-            android:id="@+id/attachScroll"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:scrollbars="none"
-            android:visibility="gone">
-
-            <LinearLayout
-                android:id="@+id/attachSlot"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:paddingTop="2dp"
-                android:paddingBottom="4dp"/>
-        </HorizontalScrollView>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:id="@+id/chipMode"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/bg_chip"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp"
-                android:paddingTop="7dp"
-                android:paddingBottom="7dp"
-                android:text="Build"
-                android:textColor="@color/ok"
-                android:textSize="12sp"/>
-
-            <TextView
-                android:id="@+id/chipModel"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:background="@drawable/bg_chip"
-                android:paddingStart="12dp"
-                android:paddingEnd="12dp"
-                android:paddingTop="7dp"
-                android:paddingBottom="7dp"
-                android:text="model ▾"
-                android:textColor="@color/accent_light"
-                android:textSize="12sp"
-                android:maxLines="1"
-                android:ellipsize="middle"
-                android:maxWidth="150dp"/>
-
-            <View
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1"/>
-
-            <!-- P17: vision — share a screenshot with the agent (free
-                 vision model describes it when the server can't take
-                 image parts natively) -->
-            <TextView
-                android:id="@+id/btnVision"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:layout_marginEnd="8dp"
-                android:background="@drawable/bg_chip"
-                android:contentDescription="Attach image"
-                android:gravity="center"
-                android:text="◉"
-                android:textColor="@color/accent_light"
-                android:textSize="16sp"/>
-
-            <TextView
-                android:id="@+id/btnPalette"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:background="@drawable/bg_chip"
-                android:contentDescription="Command palette"
-                android:gravity="center"
-                android:text="⌘"
-                android:textColor="@color/accent_light"
-                android:textSize="17sp"/>
-        </LinearLayout>
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="8dp">
 
         <!-- P29: the cost-prediction hint — a quiet mono line that prices
              the NEXT send (typed text + tray images + the context the
              model re-reads) before the user commits to it. Filled by
              syncCostHint(); gone when there is nothing to send.
-             P30: LEFT-aligned with the input well below it (gravity=end
-             made the line hug the far right edge — the field read it as
-             "clipping to the other side of the UI"), and ellipsize=end
-             as the last-resort clamp (maxLines=1 alone HARD-clips the
-             glyphs with no indicator; the P30 format shortening makes
-             the ellipsis unreachable in practice, this is the safety
-             net). End padding mirrors the hairline rhythm. -->
+             P30: LEFT-aligned and ellipsize=end as the last-resort clamp. -->
         <TextView
             android:id="@+id/costHint"
             android:layout_width="match_parent"
@@ -386,49 +296,139 @@
             android:gravity="start"
             android:ellipsize="end"
             android:fontFamily="monospace"
-            android:paddingStart="4dp"
-            android:paddingEnd="4dp"
-            android:paddingTop="6dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingBottom="2dp"
             android:textColor="@color/text_tertiary"
             android:textSize="10sp"
             android:maxLines="1"
             android:visibility="gone"/>
 
+        <!-- the pill itself — background set in onCreate from live tokens -->
         <LinearLayout
+            android:id="@+id/composerCard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="bottom"
-            android:paddingTop="8dp">
+            android:orientation="vertical">
+
+            <!-- P29: pending image attachments — the messenger-style tray.
+                 One 64dp thumb per picked photo, an ✕ badge on each, gone
+                 when empty. Filled by renderAttachTray(); the send button
+                 ships every tray image in ONE message. -->
+            <HorizontalScrollView
+                android:id="@+id/attachScroll"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/attachSlot"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:paddingStart="10dp"
+                    android:paddingTop="10dp"
+                    android:paddingBottom="2dp"/>
+            </HorizontalScrollView>
 
             <EditText
                 android:id="@+id/input"
-                android:layout_width="0dp"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:background="@drawable/bg_input"
-                android:paddingStart="16dp"
-                android:paddingEnd="16dp"
-                android:paddingTop="12dp"
-                android:paddingBottom="12dp"
+                android:background="@null"
+                android:paddingStart="18dp"
+                android:paddingEnd="18dp"
+                android:paddingTop="13dp"
+                android:paddingBottom="4dp"
                 android:hint="Ask the agent…"
                 android:textColor="@color/text_primary"
-                android:textColorHint="@color/text_secondary"
+                android:textColorHint="@color/text_tertiary"
                 android:textSize="15sp"
                 android:maxLines="6"
                 android:inputType="textCapSentences|textMultiLine"/>
 
-            <TextView
-                android:id="@+id/btnSend"
-                android:layout_width="46dp"
-                android:layout_height="46dp"
-                android:layout_marginStart="8dp"
-                android:background="@drawable/bg_send"
-                android:gravity="center"
-                android:elevation="3dp"
-                android:text="↑"
-                android:textColor="@color/on_accent"
-                android:textSize="22sp"/>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:paddingStart="10dp"
+                android:paddingEnd="8dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="8dp">
+
+                <!-- P17: vision — share a screenshot with the agent -->
+                <TextView
+                    android:id="@+id/btnVision"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:background="@drawable/bg_chip"
+                    android:contentDescription="Attach image"
+                    android:gravity="center"
+                    android:text="◉"
+                    android:textColor="@color/accent_light"
+                    android:textSize="15sp"/>
+
+                <TextView
+                    android:id="@+id/btnPalette"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:layout_marginStart="4dp"
+                    android:background="@drawable/bg_chip"
+                    android:contentDescription="Command palette"
+                    android:gravity="center"
+                    android:text="⌘"
+                    android:textColor="@color/accent_light"
+                    android:textSize="16sp"/>
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1"/>
+
+                <TextView
+                    android:id="@+id/chipMode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_chip"
+                    android:paddingStart="11dp"
+                    android:paddingEnd="11dp"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp"
+                    android:text="Build"
+                    android:textColor="@color/ok"
+                    android:textSize="12sp"/>
+
+                <TextView
+                    android:id="@+id/chipModel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="5dp"
+                    android:layout_marginEnd="8dp"
+                    android:background="@drawable/bg_chip"
+                    android:paddingStart="11dp"
+                    android:paddingEnd="11dp"
+                    android:paddingTop="6dp"
+                    android:paddingBottom="6dp"
+                    android:text="model ▾"
+                    android:textColor="@color/accent_light"
+                    android:textSize="12sp"
+                    android:maxLines="1"
+                    android:ellipsize="middle"
+                    android:maxWidth="140dp"/>
+
+                <TextView
+                    android:id="@+id/btnSend"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:background="@drawable/bg_send"
+                    android:contentDescription="Send"
+                    android:gravity="center"
+                    android:text="↑"
+                    android:textColor="@color/on_accent"
+                    android:textSize="20sp"/>
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
 </LinearLayout>

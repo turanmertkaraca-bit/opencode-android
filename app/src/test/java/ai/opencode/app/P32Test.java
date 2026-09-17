@@ -210,17 +210,16 @@ public class P32Test {
 
     @Test
     public void sixPalettes_stillShip_andGraphiteIsTheDefault() {
-        assertEquals(7, Theme.PALETTES.length);
+        assertEquals(6, Theme.PALETTES.length);
         assertEquals("oled", Theme.PALETTES[0]);
         assertEquals(0, Theme.paletteIndex(null));
         assertEquals(0, Theme.paletteIndex("unheard-of"));
-        // P44: the user asked for the Claude look — the DEFAULT moved
-        // from graphite to claude (pref-less devices only; an explicit
-        // choice always wins, and graphite riders migrate once via
-        // theme_migrated_p44). Unknown ids still fall back to index 0 —
-        // the sanity floor, not the default face.
-        assertEquals("claude", Theme.DEFAULT_PALETTE);
+        // P45: the default face is Graphite again — the P44 claude face
+        // was rejected and REMOVED (a removed id can never be the
+        // default). Unknown ids still fall back to index 0 — the sanity
+        // floor, not the default face.
+        assertEquals("graphite", Theme.DEFAULT_PALETTE);
         assertEquals("midnight", Theme.defaultId(true));
-        assertEquals("claude", Theme.defaultId(false));
+        assertEquals("graphite", Theme.defaultId(false));
     }
 }

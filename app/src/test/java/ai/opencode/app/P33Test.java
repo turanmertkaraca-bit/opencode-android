@@ -191,20 +191,19 @@ public class P33Test {
     // -------------------------------------------------- the default face
 
     @Test
-    public void claudeIsTheDefaultFace_sinceP44() {
-        // P44 supersession: the user asked for the Claude look on the
-        // chat/startup/cold-boot surfaces — the default face moved from
-        // graphite (the P33 pick, migrated once via theme_migrated_p44)
-        // to claude. Graphite itself stays in the table, untouched.
-        assertEquals("claude", Theme.DEFAULT_PALETTE);
-        assertEquals("claude lands where the table put it (appended, "
-                + "never spliced)", 6, Theme.paletteIndex(Theme.DEFAULT_PALETTE));
-        assertFalse("the default face has a display name",
-                Theme.paletteName("claude").isEmpty());
-        assertEquals("Claude (light)", Theme.paletteName("claude"));
-        // graphite keeps its old index and its display name
-        assertEquals(2, Theme.paletteIndex("graphite"));
+    public void graphiteIsTheDefaultFace_again_sinceP45() {
+        // P45 supersession: the P44 warm-paper default was rejected —
+        // "claude" meant the chat INTERFACE layout, never the colors.
+        // The claude palette is REMOVED (row, gradient, name, alias) and
+        // the default face is Graphite again.
+        assertEquals("graphite", Theme.DEFAULT_PALETTE);
+        assertEquals("graphite keeps its original index", 2,
+                Theme.paletteIndex("graphite"));
         assertEquals("Graphite", Theme.paletteName("graphite"));
+        // the removed palette reads as unknown everywhere: index floor
+        // (oled) + the unknown-name fallback
+        assertEquals(0, Theme.paletteIndex("claude"));
+        assertEquals("OLED black", Theme.paletteName("claude"));
         // the sanity floor is unchanged: unknown ids still fall to oled
         assertEquals(0, Theme.paletteIndex("garbage"));
     }

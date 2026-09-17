@@ -39,8 +39,7 @@ public final class LauncherIcon {
     /** Alias simple names, index-aligned with Theme.PALETTES. */
     static final String[] THEME_ALIASES = {
             "LauncherOled", "LauncherMidnight", "LauncherGraphite",
-            "LauncherEmber", "LauncherForest", "LauncherPaper",
-            "LauncherClaude"
+            "LauncherEmber", "LauncherForest", "LauncherPaper"
     };
     /** The pre-P36 icon: fresh installs and explicit-no-choice. */
     static final String CLASSIC = "LauncherClassic";

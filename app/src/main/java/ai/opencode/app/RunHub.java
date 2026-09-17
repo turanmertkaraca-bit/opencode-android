@@ -1062,7 +1062,10 @@ public final class RunHub implements ServerService.EventListener {
         onMainAdd(r);
     }
 
-    /** A transcript error card (the old err()) — model-owned. */
+    /** A transcript error card (the old err()) — model-owned. P45: an
+     *  overflow error with auto-compact OFF gets the one honest line —
+     *  the failure is the DESIGNED behavior of the kill switch, so the
+     *  card says what to do next instead of reading like a bug. */
     public static void err(String title, String detail, String raw) {
         final Row r = new Row();
         r.kind = K_ERR;
@@ -1070,6 +1073,16 @@ public final class RunHub implements ServerService.EventListener {
         r.ts = System.currentTimeMillis();
         r.text.append(title);
         if (detail != null && !detail.isEmpty()) r.output.append(detail);
+        String probe = (title == null ? "" : title) + "\n"
+                + (detail == null ? "" : detail) + "\n"
+                + (raw == null ? "" : raw);
+        if (probe.toLowerCase(java.util.Locale.ROOT).contains("overflow")) {
+            if (r.output.length() > 0) r.output.append("\n----\n");
+            r.output.append("this chat outgrew the model's window and "
+                    + "auto-compact is off, so nothing was summarized — "
+                    + "start a fresh chat (⌘ → New chat) or clear the "
+                    + "window cap in the Σ popover");
+        }
         if (raw != null && !raw.isEmpty()) {
             if (r.output.length() > 0) r.output.append("\n----\n");
             String rawT = raw.length() > 3000 ? raw.substring(0, 3000) + "…" : raw;

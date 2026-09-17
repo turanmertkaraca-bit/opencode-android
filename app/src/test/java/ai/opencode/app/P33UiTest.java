@@ -162,16 +162,17 @@ public class P33UiTest {
                      Robolectric.buildActivity(SettingsActivity.class)) {
             SettingsActivity a = ctl.setup().get();
 
-            // the pref-less default face of the release (P44: Claude)
-            assertEquals("claude", Theme.currentId(a));
-            assertEquals(0xFFFAF9F5, Theme.BG);
+            // the pref-less default face of the release (P45: Graphite
+            // again — the P44 claude face was rejected and removed)
+            assertEquals("graphite", Theme.currentId(a));
+            assertEquals(0xFF0A0A0B, Theme.BG);
 
-            // open the picker — the Claude row is checked AND labeled
+            // open the picker — the Graphite row is checked AND labeled
             TextView themeRow = findText(decorOf(a), "Theme");
             clickableOf(themeRow).performClick();
             Dialog dlg = (Dialog) ShadowDialog.getLatestDialog();
             assertNotNull(dlg);
-            TextView row = findText(dlg.getWindow().getDecorView(), "Claude (light)");
+            TextView row = findText(dlg.getWindow().getDecorView(), "Graphite");
             assertNotNull(row);
             assertTrue("the default row carries the '· default' label",
                     row.getText().toString().contains("default"));

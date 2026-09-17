@@ -332,7 +332,9 @@ public class P37Test {
             m.setAccessible(true);
             android.view.ViewGroup v = (android.view.ViewGroup)
                     m.invoke(a, r);
-            assertEquals(2, v.getChildCount());      // body + footer
+            // P45: ✦ marker + body + footer — the marker is the Claude
+            // response signature above the text
+            assertEquals(3, v.getChildCount());      // marker + body + footer
             assertEquals(android.view.View.VISIBLE, v.getVisibility());
         }
     }

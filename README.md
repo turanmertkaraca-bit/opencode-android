@@ -7,15 +7,17 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.42.0 — P42)
+## Install (v0.45.0 — P45)
 
-1. Grab `opencode-p42-v0.42.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p45-v0.45.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
    Note: v0.38.0 was built and field-tested but never published here —
    its fixes ride inside v0.39.0, so that release carries both.
-2. Open the app: the project deck opens, tap a card → that project's
-   sandbox → chat. **＋** adds a project, **long-press** a card → the project
+2. Open the app: the project deck ALWAYS opens first now — the app never
+   throws you back into the last chat by itself; tapping a card is the
+   explicit "start this project" act, exactly like the opencode TUI.
+   **＋** adds a project, **long-press** a card → the project
    sheet (Open / Rename / Remove card / **Delete project** — the app's own
    palette-owned presentation now, not a system box). **⌘** is the command
    palette (interactive canvas, find in chat, share).
@@ -55,6 +57,48 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.45.0 (P45 — the act-normal release)
+
+The P44 field verdict, in three sentences: the warm-paper "Claude" palette
+was rejected outright ("the default pallet is graphite — change it back";
+"claude" was meant as the chat INTERFACE layout, never the colors), the
+silent context compaction had to die ("i dont want the app to randomly
+compact the context for no reason"), and cold-booting straight into the
+last chat reads as the app doing things behind the user's back. P45 does
+all three, and the chat gets the Claude-Android layout on the graphite
+tokens it should have worn all along.
+
+**ONE — auto-compaction is OFF, at the source.** The bundled server's own
+escape hatch (`compaction.auto: false` in opencode.json — found in the
+binary's embedded config schema) is now pinned at every server boot, and
+the default is OFF: the sandbox NEVER summarizes a chat's memory on its
+own. A context that genuinely fills errors with one honest overflow line
+("start a fresh chat or clear the window cap") instead of the model
+silently losing the thread — the failure is visible, cheap, and yours to
+choose. The Σ meter's hot-context warning now names the real consequence
+in the active mode, and Settings → Essentials → **Auto-compact context**
+turns the old behavior back on explicitly (write-through to
+opencode.json, ownership-tracked, restart-to-apply).
+
+**TWO — Graphite is the default face again.** The claude palette is
+removed outright (table row, gradients, name, launcher alias, icon set);
+the one-time p45 migration carries devices the p44 push had dragged onto
+warm paper back to Graphite, and every other explicit theme choice stands.
+
+**THREE — the chat wears the Claude layout.** User messages sit in fully
+rounded, neutral graphite pills (no tail, no accent shout); assistant
+responses are flat full-width text under a small ✦ marker; the empty chat
+greets by time of day ("Good evening / How can I help you today?"); and
+the composer is ONE unified pill — borderless input inside it, attach +
+palette on the left, Build/Plan + model chips and the send circle on the
+right — all painted at runtime from the live palette so it follows every
+theme. Cold boot lands on the project deck, always (MainActivity routes
+nowhere else; the last-project sandbox pre-warm stays, since it is pure
+infrastructure — no session, no run, no screen).
+
+475 JVM tests green (18 new: the kill-switch merge table, the two-mode
+risk notes, the p45 theme migration, the AuthStore round-trip).
 
 ## What's in v0.42.0 (P42 — the honesty release)
 
