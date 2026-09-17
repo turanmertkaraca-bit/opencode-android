@@ -354,6 +354,20 @@ public class ServerService extends Service {
             appendDiag("config", "compaction policy not written: " + t);
         }
 
+        // P45: the auto-compaction KILL SWITCH — compaction.auto rides the
+        // switch (default OFF: the sandbox never summarizes a chat's
+        // memory on its own; a full context errors instead). Same
+        // diagnostics-line-on-failure contract as the floor above.
+        try {
+            if (AuthStore.ensureCompactionAuto(this))
+                appendDiag("config", "compaction auto="
+                        + AuthStore.compactionAuto(this)
+                        + " pinned (" + (AuthStore.compactionAuto(this)
+                        ? "summarizing allowed" : "never summarize") + ")");
+        } catch (Throwable t) {
+            appendDiag("config", "compaction auto not written: " + t);
+        }
+
         // P19: pick a bindable port BEFORE spawning. Verified on the rig:
         // opencode maps --port 0 to its own default (4096), so a true
         // ephemeral spawn is impossible — the app asks the kernel instead.

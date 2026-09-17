@@ -115,6 +115,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         root.addView(cardGap());
         root.addView(essentialCard("Ⓡ", "Credit limit", creditLimitSub(),
                 v -> creditDialog()));
+        // P45: the auto-compact kill switch — the field demand ("i dont
+        // want the app to randomly compact the context for no reason")
+        // becomes the shipped default. OFF: the sandbox never summarizes
+        // a chat's memory on its own; a full context errors honestly.
+        root.addView(essentialCard("◈", "Auto-compact context", compactionSub(),
+                v -> compactionDialog()));
         root.addView(cardGap());
         root.addView(essentialCard("◆", "Default model",
                 Models.selected(this) == null ? "auto (server default)"
@@ -276,7 +282,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.34.0-p34 · one Sheet system for every box, back always lands on the deck, essentials on top", "◆", v -> {}));
+        ab.addView(rowLink("Version", "0.45.0-p45 · graphite face restored, the Claude chat layout, auto-compact off by default, cold boot lands on the deck", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -628,6 +634,59 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         return CreditLimit.stateLine(spent, cap)
                 + (v == CreditLimit.BLOCK ? " \u00b7 spending paused"
                    : v == CreditLimit.WARN ? " \u00b7 nearing the cap" : "");
+    }
+
+    // ------------------------------------------------ P45: auto-compact
+
+    /** The essentials-card subtitle — the CURRENT state in five words. */
+    private String compactionSub() {
+        boolean on = AuthStore.compactionAuto(this);
+        return on ? "on \u00b7 the sandbox may summarize memory near the limit"
+                  : "off \u00b7 chat memory is never summarized";
+    }
+
+    /** The auto-compact dialog: state, the honest explanation of both
+     *  modes, and a single primary pill that flips the switch (the
+     *  write-through + restart hint rides the flip). */
+    private void compactionDialog() {
+        boolean on = AuthStore.compactionAuto(this);
+        TextView body = new TextView(this);
+        body.setTextSize(13);
+        body.setTextColor(Theme.TXT_DIM);
+        body.setLineSpacing(Theme.dp(this, 2), 1f);
+        body.setPadding(0, Theme.dp(this, 4), 0, Theme.dp(this, 4));
+        body.setText(on
+                ? "The sandbox summarizes this chat's memory automatically "
+                  + "when it nears the model's window: the thread becomes a "
+                  + "summary plus recent turns, and long sessions keep "
+                  + "running (with a visible note in the chat).\n\nOff is "
+                  + "the recommended default: memory is NEVER summarized "
+                  + "behind your back — a full context errors with one "
+                  + "honest overflow line instead, and you start a fresh "
+                  + "chat when you choose."
+                : "Chat memory is never summarized \u2014 a full context "
+                  + "fails with one honest overflow line instead of the "
+                  + "model silently losing the thread. This is the safe "
+                  + "default.\n\nTurning it on lets the sandbox summarize "
+                  + "the thread automatically near the model's window "
+                  + "limit, so very long sessions keep running \u2014 each "
+                  + "summary is announced in the chat.");
+        Sheet.show(this, "Auto-compact context \u00b7 " + (on ? "on" : "off"))
+                .scroll(body, 0f)
+                .pill(on ? "Turn OFF" : "Turn ON", Sheet.PRIMARY, () -> {
+                    try {
+                        AuthStore.setCompactionAuto(this, !on);
+                        Toast.makeText(this, !on
+                                        ? "auto-compact on \u2014 applies on next server start"
+                                        : "auto-compact off \u2014 applies on next server start",
+                                Toast.LENGTH_LONG).show();
+                        rebuildUi();
+                    } catch (Exception e) {
+                        Toast.makeText(this, "could not write config: " + e,
+                                Toast.LENGTH_LONG).show();
+                    }
+                })
+                .pill("Close", Sheet.QUIET, null);
     }
 
     private void creditDialog() {
@@ -1417,8 +1476,9 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // P9 custom switch: animated track + knob (framework-only)
         // defaults: motion ON (matches Theme.motionOn), dns_bridge OFF,
         // auto_allow OFF (approving tool calls silently is opt-in — P14)
-        boolean dflt = !"dns_bridge".equals(keyOrNull)
-                && !"auto_allow".equals(keyOrNull);
+        boolean dflt = !("dns_bridge".equals(keyOrNull)
+                || "auto_allow".equals(keyOrNull)
+                || "compact_auto".equals(keyOrNull));
         boolean on = getSharedPreferences("oc", MODE_PRIVATE).getBoolean(keyOrNull, dflt);
         FrameLayout sw = new FrameLayout(this);
         GradientDrawable track = new GradientDrawable();
@@ -1457,6 +1517,21 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             if ("dns_bridge".equals(keyOrNull) && now) {
                 Toast.makeText(this, "bridge on — restart server to apply",
                         Toast.LENGTH_LONG).show();
+            }
+            // P45: the compaction kill switch writes THROUGH to
+            // opencode.json (the click is the user's newest intent) and
+            // takes ownership of the value it lands.
+            if ("compact_auto".equals(keyOrNull)) {
+                try {
+                    AuthStore.setCompactionAuto(this, now);
+                    Toast.makeText(this, now
+                                    ? "auto-compact on — the sandbox may summarize memory near the window limit (restart server to apply)"
+                                    : "auto-compact off — chat memory is never summarized (restart server to apply)",
+                            Toast.LENGTH_LONG).show();
+                } catch (Exception e) {
+                    Toast.makeText(this, "could not write config: " + e,
+                            Toast.LENGTH_LONG).show();
+                }
             }
             // P27: theme switch re-reads the palette and rebuilds this
             // screen (every other screen re-reads on its next creation).

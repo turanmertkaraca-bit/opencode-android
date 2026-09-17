@@ -167,6 +167,61 @@ public final class CompactionPolicy {
         return 0;
     }
 
+    // ------------------------------------------------------------ P45: the kill switch
+
+    /**
+     * P45 — the auto-compaction kill switch, pinned at the same source as
+     * the floor. The field verdict was unambiguous: the app must NEVER
+     * silently summarize a chat's memory ("i dont want the app to randomly
+     * compact the context for no reason"). The bundled server supports
+     * exactly that: {@code compaction.auto === false} disables every
+     * automatic compaction path (the overflow check short-circuits to
+     * "do not compact", and an overflow turn errors instead of
+     * summarizing). The switch default is OFF — a fresh install never
+     * auto-compacts.
+     *
+     * OWNERSHIP (the house rule, mirroring mergeOrMovePreserve):
+     * {@code appWritten} is what the app last wrote through the switch
+     * (-1 nothing, 0 false, 1 true). At BOOT the merge is hands-off: a
+     * value the user hand-edited into opencode.json is never touched.
+     * When the USER FLIPS THE SWITCH the write-through is forced (their
+     * click is the newest intent) — the caller passes force and the app
+     * takes ownership of the resulting value.
+     *
+     * @param root       the opencode.json root map, mutated in place
+     * @param auto       the desired switch state (false = never compact)
+     * @param appWritten -1 nothing written yet, 0 app wrote false, 1 app wrote true
+     * @param force      true on an explicit user toggle, false at boot
+     * @return true when the map changed
+     */
+    static boolean mergeAuto(Map<String, Object> root, boolean auto,
+                             int appWritten, boolean force) {
+        if (root == null) return false;
+        Object cur = root.get("compaction");
+        // a compaction block that is not even an object is user-owned
+        // junk — the server ignores it, and so do we
+        if (cur != null && !(cur instanceof Map)) return false;
+        Map<String, Object> comp = Json.obj(cur);
+        if (comp == null) {
+            comp = new java.util.LinkedHashMap<>();
+            root.put("compaction", comp);
+            comp.put("auto", auto);
+            return true;
+        }
+        Object v = comp.get("auto");
+        if (v instanceof Boolean && ((Boolean) v) == auto) return false;
+        if (!force && v != null) {
+            // boot hands off EVERYTHING it does not own: a boolean the
+            // user hand-wrote, and any non-boolean junk (the server
+            // ignores junk, and so do we). An ABSENT key (v == null) is
+            // not owned by anyone — the switch fills it.
+            if (!(v instanceof Boolean)) return false;
+            if (appWritten != (((Boolean) v) ? 1 : 0)) return false;
+        }
+        comp.put("auto", auto);
+        return true;
+    }
+
     // ------------------------------------------------------------ notes
 
     /** The one honest chat line when a compaction summary lands. Says
@@ -249,19 +304,34 @@ public final class CompactionPolicy {
     }
 
     /**
-     * The Σ popover line while compaction is imminent: within 30% of
-     * the window the server actually enforces, the next big turn can
-     * summarize memory without warning. Null while there is room.
-     * Pure; the suite pins the threshold and the null cases.
+     * The Σ popover line while the context runs hot. With auto-compact
+     * ON (legacy behavior, opt-in since P45) it warns that summarizing
+     * is close. With auto-compact OFF — the P45 default — it says what
+     * ACTUALLY happens: past the window, sends fail with an overflow
+     * error instead of the model's memory being summarized away. Null
+     * while there is room. Pure; the suite pins the threshold and the
+     * null cases in both modes.
      */
-    public static String riskNote(long depth, long limit) {
+    public static String riskNote(long depth, long limit, boolean autoCompact) {
         if (limit <= 0 || depth <= 0) return null;
         long pct = depth * 100 / limit;
         if (pct < 70) return null;
+        if (!autoCompact)
+            return "context is nearly full and auto-compact is off — past "
+                    + Resilience.fmtTok(limit) + " tokens sends fail with an "
+                    + "overflow error instead of summarizing. Start a fresh "
+                    + "chat when this fills";
         return "compaction is close: near " + Resilience.fmtTok(limit)
                 + " tokens the sandbox summarizes this chat's memory "
                 + "automatically. Finish the task or start a fresh chat to "
                 + "keep the details";
+    }
+
+    /** The pre-P45 two-arg form — auto-compact ON semantics (the only
+     *  behavior that existed before the switch). Kept for the suite's
+     *  existing pins; production calls the three-arg form. */
+    public static String riskNote(long depth, long limit) {
+        return riskNote(depth, limit, true);
     }
 
     /**

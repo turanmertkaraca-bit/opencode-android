@@ -68,14 +68,16 @@ public class P36Test {
     // ------------------------------------------------------------ mapping
 
     @Test
-    public void aliasMapping_allSevenPalettes() {
+    public void aliasMapping_allSixPalettes() {
         assertEquals("LauncherOled", LauncherIcon.aliasFor("oled"));
         assertEquals("LauncherMidnight", LauncherIcon.aliasFor("midnight"));
         assertEquals("LauncherGraphite", LauncherIcon.aliasFor("graphite"));
         assertEquals("LauncherEmber", LauncherIcon.aliasFor("ember"));
         assertEquals("LauncherForest", LauncherIcon.aliasFor("forest"));
         assertEquals("LauncherPaper", LauncherIcon.aliasFor("paper"));
-        assertEquals("LauncherClaude", LauncherIcon.aliasFor("claude"));
+        // P45: the removed claude palette has no alias — it falls to the
+        // classic icon like every unknown id
+        assertEquals(LauncherIcon.CLASSIC, LauncherIcon.aliasFor("claude"));
     }
 
     @Test
