@@ -251,8 +251,12 @@ public class P47Test {
 
     // ============================== 6. Version
 
-    @Test public void version_isP47() {
-        assertEquals("0.47.0-p47", SettingsActivity.VERSION_TAG);
+    @Test public void version_isP47OrLater() {
+        // P48 relaxed the exact pin to a floor (same move P47 made to
+        // P46Test) — future releases stop touching this file.
+        assertTrue("version must be P47 or later",
+                SettingsActivity.VERSION_TAG.compareTo("0.47.0-p47") > 0
+                        || SettingsActivity.VERSION_TAG.startsWith("0.47.0"));
     }
 
     private static Map<String, Object> obj(Object... kv) {

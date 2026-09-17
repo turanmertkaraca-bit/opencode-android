@@ -98,6 +98,21 @@ public class ChatActivity extends Activity
     private List<RunHub.Row> rows = RunHub.rows();
     private boolean pinnedBottom = true;
 
+    // P48 — the pin must never fight its own scrolling. The field report:
+    // streaming tokens made the chat "go up and down". Diagnosis: the
+    // scroll-changed listener fired for OUR programmatic scrolls too, and
+    // between a paint (content grows) and the corrective scroll the view
+    // reads as "not at bottom" — so the pin flipped off, the drift began,
+    // the next correction re-pinned, and the list oscillated. Two rails:
+    //   • progScroll — a programmatic scroll in flight; the listener
+    //     ignores every scroll change it causes. Our scrolls never move
+    //     the pin; only the USER's hand does.
+    //   • lastScrollY — an upward drag (scrollY decreasing) ALWAYS
+    //     unpins, even one pixel of it; downward motion re-pins only at
+    //     the true bottom. Dragging up can never be yanked back down.
+    private boolean progScroll;
+    private int lastScrollY;
+
     private RunHub.Row rowByKey(String key) {
         Integer i = key == null ? null : RunHub.idx().get(key);
         List<RunHub.Row> rs = RunHub.rows();
@@ -120,17 +135,21 @@ public class ChatActivity extends Activity
     private final Handler smoother = new Handler(Looper.getMainLooper());
     private boolean smootherRunning;
     /** P43: one pacer per streaming row — the arrival-rate reveal that
-     *  turns provider bursts into a continuous glide (StreamPacer). */
+     *  turns provider bursts into a continuous glide (StreamPacer).
+     *  P48: the profile follows the row kind — THINKING rows reveal on
+     *  the calm thought profile, everything else on the answer glide. */
     private final Map<String, StreamPacer> pacerByKey = new HashMap<>();
 
     /** P43: pacer for a row, with a bounded map (long sessions must not
-     *  accumulate entries). */
-    private StreamPacer pacerFor(String key) {
-        if (key == null) key = "";
+     *  accumulate entries). P48: kind-aware — a row that flips between
+     *  reasoning and answer gets a fresh pacer of the right profile. */
+    private StreamPacer pacerFor(RunHub.Row r) {
+        String key = r.key == null ? "" : r.key;
+        boolean thinking = r.kind == K_REASON;
         StreamPacer p = pacerByKey.get(key);
-        if (p == null) {
+        if (p == null || p.thinkingRow != thinking) {
             if (pacerByKey.size() > 256) pacerByKey.clear();
-            p = new StreamPacer();
+            p = thinking ? StreamPacer.forThinking() : StreamPacer.forAnswer();
             pacerByKey.put(key, p);
         }
         return p;
@@ -361,8 +380,28 @@ public class ChatActivity extends Activity
             public void afterTextChanged(Editable s) { syncCostHint(); }
         });
         scroll.getViewTreeObserver().addOnScrollChangedListener(() -> {
-            pinnedBottom = atBottom();
+            // P48: our own scrolls (scrollToEnd, the pill's glide home)
+            // never move the pin — only the user's hand does.
+            if (progScroll) return;
+            int y = scroll.getScrollY();
+            if (y < lastScrollY - 1) {
+                pinnedBottom = false;          // an upward drag always unpins
+            } else {
+                pinnedBottom = atBottom();     // downward: pin only at bottom
+            }
+            lastScrollY = y;
             syncPill();
+        });
+
+        // P48: a finger on the list owns the scroll immediately — cancel
+        // any programmatic bracket (pill glide, stream correction) so a
+        // drag that starts mid-flight is read as the user's hand.
+        scroll.setOnTouchListener((v, ev) -> {
+            if (ev.getActionMasked() == android.view.MotionEvent.ACTION_DOWN) {
+                progScroll = false;
+                lastScrollY = scroll.getScrollY();
+            }
+            return false;   // never consume — ScrollView keeps its behavior
         });
 
         buildVeil();
@@ -395,6 +434,11 @@ public class ChatActivity extends Activity
         // a healthy stream), restore the interrupted-run note, render.
         RunHub.bindUi(this);
         rows = RunHub.rows();
+        // P48: whatever streamed while this screen was away is already old
+        // news — land it SETTLED (full text, one repaint), exactly like the
+        // server UIs. Nothing that arrived in the background may re-animate
+        // or replay its glide; only deltas that arrive WHILE WATCHING glide.
+        snapArrived();
         startBeatClock();                    // P43: cache-beat clock (screen-open only)
         String interrupted = RunHub.consumeInterruptedNote();
         // P26: reconcile is now the ONLY resume path. The old empty-start
@@ -499,6 +543,14 @@ public class ChatActivity extends Activity
         }
         paintScheduled = false;
         dirtyRows.clear();
+        // P48: the stream ticker is a SCREEN citizen, not a process one.
+        // The run itself lives in RunHub (deltas keep landing while the
+        // screen is away — background sessions were and stay safe); but
+        // painting into a detached view tree every 24 ms is battery burn
+        // and a mid-glide replay on return. Stop the ticker here; onResume
+        // snaps everything that arrived to its settled text.
+        smoother.removeCallbacks(tick);
+        smootherRunning = false;
         // P25: that is ALL. The run, the SSE feed, the transcript, the
         // edit watcher — all live in RunHub now. Leaving to the deck keeps
         // the run streaming; nothing here can abort it (only ■ can).
@@ -658,7 +710,15 @@ public class ChatActivity extends Activity
     private void scrollToEnd() {
         View c = scroll.getChildAt(0);
         int bottom = c == null ? scroll.getHeight() : c.getHeight();
-        scroll.scrollTo(0, Math.max(0, bottom - scroll.getHeight()));
+        // P48: bracket the jump — the scrollChanged listener must read
+        // this as OUR scroll, not as the user drifting off the bottom.
+        progScroll = true;
+        try {
+            scroll.scrollTo(0, Math.max(0, bottom - scroll.getHeight()));
+            lastScrollY = scroll.getScrollY();
+        } finally {
+            scroll.post(() -> progScroll = false);
+        }
     }
 
     // ------------------------------------------------- P9 stream smoother
@@ -789,6 +849,7 @@ public class ChatActivity extends Activity
             // thread — a throw here used to kill the process mid-stream.
             Throwable t = Resilience.guard(() -> {
                 boolean[] moreBox = {false};
+                boolean[] paintedBox = {false};   // P48: did this tick actually paint?
                 synchronized (lock) {
                     for (int i = rows.size() - 1; i >= 0; i--) {
                         RunHub.Row r = rows.get(i);
@@ -811,8 +872,20 @@ public class ChatActivity extends Activity
                             // StreamPacer tracks how fast bytes arrive and
                             // reveals just behind that, with a lag ceiling
                             // so every burst still finishes within ~2 s.
+                            // P48: the profile follows the row — answers
+                            // glide capped at 900 c/s, THINKING rows crawl
+                            // at ≤170 c/s (the thought window is a window,
+                            // not a strobe; the answer's arrival snaps it).
                             long now = android.os.SystemClock.elapsedRealtime();
-                            r.shown = (int) pacerFor(r.key).tick(now, len);
+                            long was = r.shown;
+                            long ns = pacerFor(r).tick(now, len);
+                            // P48: the pacer's model can trail the view's
+                            // truth (a fresh pacer after a snap or resume
+                            // takes an opening bite) — the VIEW never goes
+                            // backwards. The clamp makes re-attachment
+                            // (resume, kind flip) regression-proof.
+                            r.shown = (int) Math.max(was, ns);
+                            paintedBox[0] = true;
                         }
                         // P24: a row that can't paint must not kill the
                         // whole ticker — quarantine it like a flush failure.
@@ -822,7 +895,12 @@ public class ChatActivity extends Activity
                         if (r.shown < len) moreBox[0] = true;
                     }
                 }
-                if (pinnedBottom) scrollToEnd();
+                // P48: scroll ONLY when this tick painted something, and
+                // POST it — after the layout pass, so the target height is
+                // the freshly grown one. The old inline scrollToEnd read a
+                // stale child height every 24 ms and the pin chased its own
+                // tail (the field's "it goes up and down").
+                if (paintedBox[0] && pinnedBottom) scroll.post(() -> scrollToEnd());
                 if (moreBox[0]) smoother.postDelayed(this, 24);
                 else smootherRunning = false;
             });
@@ -864,6 +942,27 @@ public class ChatActivity extends Activity
             boolean streamable = r.kind == K_ASSISTANT || r.kind == K_REASON;
             return last && streamable && r.shown < r.text.length()
                     && r.text.length() <= 40000;
+        }
+    }
+
+    /** P48: reveal everything already received — settle every streaming
+     *  row to its full text in one pass (pacers dropped, rows repainted
+     *  through the coalesced flush). Used on RESUME: text that arrived
+     *  while the screen was away must not re-animate on return. Rows that
+     *  are STILL receiving deltas glide again from the fresh tail — the
+     *  next delta re-arms the ticker with a fresh pacer, and the tick's
+     *  no-regression clamp keeps the view monotonic. Package-private:
+     *  the P48 test seam. */
+    void snapArrived() {
+        synchronized (lock) {
+            for (int i = 0; i < rows.size(); i++) {
+                RunHub.Row r = rows.get(i);
+                if ((r.kind != K_ASSISTANT && r.kind != K_REASON)
+                        || r.shown >= r.text.length()) continue;
+                r.shown = r.text.length();
+                if (r.key != null) pacerByKey.remove(r.key);
+                requestPaint(r);
+            }
         }
     }
 
@@ -1122,8 +1221,15 @@ public class ChatActivity extends Activity
         if (scrollPill == null) return;
         scrollPill.setOnClickListener(v -> {
             pinnedBottom = true;
+            // P48: the animated glide home fires scrollChanged every frame
+            // — bracket the whole flight or it unpins itself mid-air.
+            progScroll = true;
             scroll.smoothScrollTo(0,
                     Math.max(0, list.getHeight() - scroll.getHeight()));
+            scroll.postDelayed(() -> {
+                progScroll = false;
+                lastScrollY = scroll.getScrollY();
+            }, 450);
             syncPill();
         });
     }
@@ -2672,6 +2778,13 @@ public class ChatActivity extends Activity
                     // summary), gliding via the pacer.
                     TextView live = text(12, R.color.text_secondary, false);
                     live.setTypeface(Typeface.create("sans-serif", Typeface.ITALIC));
+                    // P48: the window is a FIXED-LENGTH stage — exactly three
+                    // lines, no more, no fewer. The old card was maxLines(3)
+                    // only, so the sliding window changed line count on every
+                    // reveal and the whole list bounced with it (the field's
+                    // "it goes up and down, almost had a seizure"). Reserved
+                    // height = zero layout surprises for the neighbors.
+                    live.setMinLines(3);
                     live.setMaxLines(3);
                     live.setEllipsize(android.text.TextUtils.TruncateAt.START);
                     String win = Resilience.thinkWindow(r.text.toString(),

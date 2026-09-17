@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.47.0 — P47)
+## Install (v0.48.0 — P48)
 
-1. Grab `opencode-p47-v0.47.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p48-v0.48.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
    Note: v0.38.0 was built and field-tested but never published here —
@@ -57,6 +57,61 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.48.0 (P48 — the smooth release)
+
+The field report on P47: the tokens ARE real-time now — but "they come
+and go so fast it glitches the ui, it goes up and down — almost had a
+seizure"; and the thinking bubble should "have a fixed length", showing
+the thought "a bit slower — faster than reading speed", with nothing
+still animating when the answer lands. Plus the standing worry: do
+background sessions stay healthy? P48 is a pure UI-calm release — the
+wire layer P47 verified is untouched.
+
+**1. The strobe is capped.** The P43 reveal pacer drained any burst
+inside a 2.2 s lag ceiling — which means a 4 kB burst revealed at
+~1800 chars/s, and fast providers arrived faster still. The pacer now
+carries profiles with a hard ceiling: the answer glides at most 900
+chars/s (clearly quicker than reading, never a flash), and THINKING
+rows reveal on their own profile at a calm ≤170 chars/s — faster than
+reading speed, slow enough to actually follow, and with no aggressive
+drain: the thought backlog may grow freely while the model thinks.
+When the answer's first token arrives, the ticker snaps the thinking
+row settled in one paint — the thought never races the answer, exactly
+as asked.
+
+**2. The thinking bubble is a fixed-length stage.** The collapsed
+thought card reserved only a MAXIMUM of three lines, so its sliding
+window changed line count on nearly every reveal and the whole list
+bounced with it — that was the up-and-down. The window is now exactly
+three lines, no more, no fewer (minLines = maxLines = 3): the newest
+reasoning crawls through a stationary frame, and the cards above and
+below it never move by a pixel until the row settles.
+
+**3. The scroll pin stopped fighting itself.** Second oscillator, the
+subtler one: the scroll listener fired for the app's OWN corrective
+scrolls too, and in the gap between a paint (content grew) and the
+scroll correction the view read as "not at bottom", so the pin flipped
+off, the next correction re-pinned — oscillation. Now programmatic
+scrolls carry a bracket the listener ignores; only the user's hand
+moves the pin (one pixel of upward drag unpins for good; downward
+motion re-pins only at the true bottom). Corrections also run after
+layout, so they target the freshly grown height instead of chasing a
+stale one every 24 ms.
+
+**4. Background sessions, made certain.** The run itself always lived
+in the hub (streams keep landing while the screen is away — that part
+was already safe and is unchanged), but the screen's paint ticker kept
+firing into the detached view tree every 24 ms: battery burn, and a
+mid-glide replay glitch on return. The ticker now stops on pause, and
+on resume everything that arrived is snapped SETTLED — full text, one
+repaint, zero re-animation, exactly like the server UIs. Only deltas
+that arrive while you watch glide.
+
+All 516 JVM tests green (13 new P48 pins: the two profile caps, the
+no-flash-drain guard for a 100 kB thought backlog, the stall floor,
+the legacy-pacer contract, resume-snap behavior through the real
+activity, the fixed three-line window, version).
 
 ## What's in v0.47.0 (P47 — the live token release)
 
@@ -1229,7 +1284,8 @@ scripts/                     toolchain setup, binary API scanners, packaging
 | P44 the quiet-collapse release: post-compaction anchor re-grounds the thread, window cap named, Claude face + M3 shapes | shipped |
 | P45 the act-normal release: auto-compaction off at the source, Graphite default again, Claude-Android chat layout, deck-only cold boot | shipped |
 | P46 the keep-it-alive-and-honest release: snapshot governor, git clone fixed on FUSE via private gitdir, private-first projects, long-session caps | shipped |
-| P47 the live token release: the real per-token delta stream consumed at last (true token-by-token rendering), FUSE-repo git tuning, in-place paint at token rate | **current** |
+| P47 the live token release: the real per-token delta stream consumed at last (true token-by-token rendering), FUSE-repo git tuning, in-place paint at token rate | shipped |
+| P48 the smooth release: capped reveal rates (900 c/s answers, calm 170 c/s thinking), a fixed-length thinking window, an anti-jitter scroll pin, background-arrival snap | **current** |
 
 ## Credits
 
