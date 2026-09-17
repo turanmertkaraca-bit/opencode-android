@@ -598,8 +598,14 @@ public class HomeActivity extends Activity implements ServerService.Evt {
     // ---------------------------------------------------------- dir picker
 
     private File pickBase() {
-        File ext = android.os.Environment.getExternalStorageDirectory();
-        return ext != null ? ext : new File("/");
+        // P46: new projects default to PRIVATE app storage — ext4 (fast,
+        // atomic renames so git clone works, no storage-permission dance).
+        // The picker starts there; ↑ .. still reaches shared storage for
+        // a folder the user deliberately wants on /sdcard (the git shim
+        // routes those repos' .git into private storage automatically).
+        File base = new File(getFilesDir(), "projects");
+        if (!base.exists()) base.mkdirs();
+        return base;
     }
 
     private void pickFolder() {
@@ -672,6 +678,15 @@ public class HomeActivity extends Activity implements ServerService.Evt {
             Sheet sh = Sheet.show(a, "Pick a project folder");
             if (!sh.showing()) return;
             sh.add(pathTv);
+            // P46: say WHY the picker starts private — the field run burned
+            // a session learning /sdcard breaks git clone.
+            final android.widget.TextView hint = new android.widget.TextView(a);
+            hint.setTextSize(11);
+            hint.setTextColor(Theme.TXT_DIM);
+            hint.setPadding(0, Theme.dp(a, 6), 0, 0);
+            hint.setText("Private app storage — fast + git-safe (clone works here). "
+                    + "Tap ↑ .. for shared /sdcard folders.");
+            sh.add(hint);
             sh.addFixed(lv, 320);
             sh.pill("Use this folder", Sheet.PRIMARY, () ->
                     cb.picked(cur[0].getAbsolutePath()));
