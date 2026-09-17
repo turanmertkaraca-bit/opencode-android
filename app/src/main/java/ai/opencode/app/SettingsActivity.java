@@ -43,6 +43,9 @@ import java.util.Locale;
  */
 public class SettingsActivity extends Activity implements ServerService.Evt {
 
+    /** P46: single version source for the About row — JVM tests pin it. */
+    static final String VERSION_TAG = "0.46.0-p46";
+
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout root;
     private TextView dot, stateTxt, pkgStatus, debStatus, debTitle;
@@ -282,7 +285,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", "0.45.0-p45 · graphite face restored, the Claude chat layout, auto-compact off by default, cold boot lands on the deck", "◆", v -> {}));
+        ab.addView(rowLink("Version", VERSION_TAG + " · real-time stream governor, git clone fixed on shared storage, new projects in private storage, long-session caps", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {

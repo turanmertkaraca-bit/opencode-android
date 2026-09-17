@@ -7,14 +7,14 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.45.0 — P45)
+## Install (v0.46.0 — P46)
 
-1. Grab `opencode-p45-v0.45.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p46-v0.46.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
    Note: v0.38.0 was built and field-tested but never published here —
    its fixes ride inside v0.39.0, so that release carries both.
-2. Open the app: the project deck ALWAYS opens first now — the app never
+2. Open the app: the project deck ALWAYS opens first — the app never
    throws you back into the last chat by itself; tapping a card is the
    explicit "start this project" act, exactly like the opencode TUI.
    **＋** adds a project, **long-press** a card → the project
@@ -57,6 +57,54 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.46.0 (P46 — the keep-it-alive-and-honest release)
+
+The field report that drove it: *"clone works fine in /tmp; the project
+folder's fuse filesystem can't do the atomic rename during git clone …
+maybe we should give it its own private storage? the live file watcher —
+make sure that works too … real-time token streaming doesn't work, I wait
+~15 seconds then bursts."* All three, fixed at the source.
+
+**1. Real-time streaming, cured.** The reason text arrived in 15-second
+bursts: opencode's event feed re-sends the WHOLE accumulated part text on
+every token delta — on a desktop that's invisible, on a phone the event
+thread drowned in quadratically-growing JSON parses (a 5k-token thinking
+block alone is ~25k token-payloads of JSON) and the UI got the leftovers.
+The new **stream governor** pre-screens each raw frame with a cheap scan
+(no JSON parse), applies at most one frame per part per 250 ms, and holds
+only the latest raw snapshot in between. Because every frame IS the full
+part state, dropping intermediates loses nothing — and the final state of
+every part always lands: force-flushed on message.updated / session.idle /
+session.error, on stream end, and via the bounded pending set. The chat's
+existing smoother still glides the text, fed in real time now.
+
+**2. git clone works everywhere.** Shared storage (/sdcard) is FUSE and
+cannot take git's atomic tmp+rename dance — that's why clone died there
+while /tmp (private ext4) cloned fine. Two layers of fix:
+- **New projects default to PRIVATE app storage** (ext4: fast, atomic,
+  no permission dance) — the Playground seed and the ＋ folder picker both
+  start there; ↑ .. in the picker still reaches /sdcard on purpose.
+- **The git shim** now detects clone/init into FUSE destinations and
+  injects `--separate-git-dir`: the real .git lives in private storage,
+  the working tree gets the tiny .git FILE pointer, and every later
+  lock/pack/object rename happens on ext4 — so even a deliberately
+  /sdcard-rooted repo keeps working forever after, not just the initial
+  clone. Explicit --separate-git-dir / --bare / -C are never touched.
+
+**3. The live file watcher, verified for private storage.** The watcher
+is the P16 inotify stack (recursive, depth/observer-capped, debounced)
+and it follows the project's real path wherever it lives — private ext4
+is native inotify territory, arguably better than FUSE. Nothing to
+change; now it's pinned.
+
+**4. Long-session stability sweep.** The seen-permission id set grew one
+entry per ask, forever — now hard-capped like every other bookkeeping map
+(P26 rules). The stream governor is itself a stability fix: the SSE
+thread no longer falls behind on long answers, and the pending frames
+are byte-bounded. Plus the usual: all 487 JVM tests green (12 new P46
+pins: governor scan, state machine, storm economics, fuse rule, shim
+injection, private seed, version).
 
 ## What's in v0.45.0 (P45 — the act-normal release)
 

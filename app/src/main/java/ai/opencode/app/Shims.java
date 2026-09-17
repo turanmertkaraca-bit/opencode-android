@@ -46,6 +46,23 @@ public final class Shims {
         return f;
     }
 
+    /** P46: the shell case that decides "destination is on FUSE" inside
+     *  the git shim — kept as a constant so the generated script and the
+     *  JVM-tested {@link #fusePath} rule stay the SAME rule by literal
+     *  inclusion (P46Test pins the shim contains this exact fragment). */
+    static final String FUSE_CASE =
+            "case \"$DEST\" in /sdcard|/sdcard/*|/storage/*|/mnt/*) true ;; *) false ;; esac";
+
+    /** P46 pure rule (JVM-tested): does this path live on Android FUSE —
+     *  shared storage, where git's tmp+rename dance dies? Mirrors the
+     *  shim's shell case above exactly. Private app storage (ext4) is
+     *  NOT fuse — git works there natively. */
+    static boolean fusePath(String p) {
+        if (p == null) return false;
+        return p.equals("/sdcard") || p.startsWith("/sdcard/")
+                || p.startsWith("/storage/") || p.startsWith("/mnt/");
+    }
+
     /**
      * Idempotent; called from Binaries.applyEnv before every spawn.
      *
@@ -79,22 +96,60 @@ public final class Shims {
             File realBash = new File(bin, "bash");
             writeBashShim(c, f);
 
+            /*
+             * P46 — the FUSE truth (field report: "clone works fine in
+             * /tmp; the project folder's fuse filesystem can't do the
+             * atomic rename during git clone"). /sdcard is FUSE: git's
+             * lock/pack tmp+rename dance dies there, while the private
+             * ext4 (rootfs /tmp) clones fine. For clone/init whose
+             * destination lives on FUSE, inject --separate-git-dir: the
+             * real .git dir lands in PRIVATE storage, the working tree
+             * gets the tiny .git FILE pointer, and every later
+             * lock/pack/object rename happens on ext4 — the repo keeps
+             * working forever after, not just the initial clone.
+             */
             String git =
                     "#!/system/bin/sh\n" +
-                    "if [ -x \"" + f + "/bin/git\" ]; then\n" +
-                    "  export HOME=" + f + "/home\n" +
-                    "  export TMPDIR=" + c.getCacheDir().getAbsolutePath() + "\n" +
-                    // P42 TLS truth: user-imported git gets the merged CA
-                    // bundle when it exists — https clone/push stop dying on
-                    // a missing /etc/ssl path that Android never had.
-                    "  CA=" + f + "/home/etc/ssl/cert.pem\n" +
-                    "  [ -r \"$CA\" ] && export GIT_SSL_CAINFO=\"$CA\"\n" +
-                    "  exec \"" + f + "/bin/git\" \"$@\"\n" +
+                    "FILES=\"" + f + "\"\n" +
+                    "REAL=\"$FILES/bin/git\"\n" +
+                    "if [ ! -x \"$REAL\" ]; then\n" +
+                    "  echo \"git is not installed in this app. Import a static\" >&2\n" +
+                    "  echo \"arm64 git binary via the app's Diagnostics screen\" >&2\n" +
+                    "  echo \"(it lands in bin/ and this shim will use it).\" >&2\n" +
+                    "  exit 127\n" +
                     "fi\n" +
-                    "echo \"git is not installed in this app. Import a static\" >&2\n" +
-                    "echo \"arm64 git binary via the app's Diagnostics screen\" >&2\n" +
-                    "echo \"(it lands in bin/ and this shim will use it).\" >&2\n" +
-                    "exit 127\n";
+                    "export HOME=\"$FILES/home\"\n" +
+                    "export TMPDIR=\"" + c.getCacheDir().getAbsolutePath() + "\"\n" +
+                    // P42 TLS truth: merged CA bundle for https clone/push
+                    "CA=\"$FILES/home/etc/ssl/cert.pem\"\n" +
+                    "[ -r \"$CA\" ] && export GIT_SSL_CAINFO=\"$CA\"\n" +
+                    // P46: FUSE destination → private .git via --separate-git-dir
+                    "if [ \"$1\" = \"clone\" ] || [ \"$1\" = \"init\" ]; then\n" +
+                    "  case \" $* \" in\n" +
+                    "    *\\ --separate-git-dir*|*\\ --bare\\ *|*\\ --bare|*\\ -C\\ *) ;;\n" +
+                    "    *)\n" +
+                    "      DEST=\"\"\n" +
+                    "      if [ \"$1\" = \"clone\" ] && [ $# -ge 3 ]; then\n" +
+                    "        eval \"DEST=\\${$#}\"\n" +
+                    "      elif [ \"$1\" = \"init\" ] && [ $# -ge 2 ]; then\n" +
+                    "        eval \"DEST=\\${$#}\"\n" +
+                    "        case \"$DEST\" in -*) DEST=\"\" ;; esac\n" +
+                    "      fi\n" +
+                    "      case \"$DEST\" in /*) : ;; *) DEST=`pwd` ;; esac\n" +
+                    "      if " + FUSE_CASE + "; then\n" +
+                    "        SEPGIT=\"$FILES/home/.sep-git\"\n" +
+                    "        mkdir -p \"$SEPGIT\" 2>/dev/null\n" +
+                    "        H=`printf '%s' \"$DEST\" | sha256sum 2>/dev/null | cut -c1-16`\n" +
+                    "        [ -n \"$H\" ] || H=\"g$$\"\n" +
+                    "        GD=\"$SEPGIT/$H.git\"\n" +
+                    "        if [ ! -e \"$GD\" ]; then\n" +
+                    "          exec \"$REAL\" \"$@\" --separate-git-dir=\"$GD\"\n" +
+                    "        fi\n" +
+                    "      fi\n" +
+                    "      ;;\n" +
+                    "  esac\n" +
+                    "fi\n" +
+                    "exec \"$REAL\" \"$@\"\n";
             writeShim(new File(shims, "git"), git);
 
             // keep timestamps fresh so exec is always permitted

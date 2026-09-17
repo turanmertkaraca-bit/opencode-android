@@ -139,6 +139,9 @@ public class ServerService extends Service {
 
     private static final ConcurrentLinkedQueue<Map<String, Object>> PERMS = new ConcurrentLinkedQueue<>();
     private static final Set<String> seenPermIds = ConcurrentHashMap.newKeySet();
+    // P46 long-session cap: seen ids grow by one per permission the server
+    // ever showed; a month of hard use must not grow the set forever
+    // (same hygiene rule answeredPermIds already follows).
     /** Request ids we already answered — tombstones so a re-seed/refresh can
      *  never re-queue a stale ask and flap the dialog forever. */
     private static final Set<String> answeredPermIds = ConcurrentHashMap.newKeySet();
@@ -765,6 +768,47 @@ public class ServerService extends Service {
 
     // ------------------------------------------------------------------ SSE
 
+    /** P46: the stream governor (see PartGovernor). message.part.updated
+     *  frames carry the WHOLE cumulative part text on every delta — on a
+     *  phone the oc-sse thread drowned in quadratic JSON work on thinking
+     *  models and the UI burst-fed. The governor applies at most one
+     *  frame per part per interval, holds only the latest raw snapshot
+     *  in between (lossless: every frame IS the full state), and force-
+     *  flushes on message.updated / session.idle / session.error and on
+     *  stream end. Instance field: one SSE loop per service lifetime. */
+    private final PartGovernor gov = new PartGovernor();
+
+    /** Throttle-aware dispatch of one raw SSE data frame (oc-sse thread). */
+    private void dispatchRaw(String raw) {
+        long now = System.currentTimeMillis();
+        for (String chunk : gov.offer(raw, now)) ingestChunk(chunk, now);
+    }
+
+    /** Parse + ingest one raw frame, then deliver anything the boundary
+     *  unblocked (message.updated / session.idle / session.error flush
+     *  every held part — the turn's end must never wait on a timer). */
+    private void ingestChunk(String raw, long now) {
+        Map<String, Object> ev = Json.obj(Json.parse(raw));
+        if (ev == null) return;
+        ingest(ev);
+        gov.noteType(Json.str(ev, "type"));
+        for (String c : gov.drain(now, false)) {
+            Map<String, Object> ev2 = Json.obj(Json.parse(c));
+            if (ev2 != null) ingest(ev2);
+        }
+    }
+
+    /** Drain everything held, regardless of interval. */
+    private void flushGovernor() {
+        long now = System.currentTimeMillis();
+        for (String c : gov.drain(now, true)) {
+            try {
+                Map<String, Object> ev = Json.obj(Json.parse(c));
+                if (ev != null) ingest(ev);
+            } catch (Exception ignored) {}
+        }
+    }
+
     /**
      * Owns /event for as long as the server lives. Parses data frames into
      * Maps and: (a) rebroadcasts to UI listeners, (b) queues permissions.
@@ -801,9 +845,9 @@ public class ServerService extends Service {
                                 if (data.length() > 0) data.append('\n');
                                 data.append(d);
                             } else if (line.isEmpty() && data.length() > 0) {
-                                Map<String, Object> ev = Json.obj(Json.parse(data.toString()));
+                                String raw = data.toString();
                                 data.setLength(0);
-                                if (ev != null) ingest(ev);
+                                dispatchRaw(raw);
                             }
                         }
                     }
@@ -814,6 +858,10 @@ public class ServerService extends Service {
                 } finally {
                     sseConn = null;
                     if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
+                    // P46: the feed ended (clean drop or reset) — deliver
+                    // every held frame before the reconnect sleep so the
+                    // governor can never swallow a part's final state.
+                    try { flushGovernor(); } catch (Throwable ignored) {}
                 }
                 if (RUNNING) {
                     try { Thread.sleep(2500); } catch (InterruptedException e) { return; }
@@ -843,7 +891,8 @@ public class ServerService extends Service {
             Map<String, Object> perm = normalizePermission(Json.map(ev, "properties"));
             if (perm != null) {
                 String id = Json.str(perm, "id");
-                if (id != null && !answeredPermIds.contains(id) && seenPermIds.add(id)) {
+                if (id != null && !answeredPermIds.contains(id) && seenPermIds.size() <= 256
+                        && seenPermIds.add(id)) {
                     PERMS.add(perm);
                     if (evtListeners.isEmpty()) {
                         updateNotif("⚠ permission requested — open OpenCode to review");
@@ -900,7 +949,8 @@ public class ServerService extends Service {
             for (Object o : arr) {
                 Map<String, Object> perm = normalizePermission(Json.obj(o));
                 String id = perm == null ? null : Json.str(perm, "id");
-                if (id != null && !answeredPermIds.contains(id) && seenPermIds.add(id)) {
+                if (id != null && !answeredPermIds.contains(id) && seenPermIds.size() <= 256
+                        && seenPermIds.add(id)) {
                     PERMS.add(perm);
                     added = true;
                 }

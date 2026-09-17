@@ -123,25 +123,20 @@ public final class Projects {
         return f.isDirectory() && f.canRead();
     }
 
-    /** Seed the first-run "Playground" project so the deck is never empty. */
+    /** Seed the first-run "Playground" project so the deck is never empty.
+     *
+     *  P46: the seed lands in PRIVATE app storage (files/projects) — ext4,
+     *  where git clone's atomic renames work and the agent's IO is fast.
+     *  The P8-era /sdcard seed shipped the field device a FUSE workspace
+     *  where `git clone` dies ("unable to rename … Invalid argument")
+     *  while the same clone into the rootfs /tmp succeeds. */
     public static void seed(Context c) {
         List<P> ps = list(c);
         if (!ps.isEmpty()) return;
-        String base = null;
-        try {
-            File ext = android.os.Environment.getExternalStorageDirectory();
-            if (ext != null && ext.canWrite()) {
-                File d = new File(ext, "opencode-projects/playground");
-                if (!d.exists()) d.mkdirs();
-                if (d.isDirectory()) base = d.getAbsolutePath();
-            }
-        } catch (Exception ignored) {}
-        if (base == null) {
-            File d = new File(c.getFilesDir(), "playground");
-            if (!d.exists()) d.mkdirs();
-            base = d.getAbsolutePath();
-        }
-        P p = add(c, base);
+        File d = new File(new File(c.getFilesDir(), "projects"), "playground");
+        if (!d.exists() && !d.mkdirs()) return;
+        if (!d.isDirectory()) return;
+        P p = add(c, d.getAbsolutePath());
         p.opened = 0; // not opened yet — just the welcome card
         save(c, list(c));
     }
