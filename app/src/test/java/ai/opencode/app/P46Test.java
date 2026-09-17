@@ -234,7 +234,9 @@ public class P46Test {
 
     // ================================== 4. Private project storage
 
-    @Test public void version_isP46() {
-        assertEquals("0.46.0-p46", SettingsActivity.VERSION_TAG);
+    @Test public void version_movedPastP46() {
+        // P47: releases only move forward; the exact current value is
+        // pinned by the current release's test (P47Test.version_isP47)
+        assertTrue(SettingsActivity.VERSION_TAG.compareTo("0.46.0-p46") > 0);
     }
 }

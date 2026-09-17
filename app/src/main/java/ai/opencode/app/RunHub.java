@@ -727,7 +727,9 @@ public final class RunHub implements ServerService.EventListener {
         restoreTold();
     }
 
-    private static final RunHub HUB = new RunHub();
+    /** Package-visible: JVM tests (P47Test) drive the SSE wiring through
+     *  the real listener instead of reflection. */
+    static final RunHub HUB = new RunHub();
 
     // --------------------------------------------------- run-state file
 
@@ -1180,6 +1182,30 @@ public final class RunHub implements ServerService.EventListener {
                                     + "Sessions → long-press → Stop ends it");
                     }
                 }
+            } else if ("message.part.delta".equals(type)) {
+                // P47 — THE live token. Ground truth on opencode v1.18.25
+                // (mock streaming provider + timestamped /event probe):
+                // the feed publishes message.part.updated snapshots only
+                // at part BOUNDARIES (created-empty → final), while the
+                // actual per-provider-delta payload rides message.part
+                // .delta frames {sessionID, messageID, partID, field:
+                // "text", delta} in real time. The app consumed only the
+                // snapshots, so the screen showed nothing while the model
+                // spoke and the whole reply materialized at once — the
+                // exact field report behind P43/P46. Deltas now append to
+                // the row as they arrive; the boundary snapshots keep
+                // reconciling authoritatively (mergeText growth rule).
+                String dsid = Json.str(props, "sessionID");
+                String dmid = Json.str(props, "messageID");
+                String dpid = Json.str(props, "partID");
+                String dfield = Json.str(props, "field");
+                String ddelta = Json.str(props, "delta");
+                if (dmid != null && dpid != null && "text".equals(dfield)
+                        && ddelta != null && !ddelta.isEmpty()) {
+                    touchRun(dsid);                 // P31: this run is alive NOW
+                    if (busy) runHadOutput = true;  // P11: output happened
+                    applyDelta(dsid, dmid, dpid, ddelta);
+                }
             } else if ("message.updated".equals(type)) {
                 Map<String, Object> minfo = Json.map(props, "info");
                 if (minfo != null) {
@@ -1541,6 +1567,69 @@ public final class RunHub implements ServerService.EventListener {
             // a malformed part must never take the hub down
         } catch (Throwable e) {
             Trail.record(appCtx, "hub part", e);
+        }
+    }
+
+    /** P47 — append one live delta to its part's row. Keyed exactly like
+     *  applyPart keys parts (messageID|partID) so the boundary snapshots
+     *  and the delta stream meet in the same row:
+     *
+     *    - row exists (the normal case: part.updated created it empty
+     *      right before the first delta) → append. Text rows only —
+     *      tool/file rows are snapshot-owned and never delta-fed.
+     *    - row missing (an SSE reconnect swallowed the created-empty
+     *      frame) → create an assistant text row on demand. Deltas only
+     *      originate from assistant generation, so this can never conjure
+     *      a user line; the eventual part.updated snapshot reconciles
+     *      type and full text anyway (mergeText adopts its growth).
+     *
+     *  Append is the honest primitive here: each delta IS the increment,
+     *  so re-merge machinery would only risk dropping content. Called
+     *  from onEvent (main) or hopped to main like the upserts. */
+    static void applyDelta(String sid, String mid, String pid, String delta) {
+        // entry-point guards: the onEvent branch pre-filters, but this is
+        // a package API — every direct caller gets the same safety
+        if (mid == null || pid == null || delta == null || delta.isEmpty())
+            return;
+        try {
+            final Tx t = txnFor(sid);
+            final String key = mid + "|" + pid;
+            if ("user".equals(roleOf(t, mid))) return;   // user parts never stream
+            main(() -> {
+                if (deltaAppendTx(t, key, mid, delta)) afterUpsert(t, key);
+            });
+        } catch (Exception e) {
+            // a malformed delta must never take the hub down
+        } catch (Throwable e) {
+            Trail.record(appCtx, "hub delta", e);
+        }
+    }
+
+    /** The pure delta state machine — same LOCK, same Tx the upserts
+     *  mutate; returns true when the row changed (caller notifies).
+     *  JVM-testable without the main-thread hop (P47Test drives the full
+     *  snapshot→deltas→snapshot turn through it directly). */
+    static boolean deltaAppendTx(Tx t, String key, String mid, String delta) {
+        synchronized (LOCK) {
+            Row r = rowIn(t, key);
+            if (r == null) {
+                r = new Row();
+                r.kind = K_ASSISTANT;
+                r.key = key;
+                r.ts = System.currentTimeMillis();
+                MsgInfo mi = t.msgs.get(mid);
+                r.meta = mi == null ? null : mi.meta;
+                r.text.append(delta);
+                t.rows.add(r);
+                t.idxByKey.put(key, t.rows.size() - 1);
+                t.rowsAdded++;
+                return true;
+            }
+            if (r.kind == K_ASSISTANT || r.kind == K_REASON) {
+                r.text.append(delta);
+                return true;
+            }
+            return false;                 // snapshot-owned row: ignore
         }
     }
 
