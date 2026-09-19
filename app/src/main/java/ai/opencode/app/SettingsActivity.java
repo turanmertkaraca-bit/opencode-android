@@ -43,8 +43,11 @@ import java.util.Locale;
  */
 public class SettingsActivity extends Activity implements ServerService.Evt {
 
-    /** P46: single version source for the About row — JVM tests pin it. */
-    static final String VERSION_TAG = "0.48.0-p48";
+    /** P46: single version source for the About row — JVM tests pin it.
+     *  P49 — the consistency release: no ANR on Settings/Diagnostics (the
+     *  size walks left the main thread), the keyboard re-anchor, the
+     *  once-and-quiet markdown finalize, bounded log reads. */
+    static final String VERSION_TAG = "0.49.0-p49";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout root;
@@ -285,7 +288,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", VERSION_TAG + " · smooth streaming — capped reveal rates, a fixed-length thinking window, an anti-jitter scroll pin, background-arrival snap", "◆", v -> {}));
+        ab.addView(rowLink("Version", VERSION_TAG + " · the consistency release — no more waits on Settings (size cards measure in the background), the chat stays glued to the bottom when the keyboard opens, markdown lands once when the stream settles, log views read a bounded tail", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -297,9 +300,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 }));
         root.addView(ab);
 
-        // staggered entrance
+        // staggered entrance — P49: capped. With ~30 children the old
+        // i*45 ms delay held the last card motionless for over a second;
+        // past ~300 ms more delay reads as lag, not polish. Every child
+        // still rises, just within the first third of a second.
         for (int i = 0; i < root.getChildCount(); i++) {
-            Theme.enter(root.getChildAt(i), i * 45L);
+            Theme.enter(root.getChildAt(i), Math.min(i * 45L, 300L));
         }
         return scroll;
     }
@@ -521,13 +527,25 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         return r;
     }
 
+    /** P49: the size number arrives OFF the main thread — the last known
+     *  value paints instantly (cache), a stale one re-measures in the
+     *  background and reposts. The old code walked the whole Alpine tree
+     *  right here, on the UI thread, on every create AND resume. */
     private void refreshPkg() {
         if (pkgStatus == null) return;
         if (Sandbox.ready(this)) {
-            long sz = Sandbox.sizeOf(Sandbox.alpineDir(this));
-            pkgStatus.setText("installed · " + Binaries.human(sz)
-                    + " · alpine " + Sandbox.REPO_VER);
+            long known = Sandbox.sizeKnown(Sandbox.SIZE_ALPINE);
+            pkgStatus.setText(known >= 0
+                    ? "installed · " + Binaries.human(known)
+                        + " · alpine " + Sandbox.REPO_VER
+                    : "installed · measuring… · alpine " + Sandbox.REPO_VER);
             pkgStatus.setTextColor(Theme.OK);
+            Sandbox.sizeAsync(Sandbox.SIZE_ALPINE, Sandbox.alpineDir(this),
+                    60_000L, sz -> ui.post(() -> {
+                        if (pkgStatus == null || isFinishing() || isDestroyed()) return;
+                        pkgStatus.setText("installed · " + Binaries.human(sz)
+                                + " · alpine " + Sandbox.REPO_VER);
+                    }));
         } else {
             pkgStatus.setText("not installed yet — installing on first boot…");
             pkgStatus.setTextColor(Theme.WARN);
@@ -579,17 +597,37 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         return r;
     }
 
+    /** P49: THE crash the field reported — this used to walk the ENTIRE
+     *  Debian rootfs (every apt-installed file, tens of thousands of
+     *  entries after weeks of use) synchronously inside buildUi() →
+     *  onCreate: the Settings screen blocked for seconds, went black and
+     *  the system killed the app (an ANR). The status word is cheap
+     *  (marker + prefs) and stays sync; the size walk is cached and
+     *  measured off-thread, repainting when the fresh number lands. */
     private void refreshDebian() {
         if (debStatus == null) return;
+        boolean extracted = Debian.extracted(this);
+        long known = extracted
+                ? Sandbox.sizeKnown(Sandbox.SIZE_DEBIAN) : 0;
         debStatus.setText(Debian.status(this)
-                + (Debian.extracted(this)
-                        ? " · " + Binaries.human(Debian.sizeOf(this)) : ""));
+                + (extracted
+                    ? " · " + (known >= 0
+                        ? Binaries.human(known) : "measuring…")
+                    : ""));
         debStatus.setTextColor(Debian.active(this) ? Theme.OK
-                : Debian.extracted(this) ? Theme.WARN : Theme.TXT_DIM);
+                : extracted ? Theme.WARN : Theme.TXT_DIM);
         if (debTitle != null) {
-            debTitle.setText(Debian.extracted(this)
+            debTitle.setText(extracted
                     ? "Debian 12 + apt  ·  tap to repair / re-probe ▸"
                     : "Debian 12 + apt  ·  tap to install ▸");
+        }
+        if (extracted) {
+            Sandbox.sizeAsync(Sandbox.SIZE_DEBIAN, Debian.dir(this),
+                    60_000L, sz -> ui.post(() -> {
+                        if (debStatus == null || isFinishing() || isDestroyed()) return;
+                        debStatus.setText(Debian.status(this)
+                                + " · " + Binaries.human(sz));
+                    }));
         }
     }
 
@@ -1059,14 +1097,16 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         }
     }
 
-    /** P18: the sandbox's own black box — files/sandbox-diag.log. */
+    /** P18: the sandbox's own black box — files/sandbox-diag.log.
+     *  P49: the read is TAIL-BOUNDED (64 KB). The log appends for the
+     *  life of the install; a whole-file readAll on the UI thread turned
+     *  a months-old install's tap into a stutter. The newest lines are
+     *  the ones that matter — the tail is the story. */
     private void showIncidentLog() {
         String body;
         try {
             java.io.File f = new java.io.File(getFilesDir(), "sandbox-diag.log");
-            body = f.exists()
-                    ? ai.opencode.app.Api.readAll(new java.io.FileInputStream(f))
-                    : "";
+            body = ai.opencode.app.Api.readTail(f, 64 * 1024);
         } catch (Exception e) { body = ""; }
         if (body.trim().isEmpty()) {
             body = "No incidents recorded — the sandbox has not died since "
@@ -1157,10 +1197,58 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         sh.focus(search);
 
         final List<Object[]> items = new ArrayList<>();
+        // P49: ONE adapter, created once — the old refill built a new
+        // BaseAdapter per keystroke and setAdapter'd it, resetting the
+        // list state and repainting everything from scratch: the model
+        // picker flickered while typing. Now refill only mutates the
+        // items and notifies — the ListView keeps its bookkeeping.
+        final String[][] curBox = new String[1][];
+        final android.widget.BaseAdapter sheetAdt = new android.widget.BaseAdapter() {
+            public int getCount() { return items.size(); }
+            public Object getItem(int i) { return items.get(i); }
+            public long getItemId(int i) { return i; }
+            public View getView(int i, View cv, ViewGroup parent) {
+                Object[] it = items.get(i);
+                LinearLayout row = new LinearLayout(SettingsActivity.this);
+                row.setOrientation(LinearLayout.VERTICAL);
+                int pd = dp(14);
+                row.setPadding(pd, dp(8), pd, dp(8));
+                if ("h".equals(it[0])) {
+                    Models.Prov pr = (Models.Prov) it[1];
+                    TextView t = text(12, pr.configured ? Theme.OK : Theme.ACCENT_LT, true);
+                    t.setText(pr.name + (pr.configured ? "  ✓ ready"
+                            : pr.usable ? "  (no key)" : "  (add API key)"));
+                    row.addView(t);
+                } else if ("m".equals(it[0])) {
+                    Models.Mdl m = (Models.Mdl) it[2];
+                    Models.Prov pr = (Models.Prov) it[1];
+                    String[] cur = curBox[0];
+                    boolean isCur = cur != null && cur[0].equals(pr.id)
+                            && cur[1].equals(m.id);
+                    TextView t1 = text(14, isCur ? Theme.OK : Theme.TXT, isCur);
+                    t1.setText((isCur ? "✓ " : "") + m.name);
+                    t1.setSingleLine(true);
+                    t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    TextView t2 = text(11, Theme.TXT_DIM, false);
+                    t2.setText(pr.id + "/" + m.id);
+                    t2.setSingleLine(true);
+                    t2.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+                    row.addView(t1);
+                    row.addView(t2);
+                } else {
+                    TextView t = text(12, Theme.TXT_DIM, false);
+                    t.setText(String.valueOf(it[2]));
+                    row.addView(t);
+                }
+                return row;
+            }
+        };
+        lv.setAdapter(sheetAdt);
+
         Runnable refill = () -> {
             String q = search.getText().toString().toLowerCase(Locale.US).trim();
             items.clear();
-            String[] cur = Models.selected(this);
+            curBox[0] = Models.selected(this);
             for (Models.Prov pr : provs) {
                 boolean provHit = q.isEmpty()
                         || pr.id.toLowerCase(Locale.US).contains(q)
@@ -1178,45 +1266,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
                 if (shown.size() > cap) items.add(new Object[]{"t", pr,
                         "… " + (shown.size() - cap) + " more (refine search)"});
             }
-            lv.setAdapter(new android.widget.BaseAdapter() {
-                public int getCount() { return items.size(); }
-                public Object getItem(int i) { return items.get(i); }
-                public long getItemId(int i) { return i; }
-                public View getView(int i, View cv, ViewGroup parent) {
-                    Object[] it = items.get(i);
-                    LinearLayout row = new LinearLayout(SettingsActivity.this);
-                    row.setOrientation(LinearLayout.VERTICAL);
-                    int pd = dp(14);
-                    row.setPadding(pd, dp(8), pd, dp(8));
-                    if ("h".equals(it[0])) {
-                        Models.Prov pr = (Models.Prov) it[1];
-                        TextView t = text(12, pr.configured ? Theme.OK : Theme.ACCENT_LT, true);
-                        t.setText(pr.name + (pr.configured ? "  ✓ ready"
-                                : pr.usable ? "  (no key)" : "  (add API key)"));
-                        row.addView(t);
-                    } else if ("m".equals(it[0])) {
-                        Models.Mdl m = (Models.Mdl) it[2];
-                        Models.Prov pr = (Models.Prov) it[1];
-                        boolean isCur = cur != null && cur[0].equals(pr.id)
-                                && cur[1].equals(m.id);
-                        TextView t1 = text(14, isCur ? Theme.OK : Theme.TXT, isCur);
-                        t1.setText((isCur ? "✓ " : "") + m.name);
-                        t1.setSingleLine(true);
-                        t1.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                        TextView t2 = text(11, Theme.TXT_DIM, false);
-                        t2.setText(pr.id + "/" + m.id);
-                        t2.setSingleLine(true);
-                        t2.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-                        row.addView(t1);
-                        row.addView(t2);
-                    } else {
-                        TextView t = text(12, Theme.TXT_DIM, false);
-                        t.setText(String.valueOf(it[2]));
-                        row.addView(t);
-                    }
-                    return row;
-                }
-            });
+            sheetAdt.notifyDataSetChanged();
         };
         search.addTextChangedListener(new android.text.TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int c2, int d) {}

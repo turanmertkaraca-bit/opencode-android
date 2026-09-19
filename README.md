@@ -7,9 +7,9 @@ bundled in the APK and runs natively in app-private storage.
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.48.0 — P48)
+## Install (v0.49.0 — P49)
 
-1. Grab `opencode-p48-v0.48.0-debug.apk` from the releases page and sideload
+1. Grab `opencode-p49-v0.49.0-debug.apk` from the releases page and sideload
    it (same signing key as every earlier build → installs as an update in
    place, no uninstall; your projects, keys and sessions survive).
    Note: v0.38.0 was built and field-tested but never published here —
@@ -57,6 +57,50 @@ One honest row for the other side: the TUI exposes every CLI knob, and
 the app deliberately covers the core loop instead — power config still
 lives in the sandbox's own files. Same brain, same sessions-on-disk
 format. One of the two was designed for a phone.
+
+## What's in v0.49.0 (P49 — the consistency release)
+
+The field report: the first P49 was finished in the sandbox but never
+published — the user ran the grabbed APK and hit the wall: "i wanted to
+open settings i was able to before but now it lags black screen and
+crashes i dont want any crashing happening". And the standing P48
+verdict: "the ui is still very weird it glitches a lot … i dont want any
+glitches anymore so make sure u get rid of em all". P49 rebuilds from
+the published v0.48.0 and cures four real diseases, all pinned by tests:
+
+- **THE SETTINGS CRASH (the ANR), cured at the source.** Opening
+  Settings (and Diagnostics) walked the ENTIRE Debian rootfs and the
+  Alpine toolkit RECURSIVELY ON THE UI THREAD — every open, every
+  resume. On a grown install (weeks of apt installs: tens of thousands
+  of files) that is seconds of main-thread block: the exact "lags,
+  black screen, crashes" (an ANR kill). Now the size cards measure OFF
+  the main thread behind a process-wide cache — the last known number
+  paints instantly, a stale one re-measures in the background and
+  reposts. The incident-log viewer reads a TAIL-BOUNDED window (64 KB)
+  instead of whole-file readAll. The walks never touch the UI thread
+  again; the contract is pinned with a deterministic executor.
+- **THE KEYBOARD RE-ANCHOR.** adjustResize shrinks the transcript when
+  the IME opens — and nothing re-anchored the pinned bottom, so the
+  newest rows sat HIDDEN BEHIND the keyboard until the next paint (the
+  "ui glitches when the keyboard comes up" class). A layout-change
+  listener glues the chat back to the bottom the same breath the
+  viewport resizes — keyboard, split-screen, DeX — and only then (row
+  growth changes the list's height, not the viewport).
+- **THE QUIET FINALIZE.** The catch-up → markdown rebuild ran at EVERY
+  burst boundary: each catch-up re-rendered the whole part and rebuilt
+  the row. A long answer arrives as many bursts — dozens of full
+  main-thread re-renders, each a visible hitch (the stream glided after
+  P43/P48, but the screen still stuttered between glides). Now the
+  cheap plain-text painter keeps painting and the ONE markdown rebuild
+  lands 600 ms after the row stops growing; a resumed stream re-arms
+  it, a click still answers instantly, and pause/reset cancel it.
+- **THE HONEST SCROLL BASE.** The pin's base position went stale after
+  a long "↓ latest" flight and read the next real event as a huge
+  upward drag — the pill flashed back for a frame after landing. The
+  base is now always current, the pin decision is a pure function, and
+  the model picker stops rebuilding its adapter on every keystroke.
+- Plus: the Settings entrance stagger is capped (past ~300 ms delay
+  reads as lag, not polish) — and 18 new tests pin all of it; 534 green.
 
 ## What's in v0.48.0 (P48 — the smooth release)
 

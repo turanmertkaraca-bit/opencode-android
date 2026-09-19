@@ -380,17 +380,35 @@ public class ChatActivity extends Activity
             public void afterTextChanged(Editable s) { syncCostHint(); }
         });
         scroll.getViewTreeObserver().addOnScrollChangedListener(() -> {
+            // P49: keep the base CURRENT even for our own bracketed scrolls
+            // (the pill's 450 ms flight on a very long list can outlast the
+            // bracket — a stale base read the next real event as a huge
+            // upward drag and flicked the pin off right after landing: the
+            // "↓ latest" pill flashed for a frame after every long glide).
             // P48: our own scrolls (scrollToEnd, the pill's glide home)
-            // never move the pin — only the user's hand does.
-            if (progScroll) return;
+            // still never MOVE the pin — only the user's hand does.
+            int prev = lastScrollY;
             int y = scroll.getScrollY();
-            if (y < lastScrollY - 1) {
-                pinnedBottom = false;          // an upward drag always unpins
-            } else {
-                pinnedBottom = atBottom();     // downward: pin only at bottom
-            }
             lastScrollY = y;
+            if (progScroll) return;
+            pinnedBottom = pinDecision(y, prev, atBottom());
             syncPill();
+        });
+
+        // P49: the re-anchor. The IME (and split-screen / DeX resizes)
+        // shrinks this ScrollView via adjustResize; without a re-anchor
+        // the scroll position stays where it was and the newest rows sit
+        // HIDDEN BEHIND the keyboard until the next paint — the field's
+        // "the ui glitches when the keyboard comes up". When the viewport
+        // height changes and we were pinned, glue to the bottom in the
+        // same breath. The scroll's own height only changes for real
+        // window-level resizes (row growth changes the LIST's height, not
+        // the viewport), so this fires exactly for the events that need it.
+        scroll.addOnLayoutChangeListener((v, lf, tf, rf, bf, olf, otf, orf, obf) -> {
+            if ((bf - tf) != (obf - otf) && pinnedBottom
+                    && !isFinishing() && !isDestroyed()) {
+                scroll.post(this::scrollToEnd);
+            }
         });
 
         // P48: a finger on the list owns the scroll immediately — cancel
@@ -543,6 +561,9 @@ public class ChatActivity extends Activity
         }
         paintScheduled = false;
         dirtyRows.clear();
+        // P49: pending markdown finalizes die with the screen — nothing
+        // fires into a detached view tree (the P48 ticker lesson, kept).
+        cancelFinalizes();
         // P48: the stream ticker is a SCREEN citizen, not a process one.
         // The run itself lives in RunHub (deltas keep landing while the
         // screen is away — background sessions were and stay safe); but
@@ -632,6 +653,8 @@ public class ChatActivity extends Activity
             dirtyRows.clear();
             paintScheduled = false;
             ui.removeCallbacks(flushPaints);
+            cancelFinalizes();               // P49: the transcript is being replaced
+            liveStreamViews.clear();         // P49: the view maps are going too
             dirState.clear();
             viewByKey.clear();
             bodyByKey.clear();
@@ -695,6 +718,15 @@ public class ChatActivity extends Activity
     private boolean atBottom() {
         int off = scroll.getScrollY() + scroll.getHeight() - list.getHeight();
         return off > -80;
+    }
+
+    /** P49: the pin decision, pure — the listener stays wiring and the
+     *  suite pins the policy. An upward move ALWAYS unpins; downward (or
+     *  still) re-pins only at the true bottom. Identical contract to the
+     *  P48 inline logic, now visible to tests. */
+    static boolean pinDecision(int y, int prevY, boolean atBottom) {
+        if (y < prevY - 1) return false;
+        return atBottom;
     }
 
     private void autoscroll() {
@@ -930,9 +962,60 @@ public class ChatActivity extends Activity
             body.setText(s.length() == 0 ? "…" : s + "▍");
         }
         if (r.shown >= len) {
-            // caught up → finalize with markdown (single rebuild)
-            touchView(r);
+            // P49: caught up → the markdown rebuild lands ONCE, after the
+            // row has been quiet for a beat — not at every burst boundary.
+            scheduleFinalize(r);
         }
+    }
+
+    // ------------------------------------------------ P49: quiet finalize
+
+    /** P49: the catch-up → markdown rebuild used to run at EVERY burst
+     *  boundary: each catch-up re-rendered the whole part with Markdown
+     *  and rebuilt the view (removeViewAt+addView = full relayout of the
+     *  row). A long answer arrives as many bursts — dozens of full
+     *  main-thread re-renders, each a visible hitch: the stream glided
+     *  (P43/P48) but the screen still stuttered at every catch-up. Now
+     *  the plain-text painter keeps painting, and the ONE markdown
+     *  rebuild lands {@link #FINALIZE_QUIET_MS} after the row stops
+     *  growing — the answer settles, then the rich text fades in calm. */
+    static final long FINALIZE_QUIET_MS = 600;
+    private final java.util.HashMap<String, Runnable> finalizePending =
+            new java.util.HashMap<>();
+
+    /** P49: keys whose on-screen body is the CHEAP STREAMING view (the
+     *  caret painter). While a key is here, flush-driven repaints with
+     *  the row caught up route to the quiet finalize instead of
+     *  rebuilding — the boundary snapshots can no longer cost a full
+     *  markdown render per burst. Cleared wherever the view maps clear. */
+    private final java.util.HashSet<String> liveStreamViews =
+            new java.util.HashSet<>();
+
+    void scheduleFinalize(RunHub.Row r) {   // package-private: P49 test seam
+        if (r.key == null) { touchView(r); return; }   // unkeyed: old path
+        Runnable old = finalizePending.remove(r.key);
+        if (old != null) ui.removeCallbacks(old);
+        final String k = r.key;
+        Runnable fin = () -> {
+            finalizePending.remove(k);
+            if (isFinishing() || isDestroyed()) return;
+            List<RunHub.Row> rs = RunHub.rows();
+            Integer i = RunHub.idx().get(k);
+            if (i == null || i >= rs.size() || rs.get(i) != r) return;
+            if (r.shown < r.text.length()) return;   // growing again — the next catch-up re-arms
+            liveStreamViews.remove(k);   // THIS is the one rebuild
+            touchView(r);                             // the single markdown rebuild
+        };
+        finalizePending.put(k, fin);
+        ui.postDelayed(fin, FINALIZE_QUIET_MS);
+    }
+
+    /** Cancel every pending finalize — pause (nothing may fire into a
+     *  detached tree, the P48 lesson) and hubReset (the transcript is
+     *  being replaced). */
+    private void cancelFinalizes() {
+        for (Runnable f : finalizePending.values()) ui.removeCallbacks(f);
+        finalizePending.clear();
     }
 
     private boolean isStreamingTail(RunHub.Row r) {
@@ -2514,6 +2597,19 @@ public class ChatActivity extends Activity
         }
 
         // not streaming: everything painted now
+        // P49: — EXCEPT a caught-up streaming view. The flush path (the
+        // boundary snapshots) used to land HERE with shown == len and
+        // rebuild the whole row: the exact per-burst markdown render the
+        // quiet finalize exists to prevent. While the cheap caret view
+        // is what's on screen, that rebuild belongs to the finalize.
+        // A click the user just made (lastToggled) bypasses — the card
+        // answers NOW.
+        if (r.key != null && (r.kind == K_ASSISTANT || r.kind == K_REASON)
+                && liveStreamViews.contains(r.key)
+                && !r.key.equals(lastToggled)) {
+            scheduleFinalize(r);
+            return;
+        }
         r.shown = len;
         View nv = buildRowView(r);
         boolean toggled = r.key != null && r.key.equals(lastToggled);
@@ -2554,6 +2650,7 @@ public class ChatActivity extends Activity
             snapshot = new ArrayList<>(rows);
             needFullRender = false;
             viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
+            liveStreamViews.clear();          // P49: fresh render, fresh stages
             pacerByKey.clear();                 // P43: fresh render, fresh pace
             for (RunHub.Row r : snapshot) r.shown = r.text.length(); // history: no caret
         }
@@ -2718,6 +2815,11 @@ public class ChatActivity extends Activity
                 TextView m = r.meta == null ? null
                         : (TextView) box.getChildAt(box.getChildCount() - 1);
                 if (m != null && m != body) metaByKey.put(key, m);
+                // P49: the caret stage is a tracked state — the flush guard
+                // routes caught-up repaints to the quiet finalize while it
+                // stands, and the finalize itself retires it.
+                if (streaming && !blankText) liveStreamViews.add(key);
+                else liveStreamViews.remove(key);
                 return box;
             }
             case K_REASON: {
@@ -2771,6 +2873,8 @@ public class ChatActivity extends Activity
                     c.addView(body);
                     viewByKey.put(key, c);
                     bodyByKey.put(key, body);
+                    if (streaming) liveStreamViews.add(key);     // P49 stage tracking
+                    else liveStreamViews.remove(key);
                 } else if (streaming) {
                     // P43: the live thought is now a REAL window — three
                     // lines of the freshest reasoning, tail-anchored, not
@@ -2795,10 +2899,12 @@ public class ChatActivity extends Activity
                     c.addView(live);
                     viewByKey.put(key, c);
                     bodyByKey.put(key, live);
+                    liveStreamViews.add(key);        // P49 stage tracking
                     r.livePreview = true;
                 } else {
                     viewByKey.remove(key);          // P20: never leave a ghost
                     bodyByKey.remove(key);          // registration behind
+                    liveStreamViews.remove(key);    // P49: the stage retired too
                 }
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,

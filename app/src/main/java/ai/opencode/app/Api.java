@@ -133,4 +133,35 @@ public final class Api {
     public static String readLine(BufferedReader r) throws IOException {
         return r.readLine();
     }
+
+    /**
+     * P49 — the last {@code maxBytes} of a text file, UTF-8. The log
+     * viewers used to {@link #readAll} whole files on the UI thread; a log
+     * that grew for weeks (the sandbox incident log appends for the life
+     * of the install) turned a tap into a stutter. The read is bounded at
+     * the byte level and starts on a line boundary: a partial first line
+     * (the cut through a multibyte char or a half-written line) is
+     * dropped, so the viewer never paints a torn row.
+     */
+    public static String readTail(java.io.File f, int maxBytes) throws IOException {
+        if (f == null || !f.isFile()) return "";
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(f, "r");
+        try {
+            long len = raf.length();
+            if (len == 0) return "";
+            int want = (int) Math.min(len, (long) Math.max(1, maxBytes));
+            long start = len - want;
+            raf.seek(start);
+            byte[] b = new byte[want];
+            raf.readFully(b);
+            String s = new String(b, StandardCharsets.UTF_8);
+            if (start > 0) {
+                int nl = s.indexOf('\n');
+                s = nl >= 0 ? s.substring(nl + 1) : "";
+            }
+            return s;
+        } finally {
+            try { raf.close(); } catch (IOException ignored) {}
+        }
+    }
 }

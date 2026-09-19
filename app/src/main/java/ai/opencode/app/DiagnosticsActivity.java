@@ -110,28 +110,42 @@ public class DiagnosticsActivity extends Activity {
         // P27 phase 2: sandbox weight + boot budget — the trim report, the
         // boot hygiene line, and the measured cold-boot numbers, so the
         // "size + speed" work is ON THE RECORD, not a claim.
+        // P49: the whole block measures OFF the main thread now. The old
+        // code walked the entire Debian rootfs synchronously inside
+        // buildUi — the same ANR class the field caught on Settings
+        // ("lags, black screen, crashes"). The card paints "measuring…"
+        // and fills in when the walk lands.
         root.addView(section("sandbox weight (P27 curated rootfs)"));
         TextView tvSize = monoText();
-        StringBuilder sz = new StringBuilder();
-        try {
-            Debian.ensureDirs(this);
-            long deb = Debian.sizeOf(this);
-            String trim = readSmall(new java.io.File(Debian.dir(this), "trim-report.txt"));
-            String hyg = readSmall(new java.io.File(Debian.dir(this), "hygiene.txt"));
-            sz.append("debian layer: ").append(Binaries.human(deb)).append('\n');
-            if (trim != null) sz.append("trim: ").append(trim.replace('\n', ' ')).append('\n');
-            if (hyg != null) sz.append("boot hygiene: ").append(hyg.replace('\n', ' ')).append('\n');
-            if (trim == null && hyg == null)
-                sz.append("no trim/hygiene report yet (install Debian or reboot the sandbox)\n");
-        } catch (Exception e) {
-            sz.append("(unavailable: ").append(e.getMessage()).append(")\n");
-        }
-        // P27: the app+server memory budget — what the sandbox costs right
-        // now (app = our own VmRSS; server = the opencode child's, found by
-        // exact binary-path match like the orphan sweep, read-only).
-        sz.append(rssBudget());
-        tvSize.setText(sz.toString());
+        tvSize.setText("debian layer: measuring…\n");
         root.addView(tvSize);
+        final boolean debExtracted = Debian.extracted(this);
+        Debian.ensureDirs(this);
+        Sandbox.sizeAsync(Sandbox.SIZE_DEBIAN, Debian.dir(this), 60_000L,
+                deb -> ui.post(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    StringBuilder sz = new StringBuilder();
+                    sz.append("debian layer: ").append(Binaries.human(deb)).append('\n');
+                    if (debExtracted) {
+                        String trim = readSmall(new java.io.File(
+                                Debian.dir(this), "trim-report.txt"));
+                        String hyg = readSmall(new java.io.File(
+                                Debian.dir(this), "hygiene.txt"));
+                        if (trim != null) sz.append("trim: ")
+                                .append(trim.replace('\n', ' ')).append('\n');
+                        if (hyg != null) sz.append("boot hygiene: ")
+                                .append(hyg.replace('\n', ' ')).append('\n');
+                        if (trim == null && hyg == null)
+                            sz.append("no trim/hygiene report yet (install Debian or reboot the sandbox)\n");
+                    } else {
+                        sz.append("(not installed — install from Settings → environment)\n");
+                    }
+                    // P27: the app+server memory budget — what the sandbox costs right
+                    // now (app = our own VmRSS; server = the opencode child's, found by
+                    // exact binary-path match like the orphan sweep, read-only).
+                    sz.append(rssBudget());
+                    tvSize.setText(sz.toString());
+                }));
         root.addView(note("The curated rootfs drops docs/man pages/legacy "
                 + "timezones/locale archives/perl at install and sweeps the "
                 + "npm + apt caches at every boot. The opencode server binary "

@@ -80,6 +80,81 @@ public final class Sandbox {
         return n;
     }
 
+    // --------------------------------------------------- P49: size cards
+
+    /**
+     * P49 — the "Settings lags, black screen, crashes" class, cured at the
+     * source. The Settings/Diagnostics size cards used to call
+     * {@link #sizeOf} ON THE UI THREAD: an unbounded recursive walk of the
+     * whole layer. On a grown Debian rootfs (weeks of apt installs — tens
+     * of thousands of files) that is SECONDS of main-thread block on every
+     * open of Settings: the field's "it lags, black screen and crashes"
+     * (an ANR kill). The walk is worth doing — the number is honest — but
+     * never on the main thread, and never more often than needed.
+     *
+     * Process-wide cache: {key → {bytes, measuredAtNano}}. The UI paints
+     * the last known number INSTANTLY (or "measuring…" once) and a fresh
+     * walk runs on a background pool when the cached one is older than the
+     * caller's staleness window. Delivery is ALWAYS off the calling
+     * thread, so the caller just ui.post()s the repaint.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, long[]>
+            SIZE_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** The one background lane for size walks (daemon — never holds the
+     *  process open; walks serialize behind each other, which is fine:
+     *  they are rare and cheap relative to an ANR). */
+    private static final java.util.concurrent.ExecutorService SIZE_POOL =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "oc-dirsize");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /** Last known size for a cache key, -1 when never measured. */
+    public static long sizeKnown(String key) {
+        long[] e = SIZE_CACHE.get(key);
+        return e == null ? -1 : e[0];
+    }
+
+    /** {@link #sizeAsync(String, File, long, java.util.function.LongConsumer)}
+     *  on the app's own background lane. */
+    public static long sizeAsync(String key, File root, long staleMs,
+                                 java.util.function.LongConsumer onDone) {
+        return sizeAsync(key, root, staleMs, onDone, SIZE_POOL);
+    }
+
+    /** Test seam: the same contract over a caller-supplied executor (a
+     *  same-thread executor makes the walk synchronous and deterministic
+     *  in the JVM suite). Returns the cached value WITHOUT waiting:
+     *  -1 = never measured, and the fresh number arrives via onDone. */
+    static long sizeAsync(String key, File root, long staleMs,
+                          java.util.function.LongConsumer onDone,
+                          java.util.concurrent.Executor ex) {
+        long[] e = SIZE_CACHE.get(key);
+        long now = System.nanoTime();
+        boolean fresh = e != null && (now - e[1]) < staleMs * 1_000_000L;
+        if (!fresh) {
+            ex.execute(() -> {
+                long v = sizeOf(root);
+                SIZE_CACHE.put(key, new long[]{v, System.nanoTime()});
+                if (onDone != null) {
+                    try { onDone.accept(v); } catch (Throwable ignored) {}
+                }
+            });
+        } else if (onDone != null) {
+            final long v = e[0];
+            ex.execute(() -> {
+                try { onDone.accept(v); } catch (Throwable ignored) {}
+            });
+        }
+        return e == null ? -1 : e[0];
+    }
+
+    /** Cache keys the screens share. */
+    public static final String SIZE_ALPINE = "alpine-toolkit";
+    public static final String SIZE_DEBIAN = "debian-rootfs";
+
     // ------------------------------------------------------- install flow
 
     /**

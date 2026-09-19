@@ -304,7 +304,11 @@ public class P48Test {
 
     // ==================================================== 4. Version
 
-    @Test public void version_isP48() {
-        assertEquals("0.48.0-p48", SettingsActivity.VERSION_TAG);
+    /** P49 relaxed the exact pin to a floor (the P47/P46 pattern): the
+     *  release train moved on, the P48 contract (profiles + snap) stays
+     *  pinned above, the version string keeps moving forward. */
+    @Test public void version_isAtLeastP48() {
+        assertTrue(SettingsActivity.VERSION_TAG.compareTo("0.48.0-p48") > 0
+                || SettingsActivity.VERSION_TAG.startsWith("0.48.0"));
     }
 }
