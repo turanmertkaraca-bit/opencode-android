@@ -349,7 +349,8 @@ public class P49Test {
 
     // ==================================================== 5. Version
 
-    @Test public void version_isP49() {
-        assertEquals("0.49.0-p49", SettingsActivity.VERSION_TAG);
+    @Test public void version_isAtLeastP49() {
+        assertTrue(SettingsActivity.VERSION_TAG.compareTo("0.49.0-p49") > 0
+                || SettingsActivity.VERSION_TAG.startsWith("0.49.0"));
     }
 }

@@ -47,7 +47,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
      *  P49 — the consistency release: no ANR on Settings/Diagnostics (the
      *  size walks left the main thread), the keyboard re-anchor, the
      *  once-and-quiet markdown finalize, bounded log reads. */
-    static final String VERSION_TAG = "0.49.0-p49";
+    static final String VERSION_TAG = "0.50.0-p50";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout root;
@@ -232,11 +232,18 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         ka.addView(switchRow("Cool idle", "eco_idle",
                 "wake lock ONLY while the agent works — phone stays cool when idle (off = old always-on behavior)"));
         ka.addView(divider());
-        // P31: auto-hibernate — the sandbox stops itself when the app sits
-        // unused in the background; reopening drops you back into your chat.
+        // P31→P50: auto-hibernate used to default ON and was the background
+        // killer (the sandbox stopped itself after 10 quiet background
+        // minutes while the user was away). Background working is the
+        // feature now — hibernation is the opt-in.
         ka.addView(switchRow("Auto-hibernate (save RAM)", "hibernate",
-                "app in the background + no runs + nothing waiting \u2192 the sandbox stops itself; reopening restores your chat from disk"));
+                "OFF by default — the sandbox keeps running in the background. Turn ON to let it stop itself after a quiet stretch (reopening restores your chat from disk)"));
         ka.addView(divider());
+        // P50: the watchdog — an allow-while-idle alarm chain that puts
+        // the service back after an OS/OEM process kill. The resurrection
+        // path that START_STICKY alone cannot guarantee under Doze.
+        ka.addView(switchRow("Background watchdog", "keepalive",
+                "if the system kills the app in the background, put it right back (~4 min cadence). Leave ON for background agent work"));
         // P43: cache beats — the idle keepalive that keeps the provider's
         // prompt cache warm so the next real message reads at the cached
         // rate instead of re-billing the whole chat cold.
@@ -288,7 +295,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", VERSION_TAG + " · the consistency release — no more waits on Settings (size cards measure in the background), the chat stays glued to the bottom when the keyboard opens, markdown lands once when the stream settles, log views read a bounded tail", "◆", v -> {}));
+        ab.addView(rowLink("Version", VERSION_TAG + " · the background release — the sandbox keeps running when the app is backgrounded (auto-hibernate is now opt-in, a watchdog re-boots the service after a system kill, the battery-exemption one-tap rides the notification), and the question tool is answerable in place: options as chips, one Answer/Skip, the agent continues", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {
@@ -1528,9 +1535,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
 
         // P9 custom switch: animated track + knob (framework-only)
         // defaults: motion ON (matches Theme.motionOn), dns_bridge OFF,
-        // auto_allow OFF (approving tool calls silently is opt-in — P14)
+        // auto_allow OFF (approving tool calls silently is opt-in — P14),
+        // hibernate OFF (P50: the background killer, now opt-in),
+        // compact_auto OFF
         boolean dflt = !("dns_bridge".equals(keyOrNull)
                 || "auto_allow".equals(keyOrNull)
+                || "hibernate".equals(keyOrNull)
                 || "compact_auto".equals(keyOrNull));
         boolean on = getSharedPreferences("oc", MODE_PRIVATE).getBoolean(keyOrNull, dflt);
         FrameLayout sw = new FrameLayout(this);

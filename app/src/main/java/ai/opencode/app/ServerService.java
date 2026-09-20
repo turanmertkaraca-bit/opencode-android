@@ -7,6 +7,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -256,6 +257,7 @@ public class ServerService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             userStop = true;
+            wantSvc(this, false);          // P50: a user stop clears the want
             stopServer();
             setState(ST_STOPPED, "stopped");
             stopSelf();
@@ -264,12 +266,14 @@ public class ServerService extends Service {
         startForeground(NOTIF_ID, buildNotif("starting…"));
         if (runner != null && runner.isAlive()) {
             setState(state, "already running");
+            scheduleWatchdog(this);        // P50: the chain rides every start
             return START_STICKY;
         }
         final File bin = Binaries.binaryFile(this);
         if (!bin.exists() || !Binaries.isElf(bin)) {
             setState(ST_EXITED, "no valid binary imported");
             updateNotif("no binary imported");
+            wantSvc(this, false);
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -280,6 +284,9 @@ public class ServerService extends Service {
         // and the server would never spawn.
         userStop = false;
         pendingRestart = false;
+        wantSvc(this, true);              // P50: the sandbox is WANTED — the
+                                          // watchdog may resurrect it forever
+        scheduleWatchdog(this);           // P50: arm the keep-alive chain
         setState(ST_STARTING, "spawning opencode serve");
         runner = new Thread(() -> runServer(bin), "oc-server");
         runner.setDaemon(false);
@@ -528,6 +535,7 @@ public class ServerService extends Service {
             boolean hibernateAnnounced = false;
             while (RUNNING && !userStop) {
                 try { Thread.sleep(2000); } catch (InterruptedException e) { return; }
+                syncEcoIdle();   // P50: the Cool idle flip applies LIVE — no restart
                 if (!p.isAlive()) { died = true; break; }
                 if (++hbTick >= 15) {
                     hbTick = 0;
@@ -547,6 +555,8 @@ public class ServerService extends Service {
                                 + hibernateMinutes() + " min, no runs, no "
                                 + "pending permissions — stopping the sandbox "
                                 + "(chats live on disk; reopening resumes)");
+                        wantSvc(appCtx, false);   // P50: opt-in sleep — the
+                                                  // watchdog must NOT undo it
                         main.post(() -> {
                             stopServer();
                             setState(ST_STOPPED,
@@ -582,6 +592,7 @@ public class ServerService extends Service {
             int streak = Resilience.deathsInWindow(deaths, System.currentTimeMillis(), 10 * 60_000);
             if (streak >= 3) {
                 appendDiag("give-up", streak + " deaths in 10 min");
+                wantSvc(appCtx, false);   // P50: surrender stops the resurrection
                 setState(ST_EXITED, "sandbox keeps dying (" + streak
                         + "× in 10 min) — ⌘ → Restart server");
                 updateNotif("⚠ sandbox keeps dying — open OpenCode");
@@ -595,12 +606,24 @@ public class ServerService extends Service {
 
     private boolean hibernateEnabled() {
         try {
+            // P50 — default OFF. This pref was the background killer: with
+            // the factory default ON, the sandbox stopped itself after
+            // DEFAULT_MINUTES quiet background minutes ("the app cannot
+            // work in background, it keeps closing after a little while").
+            // The user flipped "Cool idle" (the WAKE LOCK switch — a
+            // different feature) and the sandbox still died, because the
+            // real stopper lived here. Background survival is now the
+            // factory posture; hibernating is the opt-in.
             return getSharedPreferences("oc", MODE_PRIVATE)
-                    .getBoolean("hibernate", true);
+                    .getBoolean("hibernate", HIBERNATE_DEFAULT);
         } catch (Exception e) {
-            return true;
+            return HIBERNATE_DEFAULT;
         }
     }
+
+    /** P50: the factory posture — background working is the feature,
+     *  self-hibernation is the opt-in. JVM-pinned in P50Test. */
+    static final boolean HIBERNATE_DEFAULT = false;
 
     private int hibernateMinutes() {
         try {
@@ -616,14 +639,38 @@ public class ServerService extends Service {
     private long hibernateDueAt() {
         long bg = App.bgSince();
         if (bg <= 0) return 0;
+        // P50: a pending QUESTION means the server is blocked on the user,
+        // not idle — hibernating would kill the very turn the agent asked
+        // for (same rule permissions already follow).
         boolean due = Hibernate.due(bg, System.currentTimeMillis(),
                 Hibernate.minutesToMs(hibernateMinutes()),
-                RunHub.busy(), pendingPermissions() > 0);
+                RunHub.busy(),
+                pendingPermissions() > 0 || RunHub.pendingQuestionCount() > 0);
         return due ? System.currentTimeMillis() : 0;
     }
 
     private static String nz(String s, String fb) {
         return (s == null || s.isEmpty()) ? fb : s;
+    }
+
+    /** P50: re-read the eco_idle pref and reconcile the wake lock LIVE.
+     *  The pref used to be read once at spawn — flipping "Cool idle"
+     *  appeared dead until the next restart (one more silent no-op the
+     *  user paid for). One pref read per 2 s watcher pass. */
+    private void syncEcoIdle() {
+        boolean pref;
+        try {
+            pref = getSharedPreferences("oc", MODE_PRIVATE)
+                    .getBoolean("eco_idle", true);
+        } catch (Exception e) {
+            return;
+        }
+        if (pref == ecoIdle) return;
+        ecoIdle = pref;
+        appendDiag("eco", "cool idle now " + pref + " — wake lock "
+                + (pref ? "follows runs only" : "always held"));
+        if (!pref) acquireWakeLock();
+        else if (!agentActive) releaseWakeLock();
     }
 
     /** Append one line to files/sandbox-diag.log (head-truncated at 24 kB).
@@ -982,6 +1029,146 @@ public class ServerService extends Service {
         }
     }
 
+    // ------------------------------------------------ P50: keep-alive core
+
+    /**
+     * The WANT flag — persisted, process-death-proof. True from spawn
+     * until a deliberate stop (user stop, opt-in hibernate, crash-loop
+     * give-up). The watchdog reads it after an OEM kill: if the sandbox
+     * is still wanted, the service boots again. This is the difference
+     * between “Android MAY restart me” (START_STICKY, postponed forever
+     * under Doze) and “the app puts itself back” (an allow-while-idle
+     * alarm the system honors).
+     */
+    static void wantSvc(Context c, boolean v) {
+        try {
+            c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .edit().putBoolean("svc_want", v).apply();
+        } catch (Exception ignored) {}
+    }
+
+    static boolean svcWant(Context c) {
+        try {
+            return c.getSharedPreferences("oc", Context.MODE_PRIVATE)
+                    .getBoolean("svc_want", false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Arm (or re-arm) the keep-alive alarm chain. allow-while-idle so a
+     *  Dozed device still fires it; every fire re-arms the next tick while
+     *  the keep-alive pref holds. exact-alarms fall back to windowed ones
+     *  without the exact-alarm permission — cadence, not precision, is
+     *  what matters here. */
+    static void scheduleWatchdog(Context c) {
+        try {
+            android.app.AlarmManager am = (android.app.AlarmManager)
+                    c.getSystemService(Context.ALARM_SERVICE);
+            if (am == null) return;
+            android.app.PendingIntent pi = android.app.PendingIntent.getBroadcast(
+                    c, 1001, new Intent(c, WatchdogReceiver.class),
+                    android.app.PendingIntent.FLAG_IMMUTABLE
+                            | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+            long at = System.currentTimeMillis() + WatchdogReceiver.INTERVAL_MS;
+            try {
+                am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP,
+                        at, pi);
+            } catch (Exception exactFail) {
+                try {
+                    am.setWindow(android.app.AlarmManager.RTC_WAKEUP,
+                            at, 10 * 60_000L, pi);
+                } catch (Exception ignored) {}
+            }
+        } catch (Exception ignored) {}
+    }
+
+    /** P50: a question needs the user — surface it on the notification
+     *  (the sandbox is blocked on an answer; the run is NOT idle).
+     *  Static + null-safe: the hub fires it from any process state. */
+    static void noteQuestionPending() {
+        Context c = appCtx;
+        if (c == null) return;
+        try {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    NotificationManager nm = (NotificationManager)
+                            c.getSystemService(NOTIFICATION_SERVICE);
+                    if (nm == null) return;
+                    android.app.Notification n = buildNotifStatic(c,
+                            "⏸ question needs your answer — the agent is waiting");
+                    nm.notify(NOTIF_ID, n);
+                } catch (Exception ignored) {}
+            });
+        } catch (Exception ignored) {}
+    }
+
+    /** The ask was answered/rejected — restore the running notice. */
+    static void noteQuestionAnswered() {
+        Context c = appCtx;
+        if (c == null) return;
+        try {
+            new Handler(Looper.getMainLooper()).post(() -> {
+                try {
+                    NotificationManager nm = (NotificationManager)
+                            c.getSystemService(NOTIFICATION_SERVICE);
+                    if (nm == null) return;
+                    File d = servingDir;
+                    nm.notify(NOTIF_ID, buildNotifStatic(c,
+                            "running · " + (d != null ? d.getName() : "sandbox")));
+                } catch (Exception ignored) {}
+            });
+        } catch (Exception ignored) {}
+    }
+
+    /** Static twin of buildNotif (noteQuestion* fire from appCtx without
+     *  a live service instance). Same actions: open + battery help. */
+    private static android.app.Notification buildNotifStatic(Context c, String text) {
+        Intent open = new Intent(c, MainActivity.class);
+        android.app.PendingIntent pOpen = android.app.PendingIntent.getActivity(
+                c, 0, open, android.app.PendingIntent.FLAG_IMMUTABLE
+                        | android.app.PendingIntent.FLAG_UPDATE_CURRENT);
+        android.app.Notification.Builder b = new android.app.Notification.Builder(c, CH)
+                .setSmallIcon(android.R.drawable.stat_notify_sync)
+                .setContentTitle("OpenCode server")
+                .setContentText(text)
+                .setContentIntent(pOpen)
+                .setOngoing(true);
+        // P50: when the OS still optimizes the battery away, the single
+        // most useful tap on this notice is the exemption dialog.
+        try {
+            PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
+            boolean exempt = pm != null
+                    && pm.isIgnoringBatteryOptimizations(c.getPackageName());
+            if (!exempt) {
+                android.app.PendingIntent pBatt = android.app.PendingIntent.getActivity(
+                        c, 2, new Intent(
+                                android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:" + c.getPackageName())),
+                        android.app.PendingIntent.FLAG_IMMUTABLE);
+                b.addAction(new android.app.Notification.Action.Builder(
+                        null, "Allow background run", pBatt).build());
+            }
+        } catch (Exception ignored) {}
+        return b.build();
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        // P50: a swipe-away must not end the sandbox. Most OEM skins kill
+        // the PROCESS on swipe (the notification is gone with it); the
+        // queued start is ignored for a dead process — so re-arm the
+        // watchdog chain too: the next tick resurrects the service with
+        // its notification. userStop stays respected (a Stop is a stop).
+        if (!userStop && svcWant(this)) {
+            try {
+                startService(new Intent(this, ServerService.class));
+            } catch (Exception ignored) {}
+            scheduleWatchdog(this);
+        }
+        super.onTaskRemoved(rootIntent);
+    }
+
     private void stopServer() {
         RUNNING = false;
         servingDir = null;
@@ -1017,15 +1204,31 @@ public class ServerService extends Service {
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         Intent stop = new Intent(this, ServerService.class).setAction(ACTION_STOP);
         PendingIntent pStop = PendingIntent.getService(this, 1, stop, PendingIntent.FLAG_IMMUTABLE);
-        return new Notification.Builder(this, CH)
+        Notification.Builder b = new Notification.Builder(this, CH)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentTitle("OpenCode server")
                 .setContentText(text)
                 .setContentIntent(pOpen)
                 .setOngoing(true)
                 .addAction(new Notification.Action.Builder(
-                        null, "Stop", pStop).build())
-                .build();
+                        null, "Stop", pStop).build());
+        // P50: no battery exemption yet → the notice carries the one-tap
+        // fix. This is the kill-proof that survives every in-app surface.
+        try {
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+            boolean exempt = pm != null
+                    && pm.isIgnoringBatteryOptimizations(getPackageName());
+            if (!exempt) {
+                PendingIntent pBatt = PendingIntent.getActivity(this, 2,
+                        new Intent(android.provider.Settings
+                                        .ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:" + getPackageName())),
+                        PendingIntent.FLAG_IMMUTABLE);
+                b.addAction(new Notification.Action.Builder(
+                        null, "Allow background run", pBatt).build());
+            }
+        } catch (Exception ignored) {}
+        return b.build();
     }
 
     private void updateNotif(String text) {

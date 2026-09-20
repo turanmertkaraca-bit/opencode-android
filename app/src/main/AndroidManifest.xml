@@ -209,5 +209,14 @@
                 <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
             </intent-filter>
         </receiver>
+
+        <!-- P50 keep-alive: the watchdog alarm chain — resurrects the
+             foreground service after an OEM/OS process kill whenever the
+             sandbox is still wanted (Settings → keep alive → watchdog,
+             default ON). No intent-filter: explicitly targeted by
+             PendingIntent only. -->
+        <receiver
+            android:name=".WatchdogReceiver"
+            android:exported="false"/>
     </application>
 </manifest>

@@ -638,6 +638,7 @@ public final class RunHub implements ServerService.EventListener {
         void hubSpend();               // token/cost pill changed
         void hubTitle();               // session title changed
         void hubPerms();               // permission queue changed
+        void hubQuestions();           // P50: pending question asks changed
         void hubLive();                // edit feed / peek changed
         void hubReset();               // transcript replaced → full re-render
     }
@@ -705,6 +706,45 @@ public final class RunHub implements ServerService.EventListener {
         fire(() -> {
             synchronized (uis) { for (Ui u : uis) u.hubPerms(); }
         });
+    }
+
+    private static void notifyQuestions() {
+        fire(() -> {
+            synchronized (uis) { for (Ui u : uis) u.hubQuestions(); }
+        });
+    }
+
+    // ------------------------------------------------ P50: question asks
+
+    /** Pending question requests by sessionID (raw question.asked
+     *  properties, defensively copied). The question tool and the plan
+     *  approval ask live here — the agent BLOCKS server-side until the
+     *  user answers, so the store + the pinned card are the only unblock
+     *  path. All access synchronized; payloads are plain JSON maps. */
+    private static final Map<String, List<Map<String, Object>>> QUESTIONS =
+            new HashMap<>();
+
+    /** First pending ask for a session (null = none). */
+    public static Map<String, Object> pendingQuestion(String sid) {
+        if (sid == null) return null;
+        synchronized (QUESTIONS) {
+            List<Map<String, Object>> l = QUESTIONS.get(sid);
+            return (l == null || l.isEmpty()) ? null : l.get(0);
+        }
+    }
+
+    /** Pending asks across ALL sessions (any ask keeps the run alive —
+     *  the server is blocked on the user, not idle). */
+    public static int pendingQuestionCount() {
+        synchronized (QUESTIONS) {
+            int n = 0;
+            for (List<Map<String, Object>> l : QUESTIONS.values()) n += l.size();
+            return n;
+        }
+    }
+
+    static void clearQuestionsForTests() {
+        synchronized (QUESTIONS) { QUESTIONS.clear(); }
     }
 
     private static void notifyLive() {
@@ -1282,6 +1322,55 @@ public final class RunHub implements ServerService.EventListener {
                     }
                     releaseRun(esid, false);
                 }
+            } else if (Questions.isAskedType(type)) {
+                // P50 — the question tool / plan approval, ANSWERABLE. The
+                // server blocks the run until the user replies through the
+                // card; the store is keyed by session so ANY open chat can
+                // answer its own ask. question.v2.* aliases carry the same
+                // properties (verified against the shipped binary).
+                String qsid = Json.str(props, "sessionID");
+                if (qsid != null) {
+                    synchronized (QUESTIONS) {
+                        List<Map<String, Object>> l = QUESTIONS.get(qsid);
+                        if (l == null) {
+                            l = new ArrayList<>();
+                            QUESTIONS.put(qsid, l);
+                        }
+                        String qid = Json.str(props, "id");
+                        if (qid != null) {          // replace-in-place (P31 rule)
+                            for (java.util.Iterator<Map<String, Object>> it = l.iterator();
+                                    it.hasNext(); ) {
+                                if (qid.equals(Json.str(it.next(), "id"))) {
+                                    it.remove();
+                                    break;
+                                }
+                            }
+                        }
+                        l.add(new HashMap<>(props));
+                    }
+                    ServerService.noteQuestionPending();
+                }
+                notifyQuestions();
+            } else if (Questions.isGoneType(type)) {
+                String qsid = Json.str(props, "sessionID");
+                String qrid = Json.str(props, "requestID");
+                if (qsid != null && qrid != null) {
+                    synchronized (QUESTIONS) {
+                        List<Map<String, Object>> l = QUESTIONS.get(qsid);
+                        if (l != null) {
+                            for (java.util.Iterator<Map<String, Object>> it = l.iterator();
+                                    it.hasNext(); ) {
+                                if (qrid.equals(Json.str(it.next(), "id"))) {
+                                    it.remove();
+                                    break;
+                                }
+                            }
+                            if (l.isEmpty()) QUESTIONS.remove(qsid);
+                        }
+                    }
+                    ServerService.noteQuestionAnswered();
+                }
+                notifyQuestions();
             } else if ("permission.asked".equals(type)
                     || "permission.updated".equals(type)
                     || "permission.v2.asked".equals(type)
@@ -4036,6 +4125,143 @@ public final class RunHub implements ServerService.EventListener {
                 else if (!done) sys("permission reply failed · " + f);
                 notifyPerms();
             });
+        });
+    }
+
+    // ------------------------------------------------ P50: question reply
+
+    /** Remove a pending ask locally (SSE question.replied also lands here
+     *  — both paths are idempotent). */
+    private static void removeQuestion(String sid, String rid) {
+        synchronized (QUESTIONS) {
+            List<Map<String, Object>> l = QUESTIONS.get(sid);
+            if (l == null) return;
+            for (java.util.Iterator<Map<String, Object>> it = l.iterator();
+                    it.hasNext(); ) {
+                if (rid.equals(Json.str(it.next(), "id"))) {
+                    it.remove();
+                    break;
+                }
+            }
+            if (l.isEmpty()) QUESTIONS.remove(sid);
+        }
+    }
+
+    /**
+     * One reply ladder, verified against the shipped v1.18.25 binary:
+     * POST /api/session/{sid}/question/{rid}/reply  {"answers":[[label,…],…]} → 204,
+     * legacy /session/... twin as fallback. Answers are one label array
+     * per question, in order (Questions.answersJson keeps indexes aligned;
+     * the server renders an empty array as "Unanswered").
+     */
+    public static void answerQuestion(final String sid, final String rid,
+            final List<List<String>> picked,
+            final java.util.function.BiConsumer<Boolean, String> cb) {
+        PERM.execute(() -> {
+            String errS = null;
+            boolean ok = false;
+            String body = Questions.answersJson(picked);
+            try {
+                Api.Resp r = Api.post("/api/session/" + sid + "/question/"
+                        + rid + "/reply", body, 15_000);
+                ok = r.ok();
+                if (!ok) {
+                    r = Api.post("/session/" + sid + "/question/" + rid
+                            + "/reply", body, 15_000);
+                    ok = r.ok();
+                }
+                if (!ok) errS = "HTTP " + (r == null ? "?" : r.status);
+            } catch (Exception e) {
+                errS = String.valueOf(e);
+            }
+            final String f = errS;
+            final boolean done = ok;
+            if (done) {
+                removeQuestion(sid, rid);
+                ServerService.noteQuestionAnswered();
+            }
+            main(() -> {
+                if (cb != null) cb.accept(done, f);
+                else if (!done) sys("question reply failed · " + f);
+                notifyQuestions();
+            });
+        });
+    }
+
+    /** Skip an ask (plan: "revise"; question: the agent reads the skip). */
+    public static void rejectQuestion(final String sid, final String rid,
+            final java.util.function.BiConsumer<Boolean, String> cb) {
+        PERM.execute(() -> {
+            String errS = null;
+            boolean ok = false;
+            try {
+                Api.Resp r = Api.post("/api/session/" + sid + "/question/"
+                        + rid + "/reject", "{}", 15_000);
+                ok = r.ok();
+                if (!ok) {
+                    r = Api.post("/session/" + sid + "/question/" + rid
+                            + "/reject", "{}", 15_000);
+                    ok = r.ok();
+                }
+                if (!ok) errS = "HTTP " + (r == null ? "?" : r.status);
+            } catch (Exception e) {
+                errS = String.valueOf(e);
+            }
+            final String f = errS;
+            final boolean done = ok;
+            if (done) {
+                removeQuestion(sid, rid);
+                ServerService.noteQuestionAnswered();
+            }
+            main(() -> {
+                if (cb != null) cb.accept(done, f);
+                notifyQuestions();
+            });
+        });
+    }
+
+    /** Backfill pending asks for a session over HTTP (chat open/resume):
+     *  an ask can predate the screen (the SSE event fired while the app
+     *  was dead, or the server queued it before our event subscription).
+     *  GET /api/session/{sid}/question → replaces the store for THIS sid.
+     *  Silent on any failure — the SSE path and the next resume retry. */
+    public static void fetchPendingQuestions(final String sid) {
+        if (sid == null) return;
+        PERM.execute(() -> {
+            try {
+                Api.Resp r = Api.get("/api/session/" + sid + "/question");
+                if (!r.ok() || r.body == null) return;
+                Object o = Json.parse(r.body);
+                List<Object> arr = null;
+                if (o instanceof List) {
+                    @SuppressWarnings("unchecked")
+                    List<Object> tmp = (List<Object>) o;
+                    arr = tmp;
+                } else if (o instanceof Map) {
+                    // tolerate {requests:[...]} / {items:[...]} wrappers
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> m = (Map<String, Object>) o;
+                    for (String k : new String[]{"requests", "items", "questions"}) {
+                        List<Object> l = Json.list(m, k);
+                        if (l != null) { arr = l; break; }
+                    }
+                }
+                if (arr == null) return;
+                List<Map<String, Object>> fresh = new ArrayList<>();
+                for (Object e : arr) {
+                    if (e instanceof Map) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> m = (Map<String, Object>) e;
+                        fresh.add(new HashMap<>(m));
+                    }
+                }
+                synchronized (QUESTIONS) {
+                    if (fresh.isEmpty()) QUESTIONS.remove(sid);
+                    else QUESTIONS.put(sid, fresh);
+                }
+                main(RunHub::notifyQuestions);
+            } catch (Exception ignored) {
+            }
         });
     }
 

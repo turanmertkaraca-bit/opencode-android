@@ -37,10 +37,13 @@ grep -q "versionCode 52" "$PROJ/app/build.gradle" || { echo "versionCode guard f
 grep -q "0.50.0-p50" "$PROJ/app/build.gradle" || { echo "versionName guard failed"; exit 1; }
 REL=$(curl -sS -m 30 -H "Authorization: token $T" "https://api.github.com/repos/${OWNER}/${REPO}/releases/tags/v0.50.0" | python3 -c "import json,sys; d=json.load(sys.stdin); print('EXISTS' if isinstance(d,dict) and d.get('id') else 'FREE')")
 [ "$REL" = "FREE" ] || { echo "v0.50.0 already exists — ABORT"; exit 1; }
-# the remote must be exactly at our rewritten HEAD (it was force-pushed)
+# the remote must be exactly at our rewritten HEAD or its parent (the
+# local hygiene commit rides the same push)
 REMOTE_SHA=$(git ls-remote origin refs/heads/main | cut -f1)
 LOCAL_SHA=$(git rev-parse HEAD)
-[ "$REMOTE_SHA" = "$LOCAL_SHA" ] || { echo "remote moved: $REMOTE_SHA vs local $LOCAL_SHA — ABORT"; exit 1; }
+PARENT_SHA=$(git rev-parse HEAD~1 2>/dev/null || echo "")
+[ "$REMOTE_SHA" = "$LOCAL_SHA" ] || [ "$REMOTE_SHA" = "$PARENT_SHA" ] || \
+  { echo "remote moved: $REMOTE_SHA vs local $LOCAL_SHA — ABORT"; exit 1; }
 
 git add -A
 if ! git diff --cached --quiet; then

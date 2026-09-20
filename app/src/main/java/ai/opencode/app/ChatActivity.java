@@ -125,6 +125,7 @@ public class ChatActivity extends Activity
     private TextView tvSpend;               // P14: dedicated session-spend pill
     private EditText input;
     private LinearLayout permSlot;
+    private LinearLayout qSlot;       // P50: pending question asks (pinned)
     // P9: hero empty state + in-place view cache for smooth streaming
     private LinearLayout emptyHero, suggestBox;
     private TextView heroTitle, heroSub;    // P45: the time-of-day greeting
@@ -271,6 +272,7 @@ public class ChatActivity extends Activity
         btnSend = findViewById(R.id.btnSend);
         input = findViewById(R.id.input);
         permSlot = findViewById(R.id.permSlot);
+        qSlot = findViewById(R.id.qSlot);   // P50: question card slot
         applyWideLayout();                   // P16 DeX: centered column on wide windows
 
         // P8: project context from the deck (name shown in the subtitle;
@@ -470,11 +472,16 @@ public class ChatActivity extends Activity
         // answers. The chat updates every time, never trails behind.
         if (RunHub.sessionId() != null) {
             RunHub.reconcileOnBind();
+            // P50: an ask may predate the screen (it fired while the app
+            // was dead) — backfill the pending-question store over HTTP,
+            // then paint whatever is queued NOW.
+            RunHub.fetchPendingQuestions(RunHub.sessionId());
         }
         // the note lands AFTER the (re)load — the transcript swap must
         // never wipe it
         if (interrupted != null) RunHub.sys(interrupted);
         checkPermissionQueue();
+        checkQuestionQueue();
         refreshServerUi();
         refreshChips();
         // P26: paint the CURRENT busy state on every bind — the ■ stop
@@ -638,6 +645,12 @@ public class ChatActivity extends Activity
 
     @Override public void hubPerms() {
         ui.post(this::checkPermissionQueue);
+    }
+
+    @Override public void hubQuestions() {
+        // P50: the question tool / plan approval — the pinned card follows
+        // the hub store on every asked/replied/rejected event.
+        ui.post(this::checkQuestionQueue);
     }
 
     @Override public void hubLive() {
@@ -3384,6 +3397,221 @@ public class ChatActivity extends Activity
             }
             checkPermissionQueue();
         });
+    }
+
+    // ------------------------------------------------ P50: questions
+    // The question tool (and the plan approval) used to render as an
+    // ordinary tool card stuck on "running…" forever — the server blocked
+    // the run waiting for an answer the app could never give. The pinned
+    // card below is the unblock path: tappable options, one Answer /
+    // Skip action, reply through POST /api/session/{sid}/question/{rid}/reply.
+
+    private void checkQuestionQueue() {
+        if (qSlot == null) return;
+        String sid = RunHub.sessionId();
+        Map<String, Object> req = RunHub.pendingQuestion(sid);
+        Questions.Req parsed = req == null ? null : Questions.parse(req);
+        if (parsed == null) {
+            qSlot.setVisibility(View.GONE);
+            qSlot.removeAllViews();
+            return;
+        }
+        qSlot.setVisibility(View.VISIBLE);
+        qSlot.removeAllViews();
+        qSlot.addView(buildQuestionCard(parsed));
+    }
+
+    /** One card per pending REQUEST: a section per question (header,
+     *  prompt, option chips), Answer + Skip at the bottom. Single-choice
+     *  prompts behave like radios; multi-choice prompts toggle; the
+     *  Answer button submits one label array per question in order
+     *  (unanswered ships as [] — the server renders "Unanswered"). */
+    private View buildQuestionCard(final Questions.Req req) {
+        final int n = req.prompts.size();
+        final List<List<String>> picked = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) picked.add(new ArrayList<>());
+
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        c.setBackgroundResource(R.drawable.bg_perm_card);
+        int cp = dp(14);
+        c.setPadding(cp, cp, cp, cp);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+        TextView badge = text(13, R.color.accent_light, false);
+        badge.setText("❓");
+        badge.setPadding(0, 0, dp(8), 0);
+        head.addView(badge);
+        TextView t = text(14, R.color.text_primary, true);
+        t.setText(n == 1 ? "The agent needs your answer"
+                : "The agent needs " + n + " answers");
+        head.addView(t, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        c.addView(head);
+
+        for (int qi = 0; qi < n; qi++) {
+            final int qiF = qi;                 // lambda capture
+            final Questions.Prompt p = req.prompts.get(qi);
+            if (qi > 0) {
+                View gap = new View(this);
+                c.addView(gap, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, dp(10)));
+            }
+            if (p.header != null && !p.header.isEmpty()) {
+                TextView h = text(11, R.color.accent_light, true);
+                h.setText(p.header.toUpperCase(Locale.ROOT));
+                c.addView(h, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            TextView q = text(13, R.color.text_primary, false);
+            q.setText(p.question);
+            q.setPadding(0, dp(2), 0, dp(6));
+            c.addView(q, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            if (p.options.isEmpty()) {
+                // no options given — a free-form ask; the user answers by
+                // typing (the agent reads the plain "Unanswered" echo and
+                // rephrases). Keep the card honest instead of empty.
+                TextView f = text(12, R.color.text_secondary, false);
+                f.setText("(no options — type your answer in the composer "
+                        + "and tap Skip)");
+                c.addView(f, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+                continue;
+            }
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+            boolean first = true;
+            for (final Questions.Opt o : p.options) {
+                if (!first) {
+                    View sp = new View(this);
+                    LinearLayout.LayoutParams spl = new LinearLayout.LayoutParams(dp(6), 1);
+                    row.addView(sp, spl);
+                }
+                first = false;
+                TextView chip = text(12, R.color.text_primary, false);
+                chip.setText(o.label);
+                chip.setBackground(Theme.outlinePill(this));
+                chip.setPadding(dp(12), dp(8), dp(12), dp(8));
+                chip.setOnClickListener(v -> {
+                    Theme.haptic(v);
+                    List<String> cur = picked.get(qiF);
+                    if (p.multiple) {
+                        if (cur.contains(o.label)) {
+                            cur.remove(o.label);
+                            chip.setBackground(Theme.outlinePill(this));
+                            chip.setTextColor(getResources().getColor(R.color.text_primary));
+                        } else {
+                            cur.add(o.label);
+                            chip.setBackground(Theme.allowPill(this));
+                            chip.setTextColor(getResources().getColor(R.color.on_accent));
+                        }
+                    } else {
+                        cur.clear();
+                        cur.add(o.label);
+                        // radio pass over this prompt's chips
+                        for (int k = 0; k < row.getChildCount(); k++) {
+                            View cv = row.getChildAt(k);
+                            if (cv instanceof TextView) {
+                                ((TextView) cv).setBackground(Theme.outlinePill(this));
+                                ((TextView) cv).setTextColor(
+                                        getResources().getColor(R.color.text_primary));
+                            }
+                        }
+                        chip.setBackground(Theme.allowPill(this));
+                        chip.setTextColor(getResources().getColor(R.color.on_accent));
+                    }
+                });
+                row.addView(chip, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            c.addView(row, rlp);
+            if (p.multiple) {
+                TextView hint = text(10, R.color.text_secondary, false);
+                hint.setText("multiple choices — toggle all that apply");
+                hint.setPadding(0, dp(3), 0, 0);
+                c.addView(hint);
+            }
+        }
+
+        LinearLayout btns = new LinearLayout(this);
+        btns.setOrientation(LinearLayout.HORIZONTAL);
+        btns.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(12);
+
+        TextView skip = text(13, R.color.err, true);
+        skip.setText("Skip");
+        skip.setBackground(Theme.denyPill(this));
+        skip.setGravity(Gravity.CENTER);
+        int sp2 = dp(16);
+        skip.setPadding(sp2, dp(11), sp2, dp(11));
+        skip.setOnClickListener(v -> {
+            Theme.haptic(v);
+            Theme.pop(v);
+            RunHub.rejectQuestion(RunHub.sessionId(), req.id, (ok, errS) -> {
+                if (ok) Toast.makeText(this, "skipped — the agent moves on",
+                        Toast.LENGTH_SHORT).show();
+                else {
+                    sys("question skip failed · " + errS);
+                    Toast.makeText(this, "skip failed — try again",
+                            Toast.LENGTH_SHORT).show();
+                }
+                checkQuestionQueue();
+            });
+        });
+        btns.addView(skip);
+
+        TextView ans = text(13, R.color.on_accent, true);
+        ans.setText("Answer");
+        ans.setBackground(Theme.allowPill(this));
+        ans.setGravity(Gravity.CENTER);
+        int ap = dp(16);
+        ans.setPadding(ap, dp(11), ap, dp(11));
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        alp.leftMargin = dp(8);
+        ans.setOnClickListener(v -> {
+            Theme.haptic(v);
+            Theme.pop(v);
+            RunHub.answerQuestion(RunHub.sessionId(), req.id, picked, (ok, errS) -> {
+                if (ok) {
+                    StringBuilder echo = new StringBuilder();
+                    for (int i = 0; i < req.prompts.size() && i < picked.size(); i++) {
+                        if (echo.length() > 0) echo.append(" · ");
+                        echo.append(Questions.echo(picked.get(i)));
+                    }
+                    Toast.makeText(this, "answered: " + echo,
+                            Toast.LENGTH_SHORT).show();
+                } else {
+                    sys("question reply failed · " + errS);
+                    Toast.makeText(this, "reply failed — try again",
+                            Toast.LENGTH_SHORT).show();
+                }
+                checkQuestionQueue();
+            });
+        });
+        btns.addView(ans, alp);
+        c.addView(btns);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(8);
+        c.setLayoutParams(lp);
+        return c;
     }
 
     // ----------------------------------------------------------- palette
