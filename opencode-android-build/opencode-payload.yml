@@ -1,0 +1,50 @@
+name: opencode android payload (bytecode)
+
+# Builds the opencode payload tarball with Bun --bytecode and publishes it as a
+# GitHub release asset so it can be downloaded (public repo => public URL).
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    paths:
+      - "opencode-android-build/**"
+      - ".github/workflows/opencode-payload.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Build payload (android + bytecode)
+        run: bash opencode-android-build/build.sh
+
+      - name: Show result
+        run: |
+          ls -la opencode-android-build/opencode-linux-arm64-android-bytecode.tar.gz
+          sha256sum opencode-android-build/opencode-linux-arm64-android-bytecode.tar.gz
+
+      - name: Publish as release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="opencode-bytecode"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" \
+              --title "opencode payload (bytecode)" \
+              --notes "Automated build of the opencode Android payload with Bun --bytecode. Test on-device before shipping."
+          gh release upload "$TAG" \
+            opencode-android-build/opencode-linux-arm64-android-bytecode.tar.gz \
+            --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: opencode-linux-arm64-android-bytecode
+          path: opencode-android-build/opencode-linux-arm64-android-bytecode.tar.gz
