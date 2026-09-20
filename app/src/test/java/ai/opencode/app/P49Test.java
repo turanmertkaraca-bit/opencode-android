@@ -29,10 +29,10 @@ import static org.junit.Assert.assertTrue;
  * P49 — the CONSISTENCY release, pinned where each piece lives.
  *
  * FIELD REPORT DRIVING THIS RELEASE (v0.48.0 + the lost first P49): the
- * user grabbed the unpublished P49 build from the sandbox and hit the
- * wall — "i wanted to open settings i was able to before but now it lags
- * black screen and crashes i dont want any crashing happening". The
- * crash class was not new to the lost build: P48 already walked the
+ * first P49 build was never published; the build that ran in the field
+ * regressed Settings — opening it lagged, blacked the window, and the
+ * ANR killer ended the process, and it got worse as the install grew.
+ * The crash class was not new to the lost build: P48 already walked the
  * ENTIRE Debian rootfs (and the Alpine toolkit) RECURSIVELY ON THE UI
  * THREAD every time Settings or Diagnostics opened — seconds of main
  * thread block on a grown install, then the ANR kill. The chat's

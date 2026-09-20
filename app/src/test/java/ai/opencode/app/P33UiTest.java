@@ -36,7 +36,7 @@ import static org.junit.Assert.assertTrue;
  *      bad" wait is the recreate; this pin outlaws its return.
  *   3. THE MODEL SHEET NEVER LIES ABOUT KEYS. showModels re-reads
  *      auth.json at open; a saved key can't be called missing (UI-level
- *      cover for the "app thinks i have no api key" report).
+ *      cover for the saved-key-reads-as-missing report).
  */
 @RunWith(RobolectricTestRunner.class)
 public class P33UiTest {

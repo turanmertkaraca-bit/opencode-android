@@ -19,9 +19,8 @@ import static org.junit.Assert.assertTrue;
  * P45 — the "act normal" release, pinned where each piece lives.
  *
  * FIELD VERDICT DRIVING THIS RELEASE (v0.44.0): three demands, all
- * hard. ONE — the app must never silently summarize a chat's memory
- * ("i dont want the app to randomly compact the context for no
- * reason? wth close that"): the kill switch is compaction.auto=false
+ * hard. ONE — the app must never silently summarize a chat's memory:
+ * the kill switch is compaction.auto=false
  * in opencode.json (the bundled server's own escape hatch, found in
  * its embedded source: the overflow check short-circuits to "do not
  * compact" and an overflow turn errors instead of summarizing), pinned

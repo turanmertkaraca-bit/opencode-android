@@ -1,1342 +1,157 @@
 # opencode-android
 
-The opencode TUI (v1.18.25) as a native Android chat app. Zero external
-dependencies — no Termux install, no proot, no root: the agent binary is
-bundled in the APK and runs natively in app-private storage.
+The opencode agent (v1.18.25) as a native Android chat app. Zero external
+dependencies — no Termux, no proot dance, no root: the agent binary is
+bundled in the APK and runs natively in app-private storage, with a full
+Debian 12 toolchain (apt, git, python, node, gcc) available to the agent.
 
 Repo: https://github.com/turanmertkaraca-bit/opencode-android
 Releases: https://github.com/turanmertkaraca-bit/opencode-android/releases
 
-## Install (v0.49.0 — P49)
-
-1. Grab `opencode-p49-v0.49.0-debug.apk` from the releases page and sideload
-   it (same signing key as every earlier build → installs as an update in
-   place, no uninstall; your projects, keys and sessions survive).
-   Note: v0.38.0 was built and field-tested but never published here —
-   its fixes ride inside v0.39.0, so that release carries both.
-2. Open the app: the project deck ALWAYS opens first — the app never
-   throws you back into the last chat by itself; tapping a card is the
-   explicit "start this project" act, exactly like the opencode TUI.
-   **＋** adds a project, **long-press** a card → the project
-   sheet (Open / Rename / Remove card / **Delete project** — the app's own
-   palette-owned presentation now, not a system box). **⌘** is the command
-   palette (interactive canvas, find in chat, share).
-3. **⌘ → API keys** to paste keys; the sandbox reloads them BY ITSELF the
-   moment a key is saved, changed or imported — the picker and your next
-   message see them immediately, no manual restart. The OpenCode row (Zen +
-   Go plans, console.opencode.ai) runs its 31 FREE models with no key at all.
-4. One-minute armor against Galaxy process kills: **Settings → keep alive →
-   Battery optimization — exempt ✓**, plus Device care → Never sleeping apps.
-5. If anything ever dies: **Diagnostics → "last exits"** names the killer
-   (system exit records, retroactive), and the sandbox incident log has
-   the server's side. Paste both.
-
-## Why not just Termux + proot + the TUI?
-
-Fair question — and it is the honest one, because this project started
-exactly there: the first builds were a Termux port with a proot Debian
-and the TUI on top, before P7 replaced all of it with the native setup.
-Same agent binary either way (opencode v1.18.25). The difference is
-everything around it:
-
-| | **opencode-android** | **Termux + proot + TUI** |
-|---|---|---|
-| First chat | minutes: sideload the APK, paste a key — or none at all for the 31 free models | an evening: Termux, proot-distro, distro bootstrap, package installs, node/binary wiring, TUI config |
-| Skills needed | none — if you can use a chat app, you can use this | shell, package manager, TUI keybindings, terminal session management |
-| The interface | a native Android chat app: streaming bubbles, six themes, haptics, gesture navigation, real sheets | a terminal grid rendered on a touchscreen |
-| Photos & vision | attach up to 6 photos in one message; a vision-capable model sees the pixels, otherwise a free vision model describes them | no practical pipe from your gallery into the TUI |
-| Watching it work | live file feed of every edit, a peek at the exact line being changed, tappable file mentions | tail -f and hope |
-| Long runs | runs outlive the chat screen, parallel runs tracked per session, sessions auto-recover after a kill | survival depends on terminal multiplexer and wake-lock discipline |
-| After Android kills the app | the supervisor restarts the server with backoff; the incident log and last-exits forensics name the killer | you restart Termux and guess what happened |
-| Cost & context | a context-depth meter with cache stats, next-send cost prediction, a credit limit that actually stops spending | TUI counters on a six-inch terminal |
-| Extras | interactive HTML canvas, model favorites, terse mode, unattended mode, hibernation, in-place updates | whatever you script yourself |
-| Sandbox weight | curated rootfs — around 108 MB of dead weight trimmed every session | the full distro image |
-| The agent core | **opencode v1.18.25 — identical** | **opencode v1.18.25 — identical** |
-
-One honest row for the other side: the TUI exposes every CLI knob, and
-the app deliberately covers the core loop instead — power config still
-lives in the sandbox's own files. Same brain, same sessions-on-disk
-format. One of the two was designed for a phone.
-
-## What's in v0.49.0 (P49 — the consistency release)
-
-The field report: the first P49 was finished in the sandbox but never
-published — the user ran the grabbed APK and hit the wall: "i wanted to
-open settings i was able to before but now it lags black screen and
-crashes i dont want any crashing happening". And the standing P48
-verdict: "the ui is still very weird it glitches a lot … i dont want any
-glitches anymore so make sure u get rid of em all". P49 rebuilds from
-the published v0.48.0 and cures four real diseases, all pinned by tests:
-
-- **THE SETTINGS CRASH (the ANR), cured at the source.** Opening
-  Settings (and Diagnostics) walked the ENTIRE Debian rootfs and the
-  Alpine toolkit RECURSIVELY ON THE UI THREAD — every open, every
-  resume. On a grown install (weeks of apt installs: tens of thousands
-  of files) that is seconds of main-thread block: the exact "lags,
-  black screen, crashes" (an ANR kill). Now the size cards measure OFF
-  the main thread behind a process-wide cache — the last known number
-  paints instantly, a stale one re-measures in the background and
-  reposts. The incident-log viewer reads a TAIL-BOUNDED window (64 KB)
-  instead of whole-file readAll. The walks never touch the UI thread
-  again; the contract is pinned with a deterministic executor.
-- **THE KEYBOARD RE-ANCHOR.** adjustResize shrinks the transcript when
-  the IME opens — and nothing re-anchored the pinned bottom, so the
-  newest rows sat HIDDEN BEHIND the keyboard until the next paint (the
-  "ui glitches when the keyboard comes up" class). A layout-change
-  listener glues the chat back to the bottom the same breath the
-  viewport resizes — keyboard, split-screen, DeX — and only then (row
-  growth changes the list's height, not the viewport).
-- **THE QUIET FINALIZE.** The catch-up → markdown rebuild ran at EVERY
-  burst boundary: each catch-up re-rendered the whole part and rebuilt
-  the row. A long answer arrives as many bursts — dozens of full
-  main-thread re-renders, each a visible hitch (the stream glided after
-  P43/P48, but the screen still stuttered between glides). Now the
-  cheap plain-text painter keeps painting and the ONE markdown rebuild
-  lands 600 ms after the row stops growing; a resumed stream re-arms
-  it, a click still answers instantly, and pause/reset cancel it.
-- **THE HONEST SCROLL BASE.** The pin's base position went stale after
-  a long "↓ latest" flight and read the next real event as a huge
-  upward drag — the pill flashed back for a frame after landing. The
-  base is now always current, the pin decision is a pure function, and
-  the model picker stops rebuilding its adapter on every keystroke.
-- Plus: the Settings entrance stagger is capped (past ~300 ms delay
-  reads as lag, not polish) — and 18 new tests pin all of it; 534 green.
-
-## What's in v0.48.0 (P48 — the smooth release)
-
-The field report on P47: the tokens ARE real-time now — but "they come
-and go so fast it glitches the ui, it goes up and down — almost had a
-seizure"; and the thinking bubble should "have a fixed length", showing
-the thought "a bit slower — faster than reading speed", with nothing
-still animating when the answer lands. Plus the standing worry: do
-background sessions stay healthy? P48 is a pure UI-calm release — the
-wire layer P47 verified is untouched.
-
-**1. The strobe is capped.** The P43 reveal pacer drained any burst
-inside a 2.2 s lag ceiling — which means a 4 kB burst revealed at
-~1800 chars/s, and fast providers arrived faster still. The pacer now
-carries profiles with a hard ceiling: the answer glides at most 900
-chars/s (clearly quicker than reading, never a flash), and THINKING
-rows reveal on their own profile at a calm ≤170 chars/s — faster than
-reading speed, slow enough to actually follow, and with no aggressive
-drain: the thought backlog may grow freely while the model thinks.
-When the answer's first token arrives, the ticker snaps the thinking
-row settled in one paint — the thought never races the answer, exactly
-as asked.
-
-**2. The thinking bubble is a fixed-length stage.** The collapsed
-thought card reserved only a MAXIMUM of three lines, so its sliding
-window changed line count on nearly every reveal and the whole list
-bounced with it — that was the up-and-down. The window is now exactly
-three lines, no more, no fewer (minLines = maxLines = 3): the newest
-reasoning crawls through a stationary frame, and the cards above and
-below it never move by a pixel until the row settles.
-
-**3. The scroll pin stopped fighting itself.** Second oscillator, the
-subtler one: the scroll listener fired for the app's OWN corrective
-scrolls too, and in the gap between a paint (content grew) and the
-scroll correction the view read as "not at bottom", so the pin flipped
-off, the next correction re-pinned — oscillation. Now programmatic
-scrolls carry a bracket the listener ignores; only the user's hand
-moves the pin (one pixel of upward drag unpins for good; downward
-motion re-pins only at the true bottom). Corrections also run after
-layout, so they target the freshly grown height instead of chasing a
-stale one every 24 ms.
-
-**4. Background sessions, made certain.** The run itself always lived
-in the hub (streams keep landing while the screen is away — that part
-was already safe and is unchanged), but the screen's paint ticker kept
-firing into the detached view tree every 24 ms: battery burn, and a
-mid-glide replay glitch on return. The ticker now stops on pause, and
-on resume everything that arrived is snapped SETTLED — full text, one
-repaint, zero re-animation, exactly like the server UIs. Only deltas
-that arrive while you watch glide.
-
-All 516 JVM tests green (13 new P48 pins: the two profile caps, the
-no-flash-drain guard for a 100 kB thought backlog, the stall floor,
-the legacy-pacer contract, resume-snap behavior through the real
-activity, the fixed three-line window, version).
-
-## What's in v0.47.0 (P47 — the live token release)
-
-The field report: the reply still arrived all at once — not even a burst,
-just the finished text appearing the moment it was done — and the agent's
-git work in cloned repos kept fighting it. Both are cured at the source
-this time, with a timestamped probe against the real server as the
-witness instead of a guess.
-
-**1. True token-by-token streaming.** The probe (a mock provider that
-emits one token every 30 ms into a real opencode v1.18.25 server, with
-every /event frame timestamped) settled what the wire actually carries:
-the big `message.part.updated` snapshots only fire at part BOUNDARIES —
-an empty part at creation, then the complete text at the end — while
-every individual token rides its own tiny `message.part.delta` frame in
-real time. The app had been consuming only the snapshots, so the screen
-saw nothing while the model spoke and the whole reply materialized at
-once. P47 consumes the deltas: they append straight onto the message row
-(keyed exactly where the snapshots land, so both streams meet in the
-same text), the snapshot governor stays as a bounded backstop, and the
-boundary snapshots still reconcile the final state. The chat also stops
-rebuilding the message view on every token — once a row's view exists,
-growth is painted in place by the existing smoother, so even long
-thinking-heavy replies glide at the model's own pace. Verified against
-the live server: deltas arrive every ~30 ms and paint as they arrive.
-
-**2. git work in cloned repos stops fighting the filesystem.** P46 made
-clone itself work on shared storage (private .git via
-`--separate-git-dir`); the leftover pain was what came AFTER: FUSE stat
-jitter makes git see phantom changes and re-hash the whole tree on every
-command. The shim now tunes every fresh FUSE-worktree repo in the same
-breath as the clone: `core.filemode=false`, `core.trustctime=false`,
-`core.checkstat=minimal`, `core.untrackedcache=false`,
-`core.fsmonitor=false`, `gc.auto=0` — all stamped into the PRIVATE git
-dir (ext4), where the repo's config actually lives. Status/add/commit
-stop re-scanning and lying about modified files; nothing changes for
-repos on plain ext4.
-
-**3. The honest bookkeeping around it.** Delta frames count as run
-output (the one-shot stream-flake retry only fires when nothing was
-rendered — it must know), they keep the run's liveness and wake lock
-fresh, and the governor's correction is documented where the old wrong
-diagnosis lived. All 503 JVM tests green (13 new P47 pins: delta wire
-shape, governor passthrough, append/create-on-demand/guards, the full
-snapshot→deltas→snapshot turn, shim tuning incl. a behavioral run
-against real git, version).
-
-## What's in v0.46.0 (P46 — the keep-it-alive-and-honest release)
-
-The field report that drove it: *"clone works fine in /tmp; the project
-folder's fuse filesystem can't do the atomic rename during git clone …
-maybe we should give it its own private storage? the live file watcher —
-make sure that works too … real-time token streaming doesn't work, I wait
-~15 seconds then bursts."* All three, fixed at the source.
-
-**1. Real-time streaming, cured.** The reason text arrived in 15-second
-bursts: opencode's event feed re-sends the WHOLE accumulated part text on
-every token delta — on a desktop that's invisible, on a phone the event
-thread drowned in quadratically-growing JSON parses (a 5k-token thinking
-block alone is ~25k token-payloads of JSON) and the UI got the leftovers.
-The new **stream governor** pre-screens each raw frame with a cheap scan
-(no JSON parse), applies at most one frame per part per 250 ms, and holds
-only the latest raw snapshot in between. Because every frame IS the full
-part state, dropping intermediates loses nothing — and the final state of
-every part always lands: force-flushed on message.updated / session.idle /
-session.error, on stream end, and via the bounded pending set. The chat's
-existing smoother still glides the text, fed in real time now.
-
-**2. git clone works everywhere.** Shared storage (/sdcard) is FUSE and
-cannot take git's atomic tmp+rename dance — that's why clone died there
-while /tmp (private ext4) cloned fine. Two layers of fix:
-- **New projects default to PRIVATE app storage** (ext4: fast, atomic,
-  no permission dance) — the Playground seed and the ＋ folder picker both
-  start there; ↑ .. in the picker still reaches /sdcard on purpose.
-- **The git shim** now detects clone/init into FUSE destinations and
-  injects `--separate-git-dir`: the real .git lives in private storage,
-  the working tree gets the tiny .git FILE pointer, and every later
-  lock/pack/object rename happens on ext4 — so even a deliberately
-  /sdcard-rooted repo keeps working forever after, not just the initial
-  clone. Explicit --separate-git-dir / --bare / -C are never touched.
-
-**3. The live file watcher, verified for private storage.** The watcher
-is the P16 inotify stack (recursive, depth/observer-capped, debounced)
-and it follows the project's real path wherever it lives — private ext4
-is native inotify territory, arguably better than FUSE. Nothing to
-change; now it's pinned.
-
-**4. Long-session stability sweep.** The seen-permission id set grew one
-entry per ask, forever — now hard-capped like every other bookkeeping map
-(P26 rules). The stream governor is itself a stability fix: the SSE
-thread no longer falls behind on long answers, and the pending frames
-are byte-bounded. Plus the usual: all 487 JVM tests green (12 new P46
-pins: governor scan, state machine, storm economics, fuse rule, shim
-injection, private seed, version).
-
-## What's in v0.45.0 (P45 — the act-normal release)
-
-The P44 field verdict, in three sentences: the warm-paper "Claude" palette
-was rejected outright ("the default pallet is graphite — change it back";
-"claude" was meant as the chat INTERFACE layout, never the colors), the
-silent context compaction had to die ("i dont want the app to randomly
-compact the context for no reason"), and cold-booting straight into the
-last chat reads as the app doing things behind the user's back. P45 does
-all three, and the chat gets the Claude-Android layout on the graphite
-tokens it should have worn all along.
-
-**ONE — auto-compaction is OFF, at the source.** The bundled server's own
-escape hatch (`compaction.auto: false` in opencode.json — found in the
-binary's embedded config schema) is now pinned at every server boot, and
-the default is OFF: the sandbox NEVER summarizes a chat's memory on its
-own. A context that genuinely fills errors with one honest overflow line
-("start a fresh chat or clear the window cap") instead of the model
-silently losing the thread — the failure is visible, cheap, and yours to
-choose. The Σ meter's hot-context warning now names the real consequence
-in the active mode, and Settings → Essentials → **Auto-compact context**
-turns the old behavior back on explicitly (write-through to
-opencode.json, ownership-tracked, restart-to-apply).
-
-**TWO — Graphite is the default face again.** The claude palette is
-removed outright (table row, gradients, name, launcher alias, icon set);
-the one-time p45 migration carries devices the p44 push had dragged onto
-warm paper back to Graphite, and every other explicit theme choice stands.
-
-**THREE — the chat wears the Claude layout.** User messages sit in fully
-rounded, neutral graphite pills (no tail, no accent shout); assistant
-responses are flat full-width text under a small ✦ marker; the empty chat
-greets by time of day ("Good evening / How can I help you today?"); and
-the composer is ONE unified pill — borderless input inside it, attach +
-palette on the left, Build/Plan + model chips and the send circle on the
-right — all painted at runtime from the live palette so it follows every
-theme. Cold boot lands on the project deck, always (MainActivity routes
-nowhere else; the last-project sandbox pre-warm stays, since it is pure
-infrastructure — no session, no run, no screen).
-
-475 JVM tests green (18 new: the kill-switch merge table, the two-mode
-risk notes, the p45 theme migration, the AuthStore round-trip).
-
-## What's in v0.42.0 (P42 — the honesty release)
-
-The v0.41.0 field session held its thread for hours — the compaction
-floor worked. But real money still went into loops that had nothing to
-do with the task, and three of the numbers on screen could not be
-fully trusted. Each one traced to a source:
-
-**The environment-fix loops.** The agent's shell had NO working TLS
-trust: nothing ever exported a CA bundle, Android's system trust store
-sits at a path Linux-compiled tools never look at, and the shipped
-alpine/debian bundles were never pointed at by any wrapper. Every
-curl/git-https died the same way — and an agent that cannot reach the
-network probes, retries, and "fixes". Worse, the environment note the
-agent reads at session start claimed the shell was always a Debian
-guest, claimed a GitHub token was exported in the native shell, and
-recommended `apt-get install ca-certificates` — the exact loop the
-money went into. Now: one merged CA bundle (Android system store + the
-shipped Mozilla set) is built at every spawn and exported through the
-standard variables every tool family honors (SSL_CERT_FILE,
-CURL_CA_BUNDLE, GIT_SSL_CAINFO, REQUESTS_CA_BUNDLE, PIP_CERT,
-NODE_EXTRA_CA_CERTS, NPM_CONFIG_CAFILE); it is preseeded into the
-Debian rootfs before the first apt call and exported in the alpine
-wrappers and the git shim. The env note is rewritten mode-aware and
-honest: certificates are provisioned and fixing them is not a step
-here, raw DNS cannot work by design (and the one real remedy is named:
-DNS bridge), and — the money saver — if a probe fails twice, report it
-and move on. A sandbox-root fallback announces itself instead of
-letting the agent discover it by ENOENT.
-
-**The meter and the money.** Sessions reopened after many turns
-under-counted (replays booked only the last 80 stored messages — the
-rendering cap was silently an accounting cap); money billed while the
-app was closed never reached the all-time counter (a background run's
-spend vanished, so the credit cap could be exceeded in fact); after a
-compaction the meter kept the pre-compaction depth (95% painted on a
-freshly shrunken window); a model switch left the pill on the old
-model's window; and a compaction floor pinned for one model rode along
-to a smaller-window model, making every compaction a no-op. The
-fixes: full-store bookkeeping with the 80-window kept as a rendering
-cap only, a persisted per-message cost ledger that books exactly once
-(live or replayed; unseen sessions seed silently), the summary message
-no longer feeding the high-water, model switches repainting the meter
-and MOVING the app-owned floor (a user-edited value is never touched),
-one percent rule (floor) across pill, hint, warning and popover, and
-the server's own tokens.total preferred when present.
-
-**The context-limit slider.** Σ pill → ◈ Window cap: a real slider
-(plus presets and Clear) that writes the picked model's
-`limit.context` — the exact number the sandbox believes and enforces —
-in opencode.json, in the models.dev shape the bundled server parses
-natively (verified in the binary itself). Applying offers a sandbox
-restart so the meter's denominator and the compaction trigger follow
-at once. Reachable on a fresh chat, and the popover states plainly
-when a cap is in force.
-
-**The small stuff the field actually felt.** The keyboard no longer
-opens by itself (the input is never the initial focus target, focus
-drops on pause, and tapping the input is what opens the IME); the back
-button has a fixed 40dp floor and the Σ pill caps its own width so a
-long meter line cannot crush the title on narrow screens; the startup
-veil shows a live elapsed counter instead of a static "≈ 5 s" that
-read as a lie on slow boots, fades out instead of popping, and no
-longer strobes on restart flaps; and the "20000 days ago" class of bug
-is structurally impossible now — deleted watcher rows, stale file
-listings and the sessions sheet all render through one unit-explicit,
-JVM-tested time helper ("—" for unknown time, never an epoch
-accident: the old code passed an AGE where an EPOCH was expected, so
-every row painted ~20090 days).
-
-423 JVM tests green (11 new: the time helper's unit contract, the
-shared percent rule, the window-cap bounds/quantize/merge/clear/
-junk-handoff table, and the floor's move-only-what-you-own rule).
-
-## What's in v0.41.0 (P41 — the memory the meter couldn't see)
-
-The field report that opened this phase: a long agentic session where
-the agent kept re-exploring the same project folder it had already
-checked many times, burning real money, while the Σ pill read "16% —
-light, nothing to worry about". This time the answer was not in the
-app's behavior but in the bundled server's own source (opencode
-1.18.25) — read line by line, and the whole mechanism fell out.
-
-WHY A LONG CHAT LOSES ITS MEMORY (the actual mechanism): every turn,
-the model re-reads the whole conversation. When a turn's billed tokens
-reach the context window **the server believes** (its own model
-metadata, not any app number), the server compacts SILENTLY: the
-thread is summarized, and the model's working set becomes that summary
-plus at most a couple thousand to fifteen thousand tokens of recent
-turns kept verbatim. The on-screen store keeps the full history — so
-the human sees everything — while the model is left holding a
-paragraph. A fast model writes shallow summaries; the agent loses its
-map of the project; it re-lists the folder it already listed; the
-payload refills; the server compacts again. Each cycle also
-invalidates the provider's prompt cache, so the whole payload re-bills
-at full input price — that is where the money went.
-
-WHY THE APP MISSED IT THREE TIMES: the Σ meter's denominator came from
-the online catalog (which advertises 1.3M for the field's model) while
-compaction fires on the server's own, possibly much smaller line — the
-meter could reassure at 16% while the sandbox was near its own edge.
-The P39 detector watches for flat token totals; this failure mode
-grows normally, so it never flagged. The P40 cure removes only EMPTY
-summaries; a shallow-but-nonempty summary is "healthy" by that
-definition. Detection was the wrong shape — the governance was wrong
-at the source.
-
-THE FIX, AT THE SOURCE (no detectors, no ride-along patches):
-
-- **The memory floor is pinned where the server reads it.** At every
-  boot the app writes `compaction.preserve_recent_tokens` into the
-  sandbox's own opencode.json — scaled from the picked model's window
-  (30% of the usable space, clamped 8k–60k, never written for unknown
-  or tiny windows). After ANY compaction the model now keeps tens of
-  thousands of tokens of real recent turns verbatim, not 15k at best.
-  Write-if-absent: a value already in the file (yours or a future
-  release's) always wins, and the merge rule is pinned pure.
-- **One truth for the window.** The Σ pill and popover now use the
-  LIVE server's limit — the exact number the sandbox's overflow logic
-  enforces — with the catalog only as fallback when the server never
-  listed the model.
-- **The two sources are named when they disagree.** When the catalog
-  advertises more than ~20% more room than the sandbox enforces, the
-  Σ popover says both numbers and which one matters. The field case is
-  exactly this shape (1.3M advertised; the P27 log itself recorded a
-  server claiming five times less than a catalog for one model).
-- **Compaction warns before it lands.** From 70% of the enforced
-  window the popover carries a plain line: compaction is close, finish
-  the task or start a fresh chat to keep the details.
-- **Compaction is announced when it happens.** A summary landing live
-  in the open chat now says so — one honest line about what was kept,
-  what now lives only in the summary, and that the screen shows more
-  than the model remembers. No more ordinary-looking bubble quietly
-  rewriting the model's memory.
-
-P41Test pins the floor table and its safety property (the floor stays
-below the usable space for every window from 64k to 2M — a compaction
-always frees something, the tail stays history), the write-if-absent
-merge (user keys, even malformed ones, are never touched), the server-
-first window precedence, and every note text (no token-shaped strings,
-ever).
-
-## What's in v0.40.0 (P40 — the amnesia cured at its source)
-
-P39 made the amnesia observable and non-fatal. P40 ends it. The rig went
-back to work — the exact bundled server (v1.18.25) under emulation with a
-payload-logging mock provider — and this time it reproduced the field bug
-end to end, found the real mechanism, repaired it at the source on the
-rig, and the app now does the same on the device.
-
-- **the mechanism, proven** — the server keeps every message in a SQLite
-  store, and opening a session paints the whole thread from it (why you
-  always SAW your history). But the payload the model receives assembles
-  from a different start: the LAST compaction root — a marker row a
-  summarize/compact run leaves behind. Everything before that marker is
-  deliberately excluded. When the compacting model returns an EMPTY
-  reply, the marker is still written — with no text. From then on every
-  payload is system prompt + a dangling prompt + your latest message:
-  flat per-turn tokens, and the model answers as if the chat were fresh.
-  That is the field report, mechanistically, end to end. Kills,
-  restarts, and re-compacting were proven NOT to cause or cure it — the
-  API path cannot even see the old history through the poisoned root.
-- **the cure at the source** — the app owns the device: it stops the
-  server, removes exactly the poisoned marker rows (empty roots and
-  their trigger prompts, by id, bound-parameter deletes — healthy
-  summaries and real turns are never touched), restarts, and verifies
-  through the same API the model reads. The full conversation is back
-  in the model's view; nothing was lost, nothing re-sent by hand.
-- **prevention at the compact button** — after a compact, the app checks
-  the summary that just landed. An empty one is called out honestly and
-  the repair runs before the amnesia is ever felt. The session opens
-  are checked too, so a session poisoned long ago heals on its next
-  open.
-- **the bridge, not a tax** — while a session is diagnosed and not yet
-  repaired, the P39 Context repair note rides its sends. Once the repair
-  verifies clean, it stops. The detector now also reads the compaction
-  marker on replayed sessions (older builds only saw it live), so the
-  flat-totals watch can no longer misjudge across an old compaction.
-- 399 JVM tests green, 20 new pins: the root marker (and the trap —
-  user messages carry their own summary metadata that must never read
-  as a root), the poison table (empty, whitespace, healthy, superseded,
-  nothing-to-lose), the victim list (empty roots + triggers only), the
-  bound-parameter SQL plan (parts before messages, batched under the
-  999-parameter wall), the honest lines, and the hub's ride-then-lift
-  bridge.
-
-## What's in v0.39.0 (P39 — the context-integrity release)
-
-The field report was blunt and the screenshot proved it: a session with
-37 turns and ~1.3M tokens behind it answered that this was a fresh chat
-with no prior conversation history, and every one of those turns cost
-a flat ~44k tokens. Flat per-turn tokens are the fingerprint — when
-history reaches the model, every turn's input grows by at least the new
-content. The history was physically never reaching the model.
-
-- **the amnesia detector** — the app now watches exactly that
-  fingerprint: five consecutive turns whose totals stay level (on a
-  base of at least 10k tokens), or a single one-step drop steeper than
-  a third, flag the session as answering without history. A compaction
-  summary resets the watch (shrinking after /compact is the feature
-  working), and error-partial turns are never judged. Healthy sessions
-  can grow by too little to trip it; the suite pins both sides of that
-  line.
-- **context repair** — while a session is flagged, every send carries a
-  compacted digest of the recent thread inside a system-reminder block
-  (the same ride-along path the terse/env/render notes use), so the
-  model is back inside the conversation no matter what eats the history
-  on the device. It stops riding by itself the moment the totals grow
-  again, and your bubble never shows it — the repair is for the model,
-  the strip keeps the chat human.
-- **the honest empty store** — opening a session whose server-side
-  message store answers empty used to sit silent and look like a fresh
-  chat; now it says once, plainly, that the sandbox lost this chat's
-  history and what happens next.
-- **the sandbox's own witness** — Diagnostics shows the opencode
-  server's own log file (bounded tail read): every loop step, message,
-  compaction and error the server actually made. If a chat ever forgets
-  again, that log plus the pill numbers settle what happened.
-- The investigation behind it: the exact bundled server version was
-  exercised on a rig with a payload-logging mock provider and the app's
-  real request shapes — history grew correctly turn after turn and
-  across a full server restart, which clears the server logic and makes
-  the app-side detection-and-repair the right fix at this layer.
-- 379 JVM tests green, 12 new pins: the detector table (healthy, flat,
-  compaction, collapse, error-turns, small sessions), the recap builder
-  and its strip cross-signature, the hub's chronological message view,
-  the digest assembly, and the sid-scoped repair gate.
-
-## What's in v0.38.0 (P38 — field-tested, folded into v0.39.0)
-
-Built and verified in the field but never published as its own release;
-every fix below is inside the v0.39.0 APK.
-
-- **the notes are for the model, not for the human** — the environment
-  map (and the render-check and terse notes on their ride turns)
-  rendered inside the user's own bubble as a giant system-reminder
-  block; the bubble now paints what the user said while the wire text
-  keeps every note, and old sessions repaint clean too.
-- **once means once** — the told-ledgers were memory-only, so continuing
-  a session the morning after rode the whole environment map again;
-  they persist write-through and refill at boot now.
-- **the residual gap** — a message body ending in blank lines painted
-  them, floating the token footer below a visible void; display and
-  copy trim the tail, stored bytes stay untouched.
-- 367 JVM tests green (21 new) at its own gate.
-
-## What's in v0.37.0 (P37 — the chat stops lying with empty space)
-
-- **no more empty items and weird gaps in chat** — assistant rounds that
-  only ran tools (no text) used to render as an invisible padded box with
-  their token footer floating alone between the tool cards (the blank
-  areas and lonely `tok` lines in the field screenshots). A message now
-  exists only when it has words: tool cards sit tight together, real
-  messages keep their bodies and footers exactly as before.
-- **error cards show one cross, not two** — the `✕` was painted twice on
-  the same card.
-- **raw tool-call markup in the chat gets explained, once per session** —
-  if a model prints its own tool-call syntax as plain text, the app says
-  plainly that those actions did not run and another model should be
-  tried. The junk text stays visible; nothing is hidden, it just stops
-  being unexplained.
-- **the environment map rides every session's first message** — the shell
-  runs inside a Debian guest whose `/root` the host read/edit/write tools
-  cannot see (keep shared files in the project folder — that was the
-  read-file error in the field), and the GitHub-token question gets an
-  honest answer in both states: with a token set (scoped to this repo, a
-  credential helper preinstalled, plain `git push` works, the token is
-  never printed) or without one (pushes will fail; add a key under the
-  keys screen, Agent GitHub access). No more blind git/gh probing.
-- **plain `git push` actually works now** — git never read `GH_TOKEN` by
-  itself (the field report had the token in the environment and push
-  still failing); the guest ships a `/root/.gitconfig` credential helper
-  that reads the token at push time. The file itself holds no secret.
-- Rides along: the dead single-screenshot send path removed (superseded
-  by the attachment tray long ago); `scripts/axml_parse.py` ships in the
-  repo so the build gate's manifest proof survives workspace wipes; and
-  the build gate now pins the bundled payload digest — the opencode
-  tarball itself, not the binary inside it — so a wrong-stage payload is
-  refused before the build even starts.
-- 346 JVM tests green, 16 new pins: the blank-part rules, the note texts
-  (never carrying a token-shaped secret), the gitconfig quoting, the
-  DSML detector, and the zero-footprint render.
-
-## What's in v0.36.0 (P36 — the icon follows the theme)
-
-- **the launcher icon re-inks itself when you pick a theme** — the same
-  `>_` glyph the app has carried since P5, on each palette's own face:
-  the background gradient is that theme's real home gradient and the
-  chevron wears the palette accent (Paper goes light with blue ink, Ember
-  goes warm amber, Forest goes deep green). Under the hood it is one
-  launcher alias per palette with exactly ONE enabled at a time.
-- **an explicit pick always wins, silence keeps the classic** — a device
-  that never chose a theme keeps the P17 icon; the Graphite default is a
-  rendering default, not a choice (the same philosophy the picker already
-  uses for its · default crown).
-- **the switch can never strand you** — the new alias is enabled BEFORE
-  the old one is disabled, so the launcher never sees a no-icon moment;
-  every process start reconciles the alias state, so an interrupted
-  switch (enable landed, disable didn't) heals itself on the next open;
-  and the whole thing is contained — a PackageManager failure is one
-  incident-log line, never a broken theme switch (the palette change
-  that called it already succeeded).
-- **some launchers repaint lazily** — the icon is correct app-side the
-  moment you tap; a launcher that caches hard (a few OEMs) may show the
-  old face until it next reloads. That is launcher behavior, not app
-  state.
-- **the fresh-install boot fix rides along** — the v0.34/v0.35 builds
-  packaged the bundled server binary under a name the code does not read
-  (n.bin where the code opens oc_pkg.bin): upgrades never noticed (the
-  binary was already on disk) but a FRESH install could not boot the
-  sandbox. The rebuilt v0.35.0 asset (Sep 8) already carried the fix;
-  P36 ships it forward and adds a name-fallback chain (pinned by tests)
-  so a packaging slip can never brick the first boot again.
-- **330 JVM tests green (17 new)** — the alias table must stay aligned
-  with the palette table (a future theme without an icon fails the suite,
-  not the user), the theme→alias mapping (garbage never maps to OLED),
-  the exactly-one-enabled plan (enable-before-disable, interrupted-switch
-  healing, stale-cleanup, no-op when already correct), and the
-  bundled-asset name chain.
-
-## What was in v0.35.0 (P35 — the agent's eyes: write, render-check, fix, then show)
-
-- **the loop closed** — the agent could write code and run it, but it
-  could not LOOK at a page it wrote: the sandbox has no browser, tool
-  results are text, and the canvas was a one-way window — the render
-  existed only for the user. P35 gives it eyes.
-- **the browser the sandbox could never carry** — no 300 MB chromium in
-  the rootfs, nothing that gambles the sandbox's size or stability: the
-  app already ships a full web engine (the canvas viewer's WebView), so
-  THAT renders offscreen and the agent drives it with one curl from the
-  sandbox (loopback-only, token-gated, one route). The reply is JSON:
-  verdict pass|fail, every console error, a DOM outline (elements,
-  buttons, links, inputs, canvases, horizontal overflow), layout
-  notes, and — when asked — a one-paragraph visual description of the
-  page via the free vision ladder (keyless, same as photos).
-- **the verification loop, taught at the moment it matters** — the P30
-  lesson stands (no AGENTS.md blocks: they leak into git and go stale
-  mid-session). Instead the ⌘ canvas ask carries the loop itself —
-  write the page, render-check it, fix every console error, re-run
-  until the verdict is pass, only then call it done — and after any
-  .html write/edit/patch in a chat, the next message in THAT chat rides
-  one <system-reminder> note teaching the same check (once per
-  session, success-marked, zero tokens when no HTML was written).
-- **the quiet check mark** — the ▶ interactive chips (tool cards and
-  the Files menu) grow a state: · ✓ checked when the last render check
-  passed, · ⚠ issues when it failed. Nothing opens by itself; the user
-  still taps — they just tap pages the agent already verified.
-- **containment everywhere** — one render at a time, a 20 s hard
-  watchdog, the path guard (canonical: .. and symlinks cannot walk out
-  of the project, 3 MB cap like the canvas), file + network access off
-  in the render WebView (external loads are refused AND reported), a
-  per-boot token gating the endpoint, and a dead render process is a
-  report line — never a crash.
-- P35Test pins the path guard, the verdict rule, the report caps and
-  shape, the note arming rule and the check-state LRU; the suite runs
-  green end to end.
-
-## What was in v0.34.0 (P34 — one surface for every box, a deck that always catches you)
-
-- **every box in the app grew up** — the audit found 41 framework alert
-  boxes across 9 files (the Credit limit editor and the Interactive canvas
-  ask among them — the grey Android-4 platform box from the field
-  screenshots). Every one is now the app's own Sheet: bottom-anchored
-  28 dp panel, grab handle, large title, stacked full-width pills,
-  palette-correct by construction on all six themes, slide-up/down motion
-  on every open AND dismiss (back / scrim / pill), swipe-away header,
-  manual IME + nav insets, the motion switch honored, and a dead-flag
-  no-op so a sheet can never take a screen down. Zero framework boxes
-  remain.
-- **back from a chat ALWAYS lands on the deck** — the field report: after
-  an update the app spawned straight into the playground chat, and both
-  the hardware back and the in-app back closed the app instead of opening
-  the project deck (the restore had made the chat the task root —
-  `finish()` had nothing beneath it). The back rule is now pure and
-  pinned by test: task root → open the deck explicitly, else a plain
-  finish reveals it.
-- **Settings ESSENTIALS moved to the top** — the important toggles lived
-  below a scroll, buried at the bottom of the screen:
-  Interactive canvas (with a one-tap pre-typed chat hand-off), Credit
-  limit, Default model, API keys, Unattended mode — now a top zone in
-  their own accent-washed color family.
-- **the credit-limit editor is Pixel-style** — a big amount field,
-  $5–$100 + no-limit quick chips, inline validation that keeps the sheet
-  open and clears as you type, Save/Reset stacked pills. The direct
-  number input stays — a slider cannot know the price range the user is
-  willing to give.
-- **the polish sweep** — the ⌘ sheet pins a featured canvas row; ⌘ list
-  rows and the Diagnostics shell input now paint from live tokens (they
-  wore frozen white on Paper before).
-- P34Test pins the back rule, the chip round-trips and the resume
-  format; 300 JVM tests green; zero framework boxes remain.
-
-## What was in v0.33.0 (P33 — the final version: themes land instantly, Graphite is the face, keys reach the sandbox, the picker tells the truth)
-
-- **the theme change is INSTANT** — tapping a palette in Settings used to
-  call `recreate()`: a whole-activity teardown + rebuild + window animation
-  — seconds of dead air on every switch. The theme
-  now lands the same frame: save → apply → dismiss the sheet → rebuild the
-  one view tree in place. The new palette is on screen before the sheet
-  finishes its 180 ms slide-out.
-- **Graphite is the default face** — picked from the field: of all the
-  palettes, graphite read coolest on a phone screen, so it became the
-  default. Fresh installs (and pref-less devices)
-  come up in Graphite; an explicit theme choice always wins; the picker's
-  "· default" label moved with the crown.
-- **the whole-app palette sync actually works now** — P32's `syncIfNeeded`
-  compared the pref against the PROCESS-GLOBAL static, which Settings' own
-  `apply()` had already updated — so no other screen could ever be "stale"
-  and the sync never fired in the field (the source of the lingering
-  inconsistent-screens reports). The palette id now rides a
-  per-screen decor stamp: every screen knows what it was built with,
-  re-skins exactly once when the pref moves, and provably cannot loop.
-- **keys reach the sandbox by themselves** — the exact report: the app
-  swearing there is no API key even though API settings shows one saved.
-  Three layers fixed: (1) a CHANGED key now auto-restarts the sandbox (the
-  old code only restarted for a FIRST-TIME key — an updated key left the
-  running server serving the old value, so sends failed with key errors
-  while API settings showed the new key saved); (2) the model sheet re-reads
-  auth.json at open, so a saved key can never be called "missing" by a
-  stale fetch; (3) the "no API key yet" hint also counts custom providers
-  whose key lives inline in opencode.json. Importing auth.json and adding
-  a custom endpoint apply the same way — no manual restart to forget.
-- **the picker contrast is honest again** — "p31 showed the models i cant
-  select low contrast white while the ones i do have acces to white...
-  p32 made everything low contrast white": when the running server didn't
-  answer (boot, a key-change restart, hibernate wake), the fetch marked
-  EVERY model catalog-only and the whole sheet went dim. The pure
-  `carryLive` rule keeps last-known live truth through a server blip — a
-  model the server served last time stays bright and selectable, and a
-  restart window can no longer flatten the catalog.
-- **the project long-press grew up** — the actions menu was the last
-  framework list box — the grey Android-4 relic. It's the app's
-  own sheet now: project name + mono path header, glyph rows (▸ Open ·
-  ✎ Rename · ⌦ Remove card · ✕ Delete project… in the danger color),
-  ripple + haptics, palette-owned end to end. The delete confirm shows the
-  exact path in a code well with Keep it / Delete forever pills, and the
-  rename flow matches. Same shields as P30 underneath (safetyCheck,
-  stop-first-when-serving, off-thread walk).
-- **smoothness sweep** — the theme-change recreate and the GitHub-token
-  save recreate are both gone (in-place updates); the model sheet keeps
-  its instant-open; the deck, transcript and Σ pill keep their pinned
-  rhythms. Nothing new was added — polish only, as asked.
-- 291 JVM tests green (16 new: carryLive rules, embedded-key detection,
-  the graphite default, per-screen stamp + one-shot reskin, the in-place
-  theme change pinned by decor identity, and the model-sheet auth re-read).
-
-## What was in v0.32.0 (P32 — the final polish: the theme crash, fixed; every screen follows the palette)
-
-- **the theme crash** — "pressing the theme change button causes a
-  crash": P31's picker dead-cast `simple_list_item_1` (a TextView!) to
-  LinearLayout — ClassCastException on every tap, before the sheet even
-  opened, in a line no logic test could see. The dead cast is gone, the
-  picker is contained (failure = one toast + incident-log line, never
-  the app), and a Robolectric test now performs the exact tap and
-  asserts the sheet opens.
-- **every screen follows the palette** — a theme switch used to re-skin
-  Settings only; all screens sync on resume now (loop-proof,
-  contained).
-- **no more frozen colors** — code wells, error cards, permission
-  pills, system pills, thinking cards, suggestion chips, the user-bubble
-  rim, card ink, the sandbox veil and the hero disc all follow the live
-  palette now; on the default OLED theme every result is byte-identical
-  to P31 (pinned by test) and Paper finally gets real ink. `retint()`
-  re-skins the static-XML hairline strokes it could never reach.
-- **the picker, improved** — live swatches (bg · surface · accent) on
-  every theme row, haptic on select.
-- 275 JVM tests green (17 new). Fixes and polish only — no new surface:
-  this is the final version.
-
-## What was in v0.31.0 (P31 — parallel chats, favorites, a credit limit, the canvas, themes, sleep)
-
-- **the long-press fix** — "long press to delete doesn't work, it just
-  opens the chat": a project card is a clickable child, so it consumed the
-  whole touch stream and the deck's gesture detector never saw a
-  stationary hold; on release the card's own click fired — the chat
-  opened. The long-press now lives ON THE CARD (native long-click:
-  consumes the gesture, suppresses the release-click) with the deck
-  callback kept as the gap fallback. Pinned by a UI test.
-- **★ model favorites** — long-press a model in the picker and it lands
-  on a ★ FAVORITES shelf at the very top, ahead of every provider. Tap to
-  use, long-press to unpin. Ordered, capped at 8, rotation-proof (a
-  favorite the free catalog no longer lists hides — it is never deleted).
-- **credit limit** — Settings → Safety: set a dollar cap; the app tracks
-  what it actually observed (all-time, this device, persisted) and
-  refuses every send past the cap with one honest line. ⚠ subtitle nudge
-  at ≥80%, cap state in the Σ popover, manual counter reset.
-- **parallel sessions** — runs are tracked per chat: a script can stream
-  in one session while you keep working in another (up to 3). Sessions →
-  green ● RUNNING NOW badge, long-press → Stop the run; ■ answers only
-  the chat on screen; the subtitle announces background runs; the
-  watchdog/re-arm/eviction rules all became per-run aware.
-- **interactive canvas** — ⌘ → "✦ Interactive canvas…": the agent writes
-  a self-contained HTML page (inline CSS/JS, no external resources) to
-  canvas.html; a ▶ interactive chip (on the tool card, or Files →
-  long-press an .html file) opens it in a sandboxed viewer — JS on, file
-  and content access off, external navigation refused, nothing
-  auto-opens. Offered, never forced.
-- **reset sandbox environment** — Settings → Environment: wipes ONLY the
-  extracted tooling (Debian rootfs, Alpine layer, shims, applets,
-  caches). Keys, GitHub token, projects, every chat on disk and all
-  settings survive; canonical-path guards; optional immediate reinstall.
-- **auto-hibernate** — app in the background + no run in any chat + no
-  approval waiting + past the quiet threshold (default 10 min) → the
-  sandbox stops itself and the RAM goes back to the phone; reopening
-  drops you straight into the chat you left, restored from disk. Never
-  fires while work is in flight.
-- **six themes** — OLED black (default), Midnight blue, Graphite, Ember,
-  Forest, Paper (light). Dialogs, status bars and every static XML color
-  are remapped at runtime; the old AMOLED toggle migrates.
-- **plus** — Share chat as Markdown (system share sheet), Find in chat
-  (jump match to match).
-
-## What was in v0.30.0 (P30 — the setting that listens, the honest price line, the delete button)
-
-- **terse replies now work MID-conversation** — the field report was
-  exact: P29 wrote the toggle into the project's AGENTS.md, but opencode
-  reads that file once per session, so flipping it mid-chat changed
-  nothing (testers would call the feature broken) — and the block lived
-  inside the project folder, leaking a chat style into git diffs and
-  other sessions. Now the toggle is a pure app preference (nothing
-  written to your projects, ever) and the preference reaches the model
-  as a one-line `<system-reminder>` that rides your NEXT message in THAT
-  chat — live, one turn, no extra send, ~80 tokens once per change.
-  After /compact the session is re-told automatically. The UI says
-  exactly when it applies: "applies from your next message". Upgrading
-  strips P29's old managed block from your AGENTS.md files (user content
-  byte-preserved, logged in Diagnostics).
-- **the cost hint stopped clipping** — the price line above the input
-  was right-aligned and hard-clipped with no ellipsis, so it read like
-  it was escaping the UI and spilling past the edge. It now left-aligns
-  with the input well, the format is shorter
-  (`≈ 2k new · next $0.0500 · ctx 48k`), a length-bound test keeps the
-  worst case inside a 360dp screen, and the ≥50% nudge names the actual
-  button: `/compact saves`. Σ pill untouched.
-- **delete projects for real** — long-press a card → **Delete project…**:
-  a confirm dialog that spells out the exact path and the
-  irreversibility, then the folder and every file inside are gone and
-  the card leaves the deck. The guards are the feature: roots, mount
-  points, /sdcard, the app's own dir (and any ancestor of it) are
-  refused by a pure, tested checker; oversized trees abort BEFORE
-  touching a file; symlinks are unlinked, never followed; and deleting
-  the project the server is currently serving stops the server first.
-  ("Remove card" is still there and still only unpins.)
-- **feel** — the deck's long-press answers the finger with a haptic tick
-  before the action sheet pops, and the delete confirm carries its own
-  tick on "Delete forever".
-
-## What's in v0.29.0 (P29 — no more double-open, a real photo tray, a price tag)
-
-- **the model picker can't double-open** — the double-open was silence: a
-  tap started the catalog fetch with no feedback, so the next tap opened
-  a second dialog. Three layers now: an in-flight gate (a tap during the
-  load pops the chip and queues NOTHING), instant open from the cached
-  catalog with a background refresh that updates the OPEN sheet in place,
-  and a single-dialog guard in the sheet builder. The chip pulses
-  "loading models…" so silence is never the feedback.
-- **photos like a real chat app** — the ◉ chip multi-selects. Every
-  picked photo becomes a 64dp thumb with an ✕ in a tray above the
-  composer (add/remove with a haptic tick), and send ships ONE message
-  carrying every image as file parts — the agent sees them together, not
-  as N separate context trips. Server refuses pixels? The free vision
-  model describes EACH photo and the joined descriptions feed the agent.
-  Cap 6 per message; the composer text is the caption.
-- **the cost tag** — a quiet mono line above the input prices the NEXT
-  send live as you type: `≈ 2k new · next ≈ $0.0500 · ctx 48k`. Tokens
-  are estimated (ASCII ~4 chars/token, CJK ~1/char, images pixels/750
-  from the REAL decoded dims); the cost is the honest worst case (the
-  model re-reads the whole window; caching can only shrink the bill);
-  free models say "free model"; at ≥50% window it nudges
-  "compact to pay less". The Σ pill and the $ meter are untouched.
-- **/compact** — ⌘ palette → "Compact context (save tokens)" and a
-  ◈ Compact button in the Σ popover. POSTs `/session/{id}/summarize`
-  (route verified in the bundled binary's OpenAPI): the summary lands as
-  a normal streamed message, the window drains, history stays in
-  Sessions.
-- **terse replies (the token saver)** — the web-researched community
-  presets ("i-have-adhd", caveman: 40-65% fewer OUTPUT tokens) shipped
-  natively: ⌘ → "Turn ON terse replies (token saver)" writes a managed
-  block into the project's AGENTS.md — act first, no pleasantries, code
-  speaks, no summaries of the summary. Your own AGENTS.md content is
-  preserved byte-for-byte; OFF removes only our block.
-- **feel** — haptic ticks on the commit-y actions (send, chips, vision,
-  sessions, Σ, suggestions, attach, permission buttons) independent of
-  the animations toggle, and the input well gained the 1dp hairline every
-  other raised element already had — the one naked element in the design
-  language was the one element that still felt off.
-
-## What's in v0.28.0 (P28 — the P27 field report, fixed)
-
-P27 shipped the live card, the resume-current catch-up, AMOLED and the
-tappable mentions. The field report on P28's plate: tapped file links
-doing nothing (the existence detection was perfect — the
-TAP was dead), the thinking dots drifting into the middle of the
-transcript instead of sitting right above the chat box, and a fair
-question about big-file glitches. All three are fixed, plus two
-lightness wins:
-
-- **the file links actually open now** — a ClickableSpan only ever fires
-  through a movement method, and the transcript rows (selectable text,
-  so copy-a-response keeps working) have none attached: P27 rendered the
-  accent + underline beautifully and the tap fell through to the row and
-  died. Taps are now routed by hit-testing the span array at the touch
-  point — a genuine tap opens the Files viewer, a scroll drag across a
-  link never does, selection and long-press copy keep their native
-  handling, and glyph-boundary rounding (±1 offset + equal-x runs) can't
-  strand a tap one character away from its link.
-- **the thinking dots live above the composer again** — they were
-  parented at runtime via `scroll.getParent()` + `indexOfChild(permSlot)`;
-  the P27 transcript FrameLayout changed scroll's parent, the lookup
-  returned −1 and the dots became a floating overlay INSIDE the
-  transcript. The slot is now declared in the layout itself — it cannot
-  drift again (and a test pins where it lives).
-- **the peek is big-file-proof** — the cap was already 11 lines; what
-  could stutter was the WORK behind it: every debounced fs batch re-read
-  and re-split up to 2 MB of a streaming file. Now: a (len, mtime) memo
-  skips unchanged files entirely, a streamed append (no edit-tool
-  locator) reads only the last 8 KB with honest line numbers, full reads
-  are hard-capped at 2 MB even if the file grows mid-read, and the line
-  the agent is editing is HIGHLIGHTED in the accent color — "shows what
-  the AI is currently editing" is now literally true at a glance.
-- **faster cold boot** — the boot thread used to read + SHA-256 the whole
-  ~175 MB binary on every app launch before the server could spawn. The
-  hash is memoized by (len, mtime) now: one stat instead of 175 MB of
-  I/O; the value restamps itself when the binary actually changes, so
-  Diagnostics still shows the real fingerprint.
-- **the opencode binary and the sandbox stay as P27 shipped them** — the
-  server binary is upstream (bun-compiled; nothing safe to strip inside,
-  shipped once, gzipped, never duplicated) and the curated rootfs trim
-  (~50+ MB at install) plus the post-boot cache hygiene (~108 MB/session)
-  landed in P27. P28's lightness wins are the ones the app itself was
-  wasting: fewer full-file reads under streaming, no cold-boot hashing.
-
-## What's in v0.26.0 (P26 — the evergreen release)
-
-The field verdict on P25: stable and able to handle long runs — with a
-short list. All of it fixed here:
-
-- **the live edit tree is actually visible now** — P25 inserted it as a
-  transcript row at run start, and every tool/text row that streamed in
-  afterwards landed BELOW it, so autoscroll buried the tree above the
-  fold within seconds (the field: "the files the AI edited don't show up
-  in chat"). The tree is now a PINNED FOOTER above the composer: always
-  on screen while the agent works, in nothing's way, gone the moment the
-  run settles — files stay in the project file manager, as before.
-- **the flashing live symbol is gone** — the pulsing ● and the
-  hot-driven expand/collapse strobe were replaced by a static dot and a
-  card that stays expanded (a stable tree, not a strobe).
-- **back walks backward instead of dumping you on the launcher** — Files
-  now goes UP one directory per back press (project root → leaves), and
-  chat's system back mirrors its ‹ button (chat → deck).
-- **the chat updates every time you come back** — the stale screen had
-  two roots: re-opening the displayed session SWAPPED its transcript for
-  a fresh empty one and re-rendered from a replay that could race the
-  sandbox boot and die silently (the "loading…" screen until the next
-  bounce); and a failed re-pull had no retry. Now resume always upserts
-  in place (never wipes), and a pull that fires before the server
-  answers arms a retry that runs the moment the server flips healthy —
-  event-driven, zero polling.
-- **catalog models are selectable** — the hard refusal was by
-  design (the free list rotates), but it read like a bug.
-  A dim "· catalog" row now taps through: the run tries it, and if the
-  server truly can't serve it, the model-not-found self-heal clears the
-  pick and re-sends with the server default — one honest note, no dead
-  end, no double token burn.
-- **built to run for a month — or a year** — the indefinite-run audit
-  capped every growth path: per-message token/cost bookkeeping is now a
-  capped LRU whose totals move by delta (the Σ/$ pill reads are O(1)
-  forever), the pid-less part counter no longer grows one entry per
-  part, edit-focus snippets and paint-fault maps carry hard caps, and a
-  12,000-part soak test proves rows/memory/sums stay inside their walls
-  with exact totals on day 300 as on minute one. Under it all the
-  existing self-healing chain stands: SSE auto-reconnect, server
-  supervisor with backoff, orphan sweep, heartbeat, crash/incident
-  capture, run-state recovery.
-:- **144 JVM tests green** (10 new: sums-vs-eviction, delta corrections,
-  counter gating, focus-map cap, replay retry flag, try-anyway rule,
-  forced-pick prefs round-trip, project-switch reset, the soak).
-
-## What was in v0.25.0 (P25 — runs outlive the chat)
-
-A new RunHub (run engine) owned the transcript, busy state, send
-orchestration, the SSE consumption and the live-edit watcher for the
-whole process lifetime — the chat became a pure view (bind on resume,
-unbind on pause), re-entering mid-run re-PULLed the session from the
-server API through the same upsert pipeline (never re-POSTed, never
-restarted a healthy stream), only the stop button aborted, and a
-swipe-kill mid-run recovered on next launch via a persisted run-state
-file. The Σ pill became a CONTEXT DEPTH meter ("48k / 200k · 24%"),
-the $ meter untouched; the edit shower became a compact live tree and
-the peek live-updated during runs. The suite caught a real dormant bug:
-the run-time model-not-found matcher checked the wrong token, so that
-self-heal trigger could never fire.
-
-## What was in v0.22.0 (P22 — the native-layer audit)
-
-The ask was blunt: "are you sure the native code is tested? most problems
-are coming from there." Fair — so this release EXECUTED the native layer
-and fixed what the execution caught. Nothing here is reasoned about;
-every claim was run.
-
-- **the real binaries were executed for the first time** — the bundled
-  BusyBox v1.36.1 ran under ARM64 emulation on the build rig: all 305
-  applets listed, every shim-critical command pattern exercised (sed/awk
-  pipelines, tar/gzip round-trips, shell semantics the agent's bash tool
-  depends on) — 100% green. The full applet list now ships as a test
-  fixture, and the JVM suite pins the hardcoded fallback list against it.
-- **caught: a dead `patch` command** — the fallback applet list included
-  `patch`, which this busybox build does not have ("patch: applet not
-  found"). Removed, and one-time flag bumped so installs that ran the
-  fallback drop the dead symlink.
-- **caught: dangling hardlinks in every Debian install** — the real
-  debian:bookworm arm64 docker layer (the exact 48 MB blob the app
-  downloads, digest-verified) was extracted with the app's own extractor:
-  `usr/bin/perl5.36.0` and `usr/bin/uncompress` landed as DANGLING links
-  (hardlink targets are archive-root-relative; the extractor resolved
-  them against the link's directory). Fixed; re-extraction now matches
-  the ground truth byte-for-byte (5237 files, 639 links, 0 dangling,
-  0 escapes).
-- **caught: a latent pax-header parser bug** — the substring search for
-  `path=` also matched inside `linkpath=`, so a pax header ordered
-  linkpath-before-path (legal; docker layer writers use map iteration)
-  would extract the file under the LINK TARGET's name. Now record-exact.
-- **proot toolkit wiring verified** — ELF-level audit of db_proot/loader/
-  talloc/shmem: DT_NEEDED deps (libtalloc.so.2, libandroid-shmem.so,
-  bionic libc/liblog) all resolve from the app's lib dir via
-  LD_LIBRARY_PATH; SONAMEs match the install layout exactly.
-- **the sandbox proxy can no longer pile up threads** — the DNS-bridge
-  proxy spawned an unbounded thread per connection; now capped at 64
-  concurrent (far above any real apt/git/pip workload) with the surplus
-  refused, and a live-connection counter for Diagnostics.
-- **send double-tap latch** — session setup + model validation run real
-  network I/O before the busy flag sets, so a fast double-tap on send
-  could queue two identical runs (doubled tokens). A pre-busy latch now
-  collapses them; released on every exit path.
-- **the Debian launcher stops rewriting itself per spawn** — the comment
-  claimed write-if-different; the code always rewrote + spawned a chmod
-  process. Now it actually compares and skips.
-- **tested before ship, again** — 81 JVM tests green (8 new P22 pins:
-  hardlink normalization, pax both orders, exact-key matching, GNU
-  long-link regression, CORE_APPLETS vs the real 305-applet list).
-
-## What's in v0.21.0 (P21 — the stable one)
-
-- **the keyboard stays in the chat box** — the auto-scroll used
-  `ScrollView.fullScroll()`, which runs a FOCUS SEARCH and could move
-  keyboard focus into the selectable message rows while the agent
-  streamed (every 24 ms) — the IME kept detaching from the input.
-  Scrolling is now focus-free at all three call sites, and a guard
-  restores focus to the chat box if any row rebuild ever takes it.
-- **exit forensics** — Diagnostics → "last exits — why Android stopped
-  the app": the system's own ApplicationExitInfo records, naming the
-  process killer (LOW MEMORY / ANR / NATIVE crash / signal / freezer)
-  retroactively — the evidence that was missing for the P19/P20 field
-  deaths. Reason constants pinned against the API-34 android.jar.
-- **send-crash hardening** — resume replays no longer re-decode every
-  image (up to 12 MB of base64 → bytes → bitmap per image per return
-  was an LMKD invitation); vision images reuse the cached decode; a
-  synthetic trailing message can no longer settle the chat.
-- **tested before ship** — a REAL opencode v1.18.25 server ran on the
-  rig, a real free model completed a turn, and the captured
-  `/session/{id}/message` + 176 SSE events replay through the app's
-  settle/replay logic in the JVM suite: **73 tests green** (fixtures
-  shipped in the kit). Part-id keying + `time.completed` verified
-  against reality.
-
-## What's in v0.20.0 (P20 — the background survivor)
-
-- **the empty thought bubble is dead** — the field report: leave the app
-  in background during a run, come back, tap the ✦ THINKING card → empty.
-  Root cause: the chat unsubscribes from the event feed while paused, and
-  onResume only refetched an EMPTY list — every part that fired while you
-  were away was lost forever. Now EVERY resume replays the session from
-  the server's own message store: known parts update in place, missed
-  parts append in order, and nothing the agent said while the screen was
-  away can disappear again (trim-safe: ancient trimmed rows are never
-  re-appended at the bottom).
-- **thinking streams token-by-token now** — the P9 smoothing ticker only
-  drove assistant text; reasoning cards painted in raw SSE bursts. The
-  ticker now drives thinking rows too: a collapsed card grows a live
-  one-line ticker of the FRESHEST thought (sliding window, caret), an
-  open card streams its body with the caret, and everything finalizes
-  into the calm collapsed card on catch-up.
-- **returning from background settles the truth** — if the run FINISHED
-  while you were away, the chat settles itself (no more "working — tap ■
-  to stop" spinning forever) and says so in one line. A run still going
-  re-arms the full busy UI (P19 self-heal).
-- **no more dead THINKING cards** — a reasoning part born empty that
-  never received text (run died early) is hidden at settle instead of
-  sitting there as an unopenable "THINKING…" card forever.
-- 9 new JVM regression tests (67 total): stable part keys, the live
-  think-window edges, and the settle-only-when-finished rule.
-
-## What's in v0.19.0 (P19 — the crash killer)
-
-- **the cold-boot crash is structurally dead** — the field crash (app
-  process killed by the device; the orphaned server child kept port 4096;
-  every respawn died EADDRINUSE until a phone reboot) cannot wedge the
-  sandbox anymore: the supervisor asks the kernel for a free port before
-  every spawn (4096 when free, kernel-assigned the moment it isn't),
-  sweeps orphaned opencode processes by exact-binary match, and gates
-  "healthy" on the child's own listen banner. Upstream opencode v1.18.25
-  was stress-tested standalone (write burst + storm + kill -9 respawn):
-  the server survived everything — the killer was device-level process
-  death, and the sandbox now survives that too.
-- **nothing dies silently anymore** — a 30 s heartbeat in
-  sandbox-diag.log means even a whole-process kill leaves "when it
-  stopped + what memory looked like" on disk. Settings → keep alive →
-  **Sandbox incident log**.
-- **the live-edit shower actually shows** — the P18 watchdog declared a
-  run dead after 3.5 s of feed silence (bash runs ARE silent for
-  minutes), tearing down the live-edit watcher mid-run. The quiet
-  threshold is now 10 minutes; the edit card lives on the ✦ thinking
-  surface from run start and vanishes when a run produced zero edits.
-
-## What's in v0.18.0 (P18 — the unstoppable sandbox)
-
-- **the sandbox heals itself** — when the opencode server process dies
-  (the field report: chat and sandbox dying on background, cold boot
-  again), the
-  service now auto-restarts it in place with growing backoff (1.5 s → 4 s
-  → 8 s), kills any stale port squatter first so a zombie listener can
-  never wedge the respawn, and the chat stays attached: a ♻ row says
-  "sandbox auto-recovered — this chat is still attached". Sessions live
-  on disk, so you keep working. Three deaths inside 10 minutes trips a
-  crash-loop guard that stops burning battery and says so.
-- **every death leaves a black-box record** — files/sandbox-diag.log
-  (timestamp · event · exit code · last server output · free memory),
-  one tap away in Settings → keep alive → **Sandbox incident log**. No
-  more "no Java crash file is written" dead ends.
-- **send timeouts can't kill a thinking run** — the field report's
-  `send failed: java.net.SocketTimeoutException: timeout` fired while
-  the agent was still working. The send POST now has a 15-minute read
-  budget, a timeout is soft-landed ("still watching the run — tap ■ to
-  stop if nothing moves") and the SSE feed keeps rendering; the run is
-  NEVER re-POSTed (a blind retry would run the agent twice and double
-  the tokens). Broken-pipe errors get their own human wording. Raw
-  java.net text is banned from the chat.
-- **the Σ pill explains itself** — the top counter is the chat's
-  cumulative token + cost sum; it only ever climbs because every turn
-  re-sends the whole conversation. Now labeled **Σ**, and tapping it
-  opens a breakdown: what the number is, how deep the conversation is
-  (~context each new turn re-reads), and at ≥50k depth a **＋ Fresh
-  chat** button that resets per-turn cost in one tap (old chat stays in
-  Sessions). The 1.9 M tok field report was the runaway diagnosis loop
-  the other two fixes eliminate.
-
-## What's in v0.15.0 (P15 — the P12 picker restored + proot dirs/env + the UI rework)
-
-- **model picker = the first P12 again** — built from forensics on the
-  actual P12a release source: `Mdl.live` is back. Bright rows = the
-  running server serves them right now; dim "· catalog" rows are
-  discovery-only and a tap on them REFUSES with a plain-language toast
-  instead of a runtime "Model not found". available() requires live, so
-  the send-path self-heal clears stale picks before the request.
-  Usable providers first, live models first — the P12a feel, keeping
-  P14's ⟨free⟩ badges, $/Mtok, 88% sheet, search. Provider headers no
-  longer close the sheet.
-- **Debian dirs initialized before proot runs** (the agent's own field
-  report, 1:1): ensureDirs() creates files/debian/tmp (the PROOT_TMP_DIR
-  target proot mkdtemps inside), files/home and rootfs/tmp before
-  install/probe/every guest run/launcher write.
-- **environment detection + welcome message** — every chat opens with a
-  one-shot environment row (kernel · arch · user · cwd · OS · tools ·
-  Download reachability · project path), gathered inside Debian when
-  active; also written to files/debian/env.txt for the agent. ⌘ →
-  "Sandbox environment" re-runs it; Settings → Environment check audits
-  the dirs.
-- **Files — the visual project file manager** — breadcrumbs, gradient
-  discs, type glyphs, size/age, preview sheet with copy-all, rename /
-  delete / copy path, ＋ new folder / file. Project-scoped by design.
-- **chat fluidity** — merge-path repaints coalesced to one flush per
-  80 ms: a burst of N SSE events costs one relayout, not N. Sends,
-  expand/collapse and error rows stay instant.
-
-## What was in v0.14.0 (P14 — the field-report killer)
-
-- **bash shim fixed for real** — the Debian branch test was emitted as two
-  lines; mksh cannot parse a newline before `&&` (a leading operator is a
-  syntax error), so every bash tool call died at line 5. Now single-line,
-  the generator refuses to ever write a continuation-operator line, and
-  JVM regression tests pin it. Updating repairs the shim on-device.
-- **model picker merge fixed** — a server response no longer short-circuits
-  the models.dev catalog (bundled snapshot keeps everything visible even
-  offline); key state comes from the app's own auth.json; "(add API key)"
-  providers open the keys screen on a single tap; free models badged,
-  paid models show $/Mtok.
-- **session spend pill** — ⇅ tokens + $ cost in their own header pill, no
-  longer ellipsized away inside the one-line subtitle.
-- **unattended mode** — auto-answers tool approvals ("always"), status
-  pill instead of the blocking card, failed replies fall back to the card.
-- **long-output jank fixed** — tool I/O blocks dropped selectable spans,
-  cap with a "+N more chars" tail, long-press copies the full text.
-- **model sheet rebuilt** — 88%-height bottom sheet, weight-based list,
-  recycled rows; **settings gained an agent section** (unattended toggle +
-  GitHub token access). **Zen/Go clarified**: same row, same key.
-- **Debian 12 + apt** (from P12/P13, intact here): one shared rootfs in
-  app-private storage — install packages ONCE, every project session
-  binds only its own folder. Probed at install; falls back to the Lite
-  (Alpine) layer if the device refuses it.
-
-## What came before (highlights)
-
-- **P13** Debian install actually installs (probed, with proxy wiring for
-  apt/pip/git); **P12** monochrome "graphite" theme, session spend meter,
-  agent GitHub token; **P11** per-chat model picks + model-not-found
-  self-heal (verified live); **P10** permission/stop on a control lane
-  (they finally fire mid-turn), deck fling fix, tool/thought card
-  redesign; **P9** `pkg` package manager + realtime chat + full model
-  catalog; **P8** project deck with per-project sandboxes; **P7**
-  from-scratch chat-first rewrite (palette, collapsed reasoning/tool
-  cards, in-app keys, diagnostics); **P6** zero-setup wizard with the
-  bundled binary.
-
-## Architecture notes
-
-- **No proot. No rootfs.** The P3–P6 proot/Alpine sandbox was removed. The
-  bundled agent is an **Android/NDK bionic build** (ELF interpreter
-  `/system/bin/linker64`, "for Android 28" — verified with readelf), so it
-  executes natively and resolves DNS through the OS exactly like Termux
-  programs. Native shims (`bash` → mksh or a user-imported bash, `git` →
-  user-imported binary) replace the proot command wrappers.
-- **minSdk = targetSdk = 28, deliberately.** targetSdk < 29 preserves the
-  Termux-style exec-from-app-private-storage behaviour (`Process` exec of
-  the opencode ELF in `files/`), which modern targetSdk levels block via
-  W^X. Verified on-device (API 36): `opencode --version`, 1412 ms, exit 0.
-- **Optional DNS bridge** — for exotic VPN/DNS setups, Diagnostics can
-  enable a local HTTP-CONNECT proxy (resolves with the OS resolver,
-  tunnels raw bytes) and export `HTTPS_PROXY`/`HTTP_PROXY` into the server
-  process. Off by default; the direct bionic path is the proven one.
-- **Zero-dependency UI** — programmatic views + two small XML layouts;
-  Markdown is a hand-rolled Spannable renderer; JSON via
-  `android.util.JsonReader` plus a matching serializer for the files the
-  app writes.
-- **Endpoint discipline** — every API surface used (providers, message
-  body with model+agent, abort, delete, permission reply schema
-  `{"reply":…}`, reasoning/tool/patch part shapes, token formula,
-  auth.json location, custom provider config) was verified by scanning the
-  shipped v1.18.25 binary (`scripts/p6_scan_binary.py`, `p6_scan2.py`,
-  `p5_scan_binary.py`, `p4_scan_binary.py`), not guessed from docs.
-- **Bundled binary** — the 60 MB opencode tarball ships as
-  `assets/oc_pkg.bin` (`noCompress`, `.bin` suffix so aapt2 cannot
-  decompress/rename it); first launch extracts it with the pure-Java
-  `TarGz` extractor and chmods it executable. ELF-gated.
-- **Foreground service** owns `opencode serve` on 127.0.0.1:4096, the SSE
-  stream, the permission queue and a partial wake lock; the UI layer is a
-  subscriber.
-
-## Build from source
-
-- JDK 21, Android SDK platform 34 + build-tools 34.0.0, Gradle 8.9, AGP 8.5.2.
-- On a fresh machine, `scripts/p0_setup_toolchain.sh` restores the whole
-  toolchain rootless in `~/p0-tools` (~2 min).
-- Put an opencode arm64 tarball at `app/src/main/assets/oc_pkg.bin`
-  (gitignored) to build with the bundled binary.
-- `JAVA_HOME=<jdk21> gradle assembleDebug` → `app/build/outputs/apk/debug/`.
-
-Project layout:
-
-```
-app/src/main/java/ai/opencode/app/
-  App.java                  crash capture (last-crash.txt), P30 AGENTS.md
-                            migration (strips the app's old managed block)
-  MainActivity.java         boot screen: unpack → server → chat     (P7)
-  HomeActivity.java         the project deck: cards, dir picker,
-                            long-press menu incl. Delete project    (P8/P30)
-  ProjectDelete.java        pure guarded recursive delete: path guards,
-                            count-first abort, symlink-safe         (P30)
-  ChatActivity.java         the whole UI: transcript, ⌘ palette,
-                            Build/Plan chip, collapsed reasoning +
-                            tool cards, permission card, model and
-                            session sheets, export                  (P7)
-  RunHub.java               run engine: sends, SSE, transcripts,
-                            live style injection (<system-reminder>) (P25/P30)
-  TerseMode.java            the terse token-saver: preference + live
-                            note + P29 managed-block strip (P29→P30)
-  CostMath.java             pure next-send pricing (the hint line)   (P29)
-  KeysActivity.java         provider API keys → auth.json, custom
-                            OpenAI-compatible providers             (P7)
-  DiagnosticsActivity.java  server log, native shell, binary facts,
-                            DNS bridge toggle, bin/ import          (P7)
-  ServerService.java        foreground service, opencode serve :4096,
-                            SSE, permission queue, wake lock
-  ProxyServer.java          optional local CONNECT proxy (DNS bridge)(P7)
-  Shims.java                native PATH shims (bash/git) + busybox  (P7)
-  AuthStore.java            auth.json / opencode.json read-write    (P6)
-  Models.java               provider/model catalog + selection      (P6)
-  Api.java                  loopback HTTP client (SSE-capable)
-  Binaries.java             bundled extraction, ELF gate, env build
-  TarGz.java                pure-Java tar.gz extractor
-  Markdown.java             Spannable markdown renderer
-  Json.java                 JsonReader helpers + serializer
-scripts/                     toolchain setup, binary API scanners, packaging
+---
+
+## What it does
+
+- **Real chat, real streaming** — tokens arrive and render live
+  (token-by-token, paced, no strobe), with thinking shown in a calm
+  fixed-height card that never bounces the transcript.
+- **A real sandbox per project** — each project card gets its own
+  sandbox rooted at its folder. The agent can read, write, run shell
+  commands, install packages with apt, and clone git repos (clones are
+  tuned for Android's FUSE storage).
+- **The question tool works** — when the agent asks you a question
+  (or requests plan approval), a pinned card shows the options as
+  tappable chips. Answer or Skip in place; the agent continues.
+- **Permissions, both ways** — tool approvals arrive as a pinned card
+  (Allow once / Always / Deny), and an opt-in unattended mode can
+  auto-allow them while you're away.
+- **All models, searchable** — every provider the server discovers,
+  with key status per provider, per-message model choice, and live
+  cost/token footers. The OpenCode row runs 31 free models with no
+  key at all.
+- **Files, canvas, sessions** — a project-scoped file browser, an
+  interactive canvas for self-contained HTML pages the agent writes,
+  parallel chats with per-session run state, export to Downloads.
+- **Zero-crash posture** — every render/parse path is guarded (a bad
+  part degrades, never crashes), server deaths are diagnosed and
+  auto-restarted, and every incident lands in a readable log
+  (Diagnostics → Sandbox incident log).
+
+## Install
+
+1. Grab the newest `opencode-pXX-vX.Y.Z-debug.apk` from the
+   [releases page](https://github.com/turanmertkaraca-bit/opencode-android/releases)
+   and sideload it. Every release uses the same signing key → installs
+   as an update in place; projects, keys and sessions survive.
+2. Open the app → tap a project card (a Playground is seeded on first
+   run) → **⌘ → API keys** to paste a key. The sandbox reloads keys by
+   itself the moment one is saved.
+3. That's it. Type in the box, send, watch it stream.
+
+## Background work (important)
+
+The app is built to keep working while backgrounded — the sandbox is a
+foreground service with a persistent notification, and three layers
+protect it:
+
+- **Auto-hibernate is OFF by default** — the sandbox never stops itself
+  while you're away (it used to; the switch is still there under
+  Settings → keep alive for battery-conscious days).
+- **Background watchdog (default ON)** — if the system kills the app in
+  the background, an allow-while-idle alarm puts it right back (~4 min
+  cadence). Sessions live on disk, so the chat is still attached.
+- **Battery exemption** — tap **"Allow background run"** on the
+  notification once (Settings → keep alive → Battery optimization).
+  On Samsung, additionally allow the app under **Device care →
+  Never sleeping apps** (Settings links the guide).
+
+If anything ever does die: Diagnostics → **last exits** / **Sandbox
+incident log** names the killer (exit code, last output, memory state).
+
+## The command palette (⌘)
+
+Ctrl+P parity: new chat, sessions, models, Build/Plan mode, API keys,
+files, logs & shell, restart server, export, expand/collapse all.
+The composer chip **Build** toggles the agent mode (Tab parity).
+
+## Settings, briefly
+
+- **keep alive** — battery exemption, start on boot, cool idle (wake
+  lock only while the agent works), auto-hibernate (off), background
+  watchdog (on), cache beats, notifications, the Samsung guide, and
+  the sandbox incident log.
+- **appearance** — six palettes (Graphite is the default face), the
+  Claude-style chat layout, motion toggle (also honors the system
+  "remove animations" accessibility setting).
+- **essentials** — interactive canvas, model defaults, keys, credits.
+- **sandbox** — Debian tooling, curated rootfs trim, environment
+  reset, DNS bridge (for exotic VPN/DNS setups only), diagnostics
+  with a live log tail and a native shell console.
+
+## Building from source
+
+```bash
+git clone https://github.com/turanmertkaraca-bit/opencode-android
+cd opencode-android
+bash scripts/p0_setup_toolchain.sh   # gradle 8.9 + android-sdk into ~/p0-tools
+# restore the payload (not in git): opencode-linux-arm64-android.tar.gz
+# from any release → app/src/main/assets/oc_pkg.bin
+bash scripts/build_apk.sh            # → app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Checksums (see SHA256SUMS.txt in each release / kit)
+JVM test suite (Robolectric, ~550 tests):
 
+```bash
+~/p0-tools/gradle-8.9/bin/gradle testDebugUnitTest --no-daemon
 ```
-(see SHA256SUMS.txt in the release assets — APK + kit + binary tarball)
-```
 
-## Status / roadmap
+## Release notes, one line each
 
-| Phase | State |
-|-------|-------|
-| P0 exec probe (targetSdk-28 trick) | verified on device |
-| P1 skeleton (server + first chat) | shipped |
-| P2 SSE streaming + sessions | shipped |
-| P3 proot sandbox (superseded) | removed in P7 |
-| P4 permissions + abort + polish | shipped |
-| P5 model picker + stop + session mgmt | shipped |
-| P6 wizard + bundled binary + in-app keys | shipped |
-| P7 chat-first rewrite, no proot, crash-proofing | shipped |
-| P8 project deck, per-project sandboxes, motion design | shipped |
-| P9–P24 streaming polish, self-healing, native audit, flush isolation | shipped |
-| P25 runs outlive the chat (RunHub, context-depth pill, live tree) | shipped |
-| P26 evergreen: pinned live tree, back navigation, resume re-sync, catalog try-anyway, month/year caps | shipped |
-| P27 stable taps + resume-current + curated rootfs + AMOLED design system + tappable file mentions | shipped |
-| P28 the P27 field report: tappable mentions, dots above composer, big-file-proof peek, faster boot | shipped |
-| P29 model-sheet double-open, photo tray, cost prediction, /compact, terse v1, feel pass | shipped |
-| P31 parallel chats, model favorites, credit limit, interactive canvas, six themes, auto-hibernate | shipped |
-| P30 live setting injection (<system-reminder>), cost-hint clipping, long-press project delete | shipped |
-| P32 the final polish: theme crash fixed, whole-app palette sync, frozen colors retired, swatch picker | shipped |
-| P33 the final version: instant themes, Graphite default, keys reach the sandbox, honest picker, project sheet | shipped |
-| P34 one surface for every box (41 framework boxes → Sheets), back always catches you, Settings ESSENTIALS top zone, Pixel-style credit editor | shipped |
-| P35 the agent's eyes: localhost render endpoint (the browser the agent can use), write → render-check → fix → present loop, quiet ✓ chips | shipped |
-| P36 the icon follows the theme: one launcher alias per palette, exactly-one-enabled with self-heal, fresh-install boot fix | shipped |
-| P37 empty chat gaps gone, the environment map, plain git push, single error cross | shipped |
-| P38 notes stop painting in your bubble, told-ledgers persist, tail-void trimmed (field-tested; folded into v0.39.0) | shipped |
-| P39 the context-integrity release: amnesia detector, automatic context repair, honest empty-store note, the server's own log in Diagnostics | shipped |
-| P40 the amnesia cured at its source: poisoned compaction root found on the rig, repaired in the store, prevented at the compact button | shipped |
-| P41 the memory the meter couldn't see: compaction floor pinned at the source, the meter uses the server's own window, compaction warned and announced | shipped |
-| P42 the honesty release: real TLS trust + honest money + context-limit slider | shipped |
-| P43 the realtime-feel release: arrival-rate pacer, thinking tail window, keyboard calm, cache beats, history caps | shipped |
-| P44 the quiet-collapse release: post-compaction anchor re-grounds the thread, window cap named, Claude face + M3 shapes | shipped |
-| P45 the act-normal release: auto-compaction off at the source, Graphite default again, Claude-Android chat layout, deck-only cold boot | shipped |
-| P46 the keep-it-alive-and-honest release: snapshot governor, git clone fixed on FUSE via private gitdir, private-first projects, long-session caps | shipped |
-| P47 the live token release: the real per-token delta stream consumed at last (true token-by-token rendering), FUSE-repo git tuning, in-place paint at token rate | shipped |
-| P48 the smooth release: capped reveal rates (900 c/s answers, calm 170 c/s thinking), a fixed-length thinking window, an anti-jitter scroll pin, background-arrival snap | **current** |
+| Version | The release |
+|---|---|
+| v0.49.0 | consistency: Settings ANR cured at the source, keyboard re-anchor, quiet markdown finalize, honest scroll base |
+| v0.48.0 | smooth: pacing profiles with hard caps, fixed 3-line thinking stage, scroll pin stabilization |
+| v0.47.0 | live tokens: message.part.delta streaming, in-place fast path, FUSE-tuned git repos |
+| v0.46.0 | keep-alive groundwork + git shim FUSE workarounds |
+| v0.45.0 | act-normal: auto-compaction default OFF |
+| v0.44.0 | quiet-collapse fixes + warm-paper palette attempt |
+| v0.43.0 | realtime-feel pacing profiles |
+| v0.42.0 | honesty: spend visibility, compaction kill switch |
+| v0.41.0 | memory metering + cache beats |
+| v0.40.0 | compaction repair (poisoned-root diagnosis) |
+| v0.39.0 | context health + self-checks (carries v0.38.0) |
+| v0.37.0 | chat stability pass |
+| v0.36.0 | themed launcher icons |
+| v0.35.0 | agent web browser (RenderServer) |
+| v0.34.0 | single-surface chat + credit card in essentials |
+| v0.33.0 | verification pass + release gates |
+| v0.32.0 | polish pass |
+| v0.31.0 | parallel chats + interactive canvas |
+| v0.30.0 | settings restructure (terse mode as a live note) |
+| v0.29.0 | model picker rework |
+| v0.28.0 | stability pass |
+| v0.27.0 | boot budget instrumentation |
+| v0.26.0 | evergreen boot |
+| v0.25.0 | run lifecycle (unattended auto-allow) |
+| v0.24.0 | streaming flush scheduler |
+| v0.23.0 | blast-radius fixes |
+| v0.22.0 | native shell depth |
+| v0.21.0 | long-run stability |
+| v0.20.0 | background keep-alive |
+| v0.19.0 | crash forensics |
+| v0.18.0 | self-healing supervisor |
+| v0.17.0 | edit sheet + diagnostics |
+| v0.16.0 | key clarity (Zen vs Go) + DeX |
+| v0.15.0 | project file manager |
+| v0.14.0 | session hardening |
+| v0.13.0 | initial public snapshot |
 
-## Credits
+v0.50.0-p50 (in flight): the background release — background working
+made certain (watchdog, want-flag, notification battery action) and the
+question tool answerable in place.
 
-**[@turanmertkaraca-bit](https://github.com/turanmertkaraca-bit) — Founder & Project Lead**
+## Privacy
 
-Ran development end to end: spec'd every feature, called every design
-decision, tested every build in the field, and shipped 38 releases
-(P1 → P41).
-
-Developed with AI assistance under their direction.
+Your API keys live in app-private storage and go only to the model
+provider you configured. The app talks to its own in-process loopback
+server; there is no telemetry and no third-party endpoint.

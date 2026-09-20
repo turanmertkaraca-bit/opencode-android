@@ -86,9 +86,8 @@ public final class Theme {
 
     // ---------------------------------------------------- P31 palettes ----
 
-    /** P45: the DEFAULT face of the app is Graphite again. The field
-     *  verdict on the P44 warm-paper face was final ("the default pallet
-     *  is graphite — change it back"): "claude" was understood as the
+    /** P45: the DEFAULT face of the app is Graphite again. The verdict on
+     *  the P44 warm-paper face was final: "claude" was understood as the
      *  chat INTERFACE layout, never the colors, and the terracotta
      *  palette itself was rejected outright. P45 removes the claude
      *  palette entirely (table row, gradient, name, launcher alias) and

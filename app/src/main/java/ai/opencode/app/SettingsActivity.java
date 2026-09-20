@@ -109,9 +109,9 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         root.addView(heroCard());
 
         // ---- P34: ESSENTIALS — the make-it-work cluster, at the TOP in
-        // its own accent-washed family (the field: "important settings
-        // stay at top of the settings screen with a difrent color pallet
-        // so its easyer to use and see"). The accent-tinted cards cannot
+        // its own accent-washed family: important settings live at the
+        // top of the screen, visually set apart, easier to see and reach.
+        // The accent-tinted cards cannot
         // be mistaken for the neutral infrastructure sections below, and
         // the four rows cover the features the user actually reaches for.
         root.addView(Theme.sectionLabel(this, "essentials"));
@@ -326,8 +326,8 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         return g;
     }
 
-    /** ONE accent-washed card — the "different color pallet" the field
-     *  asked for: ACCENT_BG fill, accent hairline, an accent icon disc
+    /** ONE accent-washed card — the visually distinct essentials surface:
+     *  ACCENT_BG fill, accent hairline, an accent icon disc
      *  and accent-tinted title. Unmistakably separate from the neutral
      *  SURFACE infrastructure cards below, on every palette including
      *  Paper (tokens are palette-owned). */

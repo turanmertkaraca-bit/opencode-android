@@ -19,11 +19,9 @@ import java.util.concurrent.TimeUnit;
 /**
  * P12 — the Debian layer: a REAL Debian 12 (bookworm) userland with apt,
  * run through proot (user-space rootfs — no root needed, the Termux
- * proot-distro pattern), answering the user's ask verbatim:
- *
- *   "cant it be debian with apt? and in every difrent project it just
- *    binds the projects folder and only that project so i wont have to
- *    install pacgages all over again"
+ * proot-distro pattern), built to the request that shaped it:
+ * one shared Debian with apt, and every project binding ONLY its own
+ * folder so packages never have to be reinstalled per project.
  *
  * DESIGN
  *   files/debian/rootfs/   ONE shared rootfs for ALL projects. Packages

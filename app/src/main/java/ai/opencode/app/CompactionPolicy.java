@@ -171,9 +171,8 @@ public final class CompactionPolicy {
 
     /**
      * P45 — the auto-compaction kill switch, pinned at the same source as
-     * the floor. The field verdict was unambiguous: the app must NEVER
-     * silently summarize a chat's memory ("i dont want the app to randomly
-     * compact the context for no reason"). The bundled server supports
+     * the floor. Shipped rule: the app must NEVER silently summarize a
+     * chat's memory. The bundled server supports
      * exactly that: {@code compaction.auto === false} disables every
      * automatic compaction path (the overflow check short-circuits to
      * "do not compact", and an overflow turn errors instead of

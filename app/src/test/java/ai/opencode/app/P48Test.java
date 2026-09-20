@@ -24,10 +24,10 @@ import static org.junit.Assert.assertTrue;
  * P48 — the SMOOTH release, pinned where each piece lives.
  *
  * FIELD REPORT DRIVING THIS RELEASE (v0.47.0): streaming WORKS now, but
- * "the tokens come and go so fast it glitches the ui, it goes up and
- * down — almost had a seizure" and the thinking bubble needs "a fixed
- * length" showing the thought "a bit slower — faster than reading
- * speed". Three diseases, three cures, pinned here:
+ * the reveal reads as a strobe — tokens arrive faster than the eye can
+ * follow, the transcript slides up and down with every burst, and the
+ * thinking bubble needs a FIXED length revealing the thought at a
+ * calmer-than-reading pace. Three diseases, three cures, pinned here:
  *
  *   1. THE STROBE. The P43 pacer's lag ceiling allowed unbounded drain
  *      rates — a 4 kB burst revealed at ~1800 chars/s, fast providers

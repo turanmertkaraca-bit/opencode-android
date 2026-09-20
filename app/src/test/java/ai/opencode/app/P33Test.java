@@ -15,15 +15,16 @@ import static org.junit.Assert.assertTrue;
 /**
  * P33 — the final-version pins. The field reports this cycle answers:
  *
- *   • "p32 made everything low contrast white" — the model picker's
+ *   • P32 dimmed the whole picker — the model picker's
  *     live flags collapsed whenever the server didn't answer (boot,
  *     restart, hibernate wake): every row dimmed to catalog ink. The
  *     pure rule carryLive keeps last-known live truth through a blip.
- *   • "the app thinks i have no api key even tho it says i have it in
- *     api settings" — three layers: the sheet re-reads auth at open
- *     (UI, pinned in P33UiTest), the sandbox reloads a CHANGED key by
- *     itself (wiring), and hasAnyKey counts custom providers whose key
- *     lives inline in opencode.json (configHasEmbeddedKey here).
+ *   • A saved key was reported as missing at send time while the keys
+ *     screen showed it present — three layers: the sheet re-reads
+ *     auth at open (UI, pinned in P33UiTest), the sandbox reloads a
+ *     CHANGED key by itself (wiring), and hasAnyKey counts custom
+ *     providers whose key lives inline in opencode.json
+ *     (configHasEmbeddedKey here).
  *   • "make it default" (Graphite) — Theme.DEFAULT_PALETTE + defaultId,
  *     pinned here too so no later cycle quietly reverts the face.
  */

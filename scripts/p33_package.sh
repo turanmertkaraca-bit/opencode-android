@@ -49,8 +49,8 @@ never fired in the field. The palette id now rides a per-screen decor
 stamp (Theme.stampApplied / appliedIdOf): every screen re-skins exactly
 once when the pref moves and provably cannot loop.
 
-KEYS REACH THE SANDBOX BY THEMSELVES ("the app thinks i have no api key
-even tho it says i have it in api settings"): a CHANGED key now restarts
+KEYS REACH THE SANDBOX BY THEMSELVES (a saved key was reported missing at
+send time while the keys screen showed it saved): a CHANGED key now restarts
 the sandbox (the old code only restarted for a FIRST-TIME key — an updated
 key left the server serving the old value); the model sheet re-reads
 auth.json at open; the "no API key yet" hint counts custom providers whose
@@ -64,7 +64,7 @@ keeps last-known live truth through a server blip — a model the server
 served last time stays bright and selectable (and its provider reads
 usable again).
 
-THE PROJECT LONG-PRESS GREW UP ("still the same old android 4 style box"):
+THE PROJECT LONG-PRESS GREW UP (the last legacy framework box):
 the actions menu is the app's own sheet — name + mono path header, glyph
 rows (▸ Open · ✎ Rename · ⌦ Remove card · ✕ Delete project… in the danger
 color), ripple + haptics, palette-owned end to end; the delete confirm

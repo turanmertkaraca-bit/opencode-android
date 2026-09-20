@@ -398,8 +398,9 @@ public class ChatActivity extends Activity
         // P49: the re-anchor. The IME (and split-screen / DeX resizes)
         // shrinks this ScrollView via adjustResize; without a re-anchor
         // the scroll position stays where it was and the newest rows sit
-        // HIDDEN BEHIND the keyboard until the next paint — the field's
-        // "the ui glitches when the keyboard comes up". When the viewport
+        // HIDDEN BEHIND the keyboard until the next paint — the glitch
+        // the field showed every time the keyboard came up. When the
+        // viewport
         // height changes and we were pinned, glue to the bottom in the
         // same breath. The scroll's own height only changes for real
         // window-level resizes (row growth changes the LIST's height, not
@@ -2885,8 +2886,7 @@ public class ChatActivity extends Activity
                     // P48: the window is a FIXED-LENGTH stage — exactly three
                     // lines, no more, no fewer. The old card was maxLines(3)
                     // only, so the sliding window changed line count on every
-                    // reveal and the whole list bounced with it (the field's
-                    // "it goes up and down, almost had a seizure"). Reserved
+                    // reveal and the whole list bounced with it. Reserved
                     // height = zero layout surprises for the neighbors.
                     live.setMinLines(3);
                     live.setMaxLines(3);
@@ -4007,9 +4007,9 @@ public class ChatActivity extends Activity
         // P33: auth truth at OPEN time — the fetch that built these flags
         // may be older than the user's last key save, and a sheet that
         // calls a saved key "missing" (the "＋ key" chip, the no-key toast,
-        // the "no key yet" hint line) is the exact "app thinks I have no
-        // api key even tho it says i have it in api settings" report.
-        // auth.json is one small file — read it fresh every open.
+        // the "no key yet" hint line) contradicts the keys screen and
+        // reads as an app bug. auth.json is one small file — read it
+        // fresh every open.
         for (Models.Prov pr : provs) pr.configured = AuthStore.hasKey(this, pr.id);
         // P29 guard 3: a sheet that is already showing is REFRESHED, never
         // stacked — the double-open bug cannot survive its own race.

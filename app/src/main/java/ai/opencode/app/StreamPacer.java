@@ -26,8 +26,8 @@ package ai.opencode.app;
  * Android imports — the JVM suite drives the whole contract.
  *
  * P48 — two PROFILES, because the field came back with the other
- * complaint: the glide was real but VIOLENT ("tokens come and go so
- * fast it glitches the ui, it goes up and down"). The lag ceiling
+ * complaint: the glide was real but VIOLENT — tokens arrive too fast,
+ * the transcript slides up and down. The lag ceiling
  * allows unbounded drain rates (a 4 kB burst ⇒ ~1800 chars/s), and
  * fast providers arrive faster still. So the pacer now carries a hard
  * MAX_RATE per profile:

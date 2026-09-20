@@ -171,7 +171,7 @@ public final class Models {
      * running server did not answer (restarting after a key change, boot,
      * hibernate wake, network hiccup), the catalog-only fetch would mark
      * EVERY model not-live: the whole sheet went dim + "· catalog", which
-     * the field read as "p32 made everything low contrast white" — and
+     * the field read as everything going low-contrast white — and
      * every tap answered "no key" or refused the pick. The rule: when the
      * server was not heard from, a model the server listed live LAST time
      * stays live now (last-known truth beats a missing answer). A fetched

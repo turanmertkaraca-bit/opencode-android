@@ -26,10 +26,9 @@ import android.widget.Toast;
 /**
  * P34 — THE ONE PRESENTATION. Every box in the app is a Sheet now.
  *
- * The field's P34 report, verbatim: "u never stoped to look for other
- * places in the app that still use this old ui update all of tgem with
- * care and ease of use in mind … i want the ui to be just like google
- * pixel". The audit found 41 AlertDialog sites across 9 files — eleven
+ * The field's P34 direction was explicit: the same careful UI everywhere,
+ * with a Pixel-like ease of use, no legacy boxes left anywhere. The audit
+ * found 41 AlertDialog sites across 9 files — eleven
  * wore the P31/P33 skin, the other thirty rendered the platform's grey
  * box (the two screenshots: Credit limit, Interactive canvas). Two
  * presentation systems coexisting IS the inconsistency.

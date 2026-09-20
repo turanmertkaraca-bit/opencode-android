@@ -216,9 +216,8 @@ public final class AuthStore {
     }
 
     /** P45: the auto-compact master switch's current state. DEFAULT
-     *  OFF — the field demand ("i dont want the app to randomly compact
-     *  the context for no reason") is the shipped behavior, not an
-     *  option buried three screens deep. */
+     *  OFF — the app never silently compacts; that is the shipped
+     *  behavior, not an option buried three screens deep. */
     public static boolean compactionAuto(Context c) {
         try {
             return c.getSharedPreferences("oc", Context.MODE_PRIVATE)

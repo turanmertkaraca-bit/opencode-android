@@ -164,8 +164,8 @@ public class KeysActivity extends Activity {
             // its key exists) — restart so the provider goes live
             // immediately instead of waiting for a manual one.
             // P33: the SAME is true for a CHANGED key — the field
-            // report was exact: "the app thinks i have no api key
-            // even tho it says i have it in api settings". The old
+            // report was unambiguous: the app believed there was no
+            // API key while the keys screen showed one saved. The old
             // server process kept the OLD key in memory (or knew of
             // no key at all) and answered every send with key
             // errors, while this screen happily showed the new one
