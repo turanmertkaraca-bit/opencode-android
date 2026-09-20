@@ -109,6 +109,8 @@ JVM test suite (Robolectric, ~550 tests):
 
 | Version | The release |
 |---|---|
+| v0.51.0 | no-more-OOM: the replay streams the session store with hard bounds, row-text walls, OOM-safe notify lanes + a relief valve, opencode.json healed before every server start |
+| v0.50.0 | background made certain: auto-hibernate opt-in, watchdog resurrection chain, battery-exemption one-tap, question tool answerable in place |
 | v0.49.0 | consistency: Settings ANR cured at the source, keyboard re-anchor, quiet markdown finalize, honest scroll base |
 | v0.48.0 | smooth: pacing profiles with hard caps, fixed 3-line thinking stage, scroll pin stabilization |
 | v0.47.0 | live tokens: message.part.delta streaming, in-place fast path, FUSE-tuned git repos |

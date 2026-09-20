@@ -5,11 +5,16 @@ import android.graphics.Bitmap;
 import android.os.Handler;
 import android.os.Looper;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.io.Reader;
+import java.net.HttpURLConnection;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -671,47 +676,94 @@ public final class RunHub implements ServerService.EventListener {
         else H.post(r);
     }
 
+    /** P51 — the notify lane can never kill the process. The field OOM
+     *  died HERE: notifySpend's loop was the allocation that found a
+     *  heap already exhausted by the whole-store replay parse. The loop
+     *  is innocent; the process death is not acceptable anyway. P23's
+     *  contract (nothing on the send/chat/feed paths dies from a
+     *  Throwable) now covers every UI-sink callback: contained, logged,
+     *  and an OutOfMemoryError additionally triggers the relief valve
+     *  (drop the biggest caches) so the NEXT notification can succeed. */
+    private static void uiSafe(String what, Runnable r) {
+        Throwable t = Resilience.guard(r);
+        if (t == null) return;
+        try { Trail.record(appCtx, what, t); } catch (Throwable ignored) {}
+        if (t instanceof OutOfMemoryError) relieve();
+    }
+
+    /** P51 — emergency relief when the heap is on fire: drop the big,
+     *  rebuildable caches (archived transcripts, peek/edit caches), trim
+     *  the displayed transcript to its tail, and ask for a collect. The
+     *  money ledger (spendLedger / evictedSums) is NEVER touched — the
+     *  Σ must stay honest even mid-emergency. */
+    static void relieve() {
+        try {
+            synchronized (LOCK) {
+                archive.clear();
+                int keep = Math.min(cur.rows.size(), 150);
+                if (keep < cur.rows.size()) {
+                    List<Row> tail = new ArrayList<>(cur.rows.subList(
+                            cur.rows.size() - keep, cur.rows.size()));
+                    cur.rows.clear();
+                    cur.rows.addAll(tail);
+                    cur.idxByKey.clear();
+                    for (int i = 0; i < cur.rows.size(); i++) {
+                        String k = cur.rows.get(i).key;
+                        if (k != null) cur.idxByKey.put(k, i);
+                    }
+                    cur.rowsAdded++;
+                }
+            }
+            synchronized (peekCache) { peekCache.clear(); }
+            synchronized (editFeed) { editFeed.clear(); }
+            synchronized (QUESTIONS) { QUESTIONS.clear(); }
+            System.gc();
+        } catch (Throwable ignored) {
+            // relief must never become the crash
+        }
+    }
+
     private static void notifyRow(final String key) {
-        fire(() -> {
+        fire(() -> uiSafe("hub notifyRow", () -> {
             synchronized (uis) { for (Ui u : uis) u.hubRow(key); }
-        });
+        }));
     }
 
     private static void notifyReset() {
-        fire(() -> {
+        fire(() -> uiSafe("hub notifyReset", () -> {
             synchronized (uis) { for (Ui u : uis) u.hubReset(); }
-        });
+        }));
     }
 
     private static void notifyBusy() {
         final boolean b = busy;
-        fire(() -> {
+        fire(() -> uiSafe("hub notifyBusy", () -> {
             synchronized (uis) { for (Ui u : uis) u.hubBusy(b); }
-        });
+        }));
     }
 
     private static void notifySpend() {
-        fire(() -> {
+        fire(() -> uiSafe("hub notifySpend", () -> {
             synchronized (uis) { for (Ui u : uis) u.hubSpend(); }
-        });
+        }));
     }
 
     private static void notifyTitle() {
-        fire(() -> {
+        fire(() -> uiSafe("hub notifyTitle", () -> {
             synchronized (uis) { for (Ui u : uis) u.hubTitle(); }
-        });
+        }));
     }
 
     private static void notifyPerms() {
-        fire(() -> {
+        fire(() -> uiSafe("hub notifyPerms", () -> {
             synchronized (uis) { for (Ui u : uis) u.hubPerms(); }
-        });
+        }));
     }
 
     private static void notifyQuestions() {
-        fire(() -> {
+        fire(() -> uiSafe("hub notifyQuestions", () -> {
             synchronized (uis) { for (Ui u : uis) u.hubQuestions(); }
-        });
+        }));
     }
 
     // ------------------------------------------------ P50: question asks
@@ -748,9 +800,9 @@ public final class RunHub implements ServerService.EventListener {
     }
 
     private static void notifyLive() {
-        fire(() -> {
+        fire(() -> uiSafe("hub notifyLive", () -> {
             synchronized (uis) { for (Ui u : uis) u.hubLive(); }
-        });
+        }));
     }
 
     // ------------------------------------------------------------ init
@@ -1434,8 +1486,16 @@ public final class RunHub implements ServerService.EventListener {
      *  and the repair runs at the first idle moment. Never throws. */
     static void diagnosePoison(final String sid, final List<Object> raw) {
         if (sid == null || raw == null || raw.isEmpty()) return;
+        diagnosePoisonMsgs(sid, CompactionPoison.parse(raw));
+    }
+
+    /** P51: the same diagnosis over the streamed Msg list — the walk
+     *  builds it message-by-message, so no whole-store parse exists
+     *  anywhere on the replay path anymore. Never throws. */
+    static void diagnosePoisonMsgs(final String sid,
+                                   final List<CompactionPoison.Msg> msgs) {
+        if (sid == null || msgs == null || msgs.isEmpty()) return;
         try {
-            List<CompactionPoison.Msg> msgs = CompactionPoison.parse(raw);
             if (!CompactionPoison.poisoned(msgs)) return;
             final List<String> victims = CompactionPoison.victims(msgs);
             if (victims.isEmpty()) return;
@@ -1556,15 +1616,33 @@ public final class RunHub implements ServerService.EventListener {
      *  root left, poison gone. A few retries ride out the restart. */
     private static boolean verifyCured(String sid) {
         for (int attempt = 0; attempt < 5; attempt++) {
+            HttpURLConnection conn = null;
             try {
-                Api.Resp r = Api.get("/session/" + sid + "/message");
-                if (r.ok()) {
-                    List<CompactionPoison.Msg> msgs =
-                            CompactionPoison.parse(Json.arr(Json.parse(r.body)));
+                conn = Api.open("GET", "/session/" + sid + "/message", null, 15_000);
+                int code = conn.getResponseCode();
+                if (code >= 200 && code < 300) {
+                    // P51: streamed Msg collection — the after-repair check
+                    // must not reintroduce the whole-store parse it just cured
+                    Reader in = new BufferedReader(new InputStreamReader(
+                            conn.getInputStream(), StandardCharsets.UTF_8), 64 * 1024);
+                    final List<CompactionPoison.Msg> msgs = new ArrayList<>();
+                    StoreWalk.walk(in, 0, 0, new StoreWalk.Sink() {
+                        @Override public boolean abort() { return false; }
+                        @Override public void message(Map<String, Object> item,
+                                                      int index) {
+                            CompactionPoison.collectMsg(item, msgs);
+                        }
+                        @Override public void renderEnd(
+                                List<Map<String, Object>> items,
+                                StoreWalk.Stats st) { /* check only */ }
+                    });
                     return !CompactionPoison.poisoned(msgs)
                             && CompactionPoison.victims(msgs).isEmpty();
                 }
-            } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
             try { Thread.sleep(1500); }
             catch (InterruptedException ie) { return false; }
         }
@@ -1715,8 +1793,21 @@ public final class RunHub implements ServerService.EventListener {
                 return true;
             }
             if (r.kind == K_ASSISTANT || r.kind == K_REASON) {
-                r.text.append(delta);
-                return true;
+                // P51: the delta lane respects the same wall as the
+                // snapshot lane — a monster answer stops growing its
+                // render copy past TEXT_CAP (the stream itself is fine)
+                if (r.text.length() < TEXT_CAP) {
+                    r.text.append(delta);
+                    if (r.text.length() > TEXT_CAP) {
+                        int extra = r.text.length() - TEXT_CAP;
+                        r.text.setLength(TEXT_CAP);
+                        r.text.append("\n…[+").append(extra)
+                                .append(" chars truncated — the full text is "
+                                + "still in the model's context]");
+                    }
+                    return true;
+                }
+                return false;             // capped: nothing more to paint
             }
             return false;                 // snapshot-owned row: ignore
         }
@@ -1776,7 +1867,9 @@ public final class RunHub implements ServerService.EventListener {
         // report: the whole block buried the message). Display-only: the
         // server still stores and echoes the full wire text; replay paints
         // through here too, so old sessions clean up as well.
-        final String shown = NoteStrip.display(text);
+        // P51: the render copy respects the row-text wall like every
+        // other lane — a pasted 5 MB log cannot eat the heap alone.
+        final String shown = capText(NoteStrip.display(text));
         main(() -> {
             synchronized (LOCK) {
                 Row r = rowIn(t, key);
@@ -1947,13 +2040,28 @@ public final class RunHub implements ServerService.EventListener {
     }
 
     /** SSE sends full part state; adopt the growth, ignore truncations. */
+    /** P51: the biggest text ONE row may hold, in chars. A capped row
+     *  keeps its head plus an honest marker; the model's own context
+     *  (server store) always carries the full text — this wall only
+     *  bounds the RENDER copy, so a single multi-megabyte part can never
+     *  eat the heap on its own. */
+    static final int TEXT_CAP = 131_072;
+
+    /** P51: apply the row-text wall. Pure; JVM-pinned. */
+    static String capText(String s) {
+        if (s == null || s.length() <= TEXT_CAP) return s;
+        return s.substring(0, TEXT_CAP)
+                + "\n…[+" + (s.length() - TEXT_CAP) + " chars truncated — "
+                + "the full text is still in the model's context]";
+    }
+
     static String mergeText(String curText, String next) {
-        if (curText == null || curText.isEmpty()) return next;
+        if (curText == null || curText.isEmpty()) return capText(next);
         if (next == null) return curText;
         if (next.equals(curText)) return curText;
-        if (next.startsWith(curText)) return next;   // grew
+        if (next.startsWith(curText)) return capText(next);   // grew
         if (curText.startsWith(next)) return curText; // truncated echo
-        return next;                                  // changed → replace
+        return capText(next);                                  // changed → replace
     }
 
     static Row toolRow(String key, Map<String, Object> part) {
@@ -1977,7 +2085,7 @@ public final class RunHub implements ServerService.EventListener {
             r.input.append(b.toString().trim());
         }
         String out = Json.str(state, "output");
-        if (out != null && !out.isEmpty()) r.output.append(out);
+        if (out != null && !out.isEmpty()) r.output.append(capText(out));
         Map<String, Object> errM = Json.map(state, "error");
         if (errM != null) {
             String em = Json.str(errM, "message");
@@ -3263,15 +3371,58 @@ public final class RunHub implements ServerService.EventListener {
                         }
                     }
                 }
-                Api.Resp r = Api.get("/session/" + id + "/message");
-                if (!r.ok()) {
+                // P51: streamed walk — same cure as reconcileOnBind; the
+                // whole-store parse that used to sit here was the other
+                // half of the field OOM (open a session → replay → heap).
+                HttpURLConnection conn = Api.open("GET",
+                        "/session/" + id + "/message", null, 120_000);
+                try {
+                int code = conn.getResponseCode();
+                if (code < 200 || code >= 300) {
                     replayNeeded = true;       // P26: healthy flip will retry
-                    sys("history unavailable · HTTP " + r.status);
+                    sys("history unavailable · HTTP " + code);
                     return;
                 }
-                List<Object> arr = Json.arr(Json.parse(r.body));
-                if (arr == null) return;
-                if (arr.isEmpty()) {
+                Reader in = new BufferedReader(new InputStreamReader(
+                        conn.getInputStream(), StandardCharsets.UTF_8), 128 * 1024);
+                final Tx tx0 = cur;
+                final List<CompactionPoison.Msg> msgs = new ArrayList<>();
+                final int[] hiddenSeen = {0};
+                final boolean[] anyMessage = {false};
+                StoreWalk.walk(in, REPLAY_RENDER, StoreWalk.KEEP_BYTES_DEFAULT,
+                        new StoreWalk.Sink() {
+                    @Override public boolean abort() { return !id.equals(sessionId); }
+                    @Override public void message(Map<String, Object> item, int index) {
+                        anyMessage[0] = true;
+                        Map<String, Object> info = Json.map(item, "info");
+                        if (info == null) info = item;
+                        CompactionPoison.collectMsg(item, msgs);
+                        if (Boolean.TRUE.equals(info.get("synthetic"))) return;
+                        final Map<String, Object> finfo = info;   // lambda capture
+                        Resilience.guard(() ->
+                                applyMessageInfo(tx0, finfo, false, false));
+                    }
+                    @Override public void renderEnd(List<Map<String, Object>> items,
+                                                    StoreWalk.Stats st) {
+                        hiddenSeen[0] = st.hidden;
+                        for (Map<String, Object> item : items) {
+                            if (!id.equals(sessionId)) return;  // switched mid-replay
+                            Map<String, Object> rinfo = Json.map(item, "info");
+                            if (rinfo == null) rinfo = item;
+                            if (Boolean.TRUE.equals(rinfo.get("synthetic"))) continue;
+                            String role = Json.str(rinfo, "role");
+                            applyMessageInfo(cur, rinfo);
+                            List<Object> parts = StoreWalk.partsOf(item);
+                            if (parts == null) continue;
+                            for (Object p : parts) {
+                                Map<String, Object> pm = Json.obj(p);
+                                if (pm != null) applyPart(pm, role);
+                            }
+                        }
+                    }
+                });
+                if (!id.equals(sessionId)) return;             // switched mid-walk
+                if (!anyMessage[0]) {
                     // P39: the server answered fine and knows this session —
                     // but its message store is EMPTY. The history is gone
                     // server-side; say so once instead of leaving the user
@@ -3287,32 +3438,13 @@ public final class RunHub implements ServerService.EventListener {
                 // history the MODEL should see — check the compaction root
                 // it starts from before the first send can ride a poisoned
                 // context.
-                diagnosePoison(id, arr);
-                // P42: bookkeeping over the FULL store first — the 80-window
-                // below is a RENDERING cap, not an accounting cap. Sessions
-                // reopened after hundreds of turns used to paint the money
-                // of their last ~40 turns only.
-                // P42-check: pin the target Tx — a bare `cur` re-reads the
-                // field per call and would retarget the pass to a DIFFERENT
-                // session when the user switches mid-replay, applying A's
-                // messages to B's sums and ledger.
-                final Tx tx0 = cur;
-                for (int i = 0; i < arr.size(); i++) {
-                    if (!id.equals(sessionId)) return;   // switched mid-replay
-                    Map<String, Object> item = Json.obj(arr.get(i));
-                    if (item == null) continue;
-                    Map<String, Object> info = Json.map(item, "info");
-                    if (info == null) info = item;
-                    if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
-                    applyMessageInfo(tx0, info, false, false);
-                }
-                int from = Math.max(0, arr.size() - REPLAY_RENDER);
+                diagnosePoisonMsgs(id, msgs);
                 // P43: when the render cap actually bites, say so once —
                 // "the tools keep going away" must never be silent again.
                 // Only on a fresh bind (rows empty) so the note lands at
                 // the top of the painted transcript, never mid-history.
-                if (from > 0) {
-                    final int hidden = from;
+                if (hiddenSeen[0] > 0) {
+                    final int hidden = hiddenSeen[0];
                     main(() -> {
                         synchronized (LOCK) {
                             if (!cur.rows.isEmpty()) return;
@@ -3323,27 +3455,15 @@ public final class RunHub implements ServerService.EventListener {
                                 + "the ledger still hold all of it");
                     });
                 }
-                for (int i = from; i < arr.size(); i++) {
-                    if (!id.equals(sessionId)) return;  // switched mid-replay
-                    Map<String, Object> item = Json.obj(arr.get(i));
-                    if (item == null) continue;
-                    Map<String, Object> info = Json.map(item, "info");
-                    if (info == null) info = item;
-                    if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
-                    String role = Json.str(info, "role");
-                    applyMessageInfo(cur, info);
-                    List<Object> parts = Json.list(item, "parts");
-                    if (parts == null) parts = Json.list(info, "parts");
-                    if (parts != null) for (Object p : parts) {
-                        Map<String, Object> pm = Json.obj(p);
-                        if (pm != null) applyPart(pm, role);
-                    }
+                } finally {
+                    conn.disconnect();
                 }
             } catch (Exception e) {
                 replayNeeded = true;
                 sys("history failed: " + e);
             } catch (Throwable e) {
                 replayNeeded = true;
+                if (e instanceof OutOfMemoryError) relieve();
                 Trail.record(appCtx, "hub history", e);
             }
         });
@@ -3369,46 +3489,95 @@ public final class RunHub implements ServerService.EventListener {
         final String id = sessionId;
         if (id == null) return;
         IO.execute(() -> {
+            // P51: the replay is now a STREAMED walk (StoreWalk) — the
+            // whole-store parse that used to live here was the heap
+            // killer behind the field OOM. Accounting still walks EVERY
+            // message; only the bounded render ring survives in memory.
+            HttpURLConnection conn = null;
             try {
-                Api.Resp r = Api.get("/session/" + id + "/message");
-                if (!r.ok()) {
+                conn = Api.open("GET", "/session/" + id + "/message", null, 120_000);
+                int code = conn.getResponseCode();
+                if (code < 200 || code >= 300) {
                     replayNeeded = true;       // boot race / blip → retry on healthy
                     return;
                 }
-                List<Object> arr = Json.arr(Json.parse(r.body));
-                if (arr == null || arr.isEmpty()) {
-                    replayNeeded = true;
+                Reader in = new BufferedReader(new InputStreamReader(
+                        conn.getInputStream(), StandardCharsets.UTF_8), 128 * 1024);
+                final Tx tx0 = cur;
+                final List<CompactionPoison.Msg> msgs = new ArrayList<>();
+                final Map<String, Object>[] lastRaw = new Map[1];
+                final int[] hiddenSeen = {0};
+                StoreWalk.walk(in, REPLAY_RENDER, StoreWalk.KEEP_BYTES_DEFAULT,
+                        new StoreWalk.Sink() {
+                    @Override public boolean abort() { return !id.equals(sessionId); }
+                    @Override public void message(Map<String, Object> item, int index) {
+                        Map<String, Object> info = Json.map(item, "info");
+                        if (info == null) info = item;
+                        lastRaw[0] = info;
+                        CompactionPoison.collectMsg(item, msgs);
+                        if (Boolean.TRUE.equals(info.get("synthetic"))) return;
+                        final Map<String, Object> finfo = info;   // lambda capture
+                        Resilience.guard(() ->
+                                applyMessageInfo(tx0, finfo, false, false));
+                    }
+                    @Override public void renderEnd(List<Map<String, Object>> items,
+                                                    StoreWalk.Stats st) {
+                        hiddenSeen[0] = st.hidden;
+                        for (Map<String, Object> item : items) {
+                            if (!id.equals(sessionId)) return;  // switched mid-replay
+                            Map<String, Object> rinfo = Json.map(item, "info");
+                            if (rinfo == null) rinfo = item;
+                            if (Boolean.TRUE.equals(rinfo.get("synthetic"))) continue;
+                            String role = Json.str(rinfo, "role");
+                            String mid0 = Json.str(rinfo, "id");
+                            boolean knownMsg = false;
+                            if (mid0 != null) {
+                                synchronized (LOCK) { knownMsg = cur.msgs.containsKey(mid0); }
+                            }
+                            applyMessageInfo(cur, rinfo);
+                            List<Object> parts = StoreWalk.partsOf(item);
+                            if (parts == null) continue;
+                            for (Object p : parts) {
+                                Map<String, Object> pm = Json.obj(p);
+                                if (pm == null) continue;
+                                // P21: real v1.18.25 fetches carry messageID on
+                                // every part — if a future shape drops it, inject
+                                // the parent message id so the replay key STILL
+                                // matches the live key.
+                                if (Json.str(pm, "messageID") == null && mid0 != null) {
+                                    pm.put("messageID", mid0);
+                                }
+                                String pid = Json.str(pm, "id");
+                                if (Resilience.stablePartKey(pid)) {
+                                    String mid = Json.str(pm, "messageID");
+                                    if (mid == null) mid = mid0;
+                                    if (mid != null && partWasTrimmed(cur, mid + "|" + pid))
+                                        continue;           // ancient, already trimmed
+                                } else if (knownMsg) {
+                                    continue;   // pid-less replay can't rebuild the key
+                                }
+                                applyPart(pm, role);
+                            }
+                        }
+                    }
+                });
+                if (!id.equals(sessionId)) return;             // switched mid-walk
+                if (msgs.isEmpty()) {
+                    replayNeeded = true;                       // empty store
                     return;
                 }
                 replayNeeded = false;
                 // P40: every bind-time re-pull re-checks the compaction
                 // root — the repair can also be triggered from here when
                 // a compact poisoned the session between binds.
-                diagnosePoison(id, arr);
+                diagnosePoisonMsgs(id, msgs);
                 refreshTitleIfPlaceholder(id);
-                // P21: the settle rule, extracted into Resilience so the
-                // REAL server payloads replay through it in the JVM tests.
-                final boolean lastAssistantDone = Resilience.lastAssistantDoneFrom(arr);
-                // P42: full-store accounting pass (see loadSession — the
-                // rendering cap must not be a money cap). P42-check: pinned
-                // Tx + switch guard, same reasoning as loadSession.
-                final Tx tx0 = cur;
-                for (int i = 0; i < arr.size(); i++) {
-                    if (!id.equals(sessionId)) return;   // switched mid-pull
-                    Map<String, Object> item = Json.obj(arr.get(i));
-                    if (item == null) continue;
-                    Map<String, Object> info = Json.map(item, "info");
-                    if (info == null) info = item;
-                    if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
-                    applyMessageInfo(tx0, info, false, false);
-                }
-                int from = Math.max(0, arr.size() - REPLAY_RENDER);
                 // P43: when the render cap actually bites, say so once —
                 // "the tools keep going away" must never be silent again.
                 // Only on a fresh bind (rows empty) so the note lands at
                 // the top of the painted transcript, never mid-history.
-                if (from > 0) {
-                    final int hidden = from;
+                if (hiddenSeen[0] > 0) {
+                    final int hidden = hiddenSeen[0];
                     main(() -> {
                         synchronized (LOCK) {
                             if (!cur.rows.isEmpty()) return;
@@ -3419,46 +3588,10 @@ public final class RunHub implements ServerService.EventListener {
                                 + "the ledger still hold all of it");
                     });
                 }
-                for (int i = from; i < arr.size(); i++) {
-                    if (!id.equals(sessionId)) return;  // switched mid-replay
-                    Map<String, Object> item = Json.obj(arr.get(i));
-                    if (item == null) continue;
-                    Map<String, Object> info = Json.map(item, "info");
-                    if (info == null) info = item;
-                    if (Boolean.TRUE.equals(info.get("synthetic"))) continue;
-                    String role = Json.str(info, "role");
-                    String mid0 = Json.str(info, "id");
-                    boolean knownMsg = false;
-                    if (mid0 != null) {
-                        synchronized (LOCK) { knownMsg = cur.msgs.containsKey(mid0); }
-                    }
-                    applyMessageInfo(cur, info);
-                    List<Object> parts = Json.list(item, "parts");
-                    if (parts == null) parts = Json.list(info, "parts");
-                    if (parts == null) continue;
-                    for (Object p : parts) {
-                        Map<String, Object> pm = Json.obj(p);
-                        if (pm == null) continue;
-                        // P21: real v1.18.25 fetches carry messageID on every
-                        // part — if a future shape drops it, inject the parent
-                        // message id so the replay key STILL matches the live key.
-                        if (Json.str(pm, "messageID") == null && mid0 != null) {
-                            pm.put("messageID", mid0);
-                        }
-                        String pid = Json.str(pm, "id");
-                        if (Resilience.stablePartKey(pid)) {
-                            String mid = Json.str(pm, "messageID");
-                            if (mid == null) mid = mid0;
-                            if (mid != null && partWasTrimmed(cur, mid + "|" + pid))
-                                continue;               // ancient, already trimmed
-                        } else if (knownMsg) {
-                            continue;   // pid-less replay can't rebuild the live key
-                        }
-                        applyPart(pm, role);
-                    }
-                }
-                final boolean settle = lastAssistantDone;
-                if (settle) main(() -> {
+                // P21: the settle rule — the LAST message's info, the same
+                // input Resilience.lastAssistantDoneFrom read off the old
+                // in-memory array (tracked live during the walk now).
+                if (Resilience.lastAssistantDoneFromInfo(lastRaw[0])) main(() -> {
                     // settle ONLY the displayed session's own finished run —
                     // never park busy while a DIFFERENT session's run streams
                     if (!busyFor(id) || isFinishingGuard() || !id.equals(sessionId)) return;
@@ -3470,7 +3603,10 @@ public final class RunHub implements ServerService.EventListener {
                 replayNeeded = true;   // offline / still starting: retry on healthy
             } catch (Throwable e) {
                 replayNeeded = true;
+                if (e instanceof OutOfMemoryError) relieve();
                 Trail.record(appCtx, "hub replay", e);
+            } finally {
+                if (conn != null) conn.disconnect();
             }
         });
     }

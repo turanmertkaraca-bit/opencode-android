@@ -76,33 +76,41 @@ public final class CompactionPoison {
     public static List<Msg> parse(List<Object> raw) {
         List<Msg> out = new ArrayList<>();
         if (raw == null) return out;
-        for (Object o : raw) {
-            Map<String, Object> item = Json.obj(o);
-            if (item == null) continue;
-            Map<String, Object> info = Json.map(item, "info");
-            if (info == null) info = item;
-            String id = Json.str(info, "id");
-            if (id == null) continue;
-            String role = Json.str(info, "role");
-            String agent = Json.str(info, "agent");
-            String parent = Json.str(info, "parentID");
-            boolean synthetic = Boolean.TRUE.equals(info.get("synthetic"));
-            StringBuilder text = new StringBuilder();
-            List<Object> parts = Json.list(item, "parts");
-            if (parts == null) parts = Json.list(info, "parts");
-            if (parts != null) for (Object p : parts) {
-                Map<String, Object> pm = Json.obj(p);
-                if (pm == null) continue;
-                if (!"text".equals(Json.str(pm, "type"))) continue;
-                String t = Json.str(pm, "text");
-                if (t != null && !t.isEmpty()) {
-                    if (text.length() > 0) text.append('\n');
-                    text.append(t);
-                }
-            }
-            out.add(new Msg(id, parent, role, agent, text.toString(), synthetic));
-        }
+        for (Object o : raw) collectMsg(o, out);
         return out;
+    }
+
+    /**
+     * P51: the per-item body of {@link #parse}, shared with the bounded
+     * streaming replay (StoreWalk) so both paths decide poison from the
+     * SAME rule. Appends nothing when the item is junk (unparseable or
+     * id-less) — exactly like parse always behaved.
+     */
+    public static void collectMsg(Object o, List<Msg> out) {
+        Map<String, Object> item = Json.obj(o);
+        if (item == null) return;
+        Map<String, Object> info = Json.map(item, "info");
+        if (info == null) info = item;
+        String id = Json.str(info, "id");
+        if (id == null) return;
+        String role = Json.str(info, "role");
+        String agent = Json.str(info, "agent");
+        String parent = Json.str(info, "parentID");
+        boolean synthetic = Boolean.TRUE.equals(info.get("synthetic"));
+        StringBuilder text = new StringBuilder();
+        List<Object> parts = Json.list(item, "parts");
+        if (parts == null) parts = Json.list(info, "parts");
+        if (parts != null) for (Object p : parts) {
+            Map<String, Object> pm = Json.obj(p);
+            if (pm == null) continue;
+            if (!"text".equals(Json.str(pm, "type"))) continue;
+            String t = Json.str(pm, "text");
+            if (t != null && !t.isEmpty()) {
+                if (text.length() > 0) text.append('\n');
+                text.append(t);
+            }
+        }
+        out.add(new Msg(id, parent, role, agent, text.toString(), synthetic));
     }
 
     /** The session's LAST compaction root, or null when none exists. */

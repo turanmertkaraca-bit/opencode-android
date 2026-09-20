@@ -407,6 +407,18 @@ public final class Resilience {
         Map<?, ?> item = (Map<?, ?>) lastObj;
         Object infoO = item.get("info");
         Map<?, ?> info = (infoO instanceof Map) ? (Map<?, ?>) infoO : item;
+        return lastAssistantDoneFromInfo(info);
+    }
+
+    /**
+     * P51: the settle rule over one message's info map — the streamed
+     * replay tracks the last info live, so it needs the decision without
+     * an in-memory array. Identical semantics to
+     * {@link #lastAssistantDoneFrom(List)} applied to the final element.
+     * Pure.
+     */
+    public static boolean lastAssistantDoneFromInfo(Map<?, ?> info) {
+        if (info == null) return false;
         if (Boolean.TRUE.equals(info.get("synthetic"))) return false;
         if (!"assistant".equals(info.get("role"))) return false;
         Object timeO = info.get("time");

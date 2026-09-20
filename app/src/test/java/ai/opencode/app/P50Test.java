@@ -252,7 +252,8 @@ public class P50Test {
     // ============ 4. the version
 
     @Test public void version_isP50() {
-        assertEquals("0.50.0-p50", SettingsActivity.VERSION_TAG);
+        // P51 moved the tag forward; the pin rides the current release
+        assertEquals("0.51.0-p51", SettingsActivity.VERSION_TAG);
     }
 
     // ------------------------------------------------------------ helpers

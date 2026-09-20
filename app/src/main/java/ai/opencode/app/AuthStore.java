@@ -169,7 +169,29 @@ public final class AuthStore {
 
     private static void writeConfig(Context c, Map<String, Object> cfg)
             throws IOException {
+        // P51: every config the APP writes passes the cap sanitizer, so
+        // the slider (or any future writer) can never leave a value the
+        // server would boot on.
+        ContextPolicy.sanitizeConfig(cfg);
         writeJson(Binaries.configFile(c), cfg);
+    }
+
+    /**
+     * P51: heal opencode.json BEFORE the server reads it — catches
+     * values that arrived outside the app's own write path (an agent
+     * editing the file, a hand edit through Diagnostics). Clamps every
+     * provider model limit.context into [ContextPolicy.MIN, MAX] and
+     * drops junk shapes. Returns true when the file was rewritten.
+     */
+    public static boolean healConfig(Context c) {
+        try {
+            Map<String, Object> cfg = readConfig(c);
+            if (!ContextPolicy.sanitizeConfig(cfg)) return false;
+            writeJson(Binaries.configFile(c), cfg);
+            return true;
+        } catch (Exception e) {
+            return false;               // unreadable config is the server's problem
+        }
     }
 
     /** Set the server-wide default model: {"model":"provider/model"}. */

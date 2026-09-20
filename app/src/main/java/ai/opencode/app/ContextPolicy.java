@@ -130,6 +130,54 @@ public final class ContextPolicy {
         return true;
     }
 
+    /**
+     * P51 — heal a full opencode.json root: every
+     * {@code provider.<pid>.models.<mid>.limit.context} must be a
+     * non-negative Number; junk types are removed and numbers are
+     * clamped into {@code [MIN, MAX]}. This runs on every config write
+     * AND once before each server start, so a hand-edited or
+     * agent-written cap — or any future slider bug — can never hand the
+     * server a value it would choke on and wedge the sandbox at boot.
+     * Pure; returns true when the map changed.
+     */
+    public static boolean sanitizeConfig(Map<String, Object> root) {
+        if (root == null) return false;
+        Map<String, Object> provs = Json.obj(root.get("provider"));
+        if (provs == null) return false;
+        boolean changed = false;
+        for (Object po : provs.values().toArray()) {       // snapshot: safe edit
+            Map<String, Object> pdef = Json.obj(po);
+            if (pdef == null) continue;
+            Map<String, Object> models = Json.obj(pdef.get("models"));
+            if (models == null) continue;
+            for (Object mo : models.values().toArray()) {
+                Map<String, Object> mdef = Json.obj(mo);
+                if (mdef == null) continue;
+                Map<String, Object> limit = Json.obj(mdef.get("limit"));
+                if (limit == null) continue;
+                Object v = limit.get("context");
+                if (v == null) continue;
+                if (!(v instanceof Number)) {
+                    limit.remove("context");               // junk type: drop
+                    changed = true;
+                    continue;
+                }
+                long n = ((Number) v).longValue();
+                if (n < 0) {                               // negative: junk
+                    limit.remove("context");
+                    changed = true;
+                    continue;
+                }
+                long c = Math.max(MIN, Math.min(MAX, n));
+                if (c != n) {
+                    limit.put("context", c);
+                    changed = true;
+                }
+            }
+        }
+        return changed;
+    }
+
     private static Map<String, Object> modelNode(Map<String, Object> root,
                                                  String pid, String mid) {
         if (root == null || pid == null || mid == null) return null;

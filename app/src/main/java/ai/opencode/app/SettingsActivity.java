@@ -47,7 +47,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
      *  P49 — the consistency release: no ANR on Settings/Diagnostics (the
      *  size walks left the main thread), the keyboard re-anchor, the
      *  once-and-quiet markdown finalize, bounded log reads. */
-    static final String VERSION_TAG = "0.50.0-p50";
+    static final String VERSION_TAG = "0.51.0-p51";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout root;
@@ -295,7 +295,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", VERSION_TAG + " · the background release — the sandbox keeps running when the app is backgrounded (auto-hibernate is now opt-in, a watchdog re-boots the service after a system kill, the battery-exemption one-tap rides the notification), and the question tool is answerable in place: options as chips, one Answer/Skip, the agent continues", "◆", v -> {}));
+        ab.addView(rowLink("Version", VERSION_TAG + " · the no-more-OOM release — the replay path streams the session store instead of parsing it whole (a raised context cap could balloon a session past the 256 MB heap and kill the app mid-crash-loop with the sandbox along), row text and tool outputs have hard walls, UI notify lanes and the relief valve make an OOM degrade instead of dying, and opencode.json is healed before every server start", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {

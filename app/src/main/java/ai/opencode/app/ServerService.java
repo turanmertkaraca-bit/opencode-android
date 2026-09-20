@@ -278,6 +278,13 @@ public class ServerService extends Service {
             return START_NOT_STICKY;
         }
         RUNNING = true;
+        // P51: heal opencode.json before the server ever reads it — a
+        // hand-edited or agent-written context cap must not wedge the
+        // sandbox at boot (the "changed the cap → sandbox won't start"
+        // field report; every app write is already sanitized, this
+        // catches everything that arrived around it).
+        if (AuthStore.healConfig(this))
+            updateNotif("config healed");
         // P18: a plain start (boot, screen open, restart()'s delayed relaunch)
         // always re-arms the supervisor — the ACTION_STOP intent that
         // restart() queues first would otherwise leave userStop=true here
