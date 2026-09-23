@@ -47,7 +47,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
      *  P49 — the consistency release: no ANR on Settings/Diagnostics (the
      *  size walks left the main thread), the keyboard re-anchor, the
      *  once-and-quiet markdown finalize, bounded log reads. */
-    static final String VERSION_TAG = "0.51.0-p51";
+    static final String VERSION_TAG = "0.52.0-p52";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout root;
@@ -312,7 +312,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // ---- about
         root.addView(Theme.sectionLabel(this, "about"));
         LinearLayout ab = section();
-        ab.addView(rowLink("Version", VERSION_TAG + " · the no-more-OOM release — the replay path streams the session store instead of parsing it whole (a raised context cap could balloon a session past the 256 MB heap and kill the app mid-crash-loop with the sandbox along), row text and tool outputs have hard walls, UI notify lanes and the relief valve make an OOM degrade instead of dying, and opencode.json is healed before every server start", "◆", v -> {}));
+        ab.addView(rowLink("Version", VERSION_TAG + " · the find-and-manage release — a MIME-aware file manager that opens, shares, installs and exports real files instead of rendering every binary as text; an in-app storage manager that shows what is eating space and safely clears caches, logs and exports; bounded retention for every long-session collection; a smoother streaming paint; and deterministic signed builds that install in place", "◆", v -> {}));
         ab.addView(divider());
         ab.addView(rowLink("Source & releases",
                 "github.com/turanmertkaraca-bit/opencode-android", "⑂", v -> {

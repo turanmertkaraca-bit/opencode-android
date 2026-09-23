@@ -443,6 +443,6 @@ public class P51Test {
     // ---------------------------------------------------------------- version
 
     @Test public void version_bumped() {
-        assertEquals("0.51.0-p51", SettingsActivity.VERSION_TAG);
+        assertEquals("0.52.0-p52", SettingsActivity.VERSION_TAG);
     }
 }
