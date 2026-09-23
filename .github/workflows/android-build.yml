@@ -65,6 +65,18 @@ jobs:
       - name: Package debug APK (signed with the in-repo persistent keystore)
         run: gradle assembleDebug --no-daemon --stacktrace
 
+      # Gate: every APK must carry the project's persistent key, or an update
+      # over an existing install would fail with a signature mismatch.
+      - name: Verify signing certificate
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          APKSIGNER="${ANDROID_HOME}/build-tools/34.0.0/apksigner"
+          CERT="$("$APKSIGNER" verify --print-certs "$APK" | grep -i 'SHA-256 digest' | head -1 | sed 's/.*: //' | tr -d ' ')"
+          echo "signer SHA-256: $CERT"
+          EXPECT="A8:95:AC:0F:D6:61:9A:7D:DF:E3:BA:CD:0C:5A:31:D4:41:93:51:35:07:49:97:98:B2:48:AE:9C:D2:6D:1B:34"
+          [ "$CERT" = "$EXPECT" ] || { echo "SIGNING CERT MISMATCH — result would not install in place"; exit 1; }
+          echo "signing OK: the persistent key"
+
       - name: Test summary
         if: always()
         run: |
@@ -104,8 +116,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           APK=app/build/outputs/apk/debug/app-debug.apk
-          sha256sum "$APK" > SHA256SUMS.txt
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${GITHUB_REF_NAME}"                 # e.g. v0.52.0-p52
+          VER="${TAG#v}"                           # 0.52.0-p52
+          PNUM="${VER##*-p}"                       # 52
+          BASE="${VER%-p*}"                        # 0.52.0
+          NAMED="opencode-p${PNUM}-v${BASE}-debug.apk"
+          cp "$APK" "$NAMED"
+          sha256sum "$NAMED" > SHA256SUMS.txt
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" --title "$TAG" --notes "Automated build from ${GITHUB_SHA}."
-          gh release upload "$TAG" "$APK" SHA256SUMS.txt --clobber
+          gh release upload "$TAG" "$NAMED" SHA256SUMS.txt --clobber
