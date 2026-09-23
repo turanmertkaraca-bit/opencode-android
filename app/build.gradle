@@ -3,7 +3,13 @@ plugins { id 'com.android.application' }
 // P6: persistent debug keystore (signature continuity across sandbox wipes).
 // Falls back to the default ~/.android/debug.keystore when absent (e.g. a
 // fresh clone from GitHub), so building from source never breaks.
-def persistentDebugKeystore = new File(rootDir, '../keystore/debug.keystore')
+// Prefer an in-repo keystore (committed so CI and every machine sign with the
+// SAME key and updates install in place); fall back to the historical sibling
+// path, then to the android default debug keystore.
+def persistentDebugKeystore = new File(rootDir, 'keystore/debug.keystore')
+if (!persistentDebugKeystore.exists()) {
+    persistentDebugKeystore = new File(rootDir, '../keystore/debug.keystore')
+}
 
 android {
     namespace 'ai.opencode.app'

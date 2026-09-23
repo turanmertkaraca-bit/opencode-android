@@ -15,3 +15,6 @@ gh-repo/
 tool-results/
 upload/
 skills/
+
+# committed on purpose: deterministic debug signing so CI and devices share one key
+!keystore/debug.keystore
