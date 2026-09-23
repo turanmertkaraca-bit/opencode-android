@@ -89,24 +89,39 @@ public final class StoreWalk {
             index++;
             st.messages++;
             long chars = sizeChars(item);
-            st.chars += chars;
+            st.chars += chars;              // full consumed size, pre-trim
             // per-message parts trim — the copy kept for rendering must
             // not carry one absurd message whole
             List<Object> parts = partsOf(item);
             if (parts != null) {
                 long pchars = sizeChars(parts);
+                long removed = 0;
                 while (pchars > ITEM_PARTS_BUDGET && !parts.isEmpty()) {
                     Object victim = parts.remove(0);
-                    pchars -= sizeChars(victim);
+                    long vc = sizeChars(victim);
+                    pchars -= vc;
+                    removed += vc;
                     st.partsTrimmed++;
                 }
+                // P51: the ring budget must measure the TRIMMED copy, not
+                // the pre-trim message — over-counting evicted the window
+                // too aggressively. sizeChars is additive, so the removed
+                // parts' chars are exactly the reduction.
+                chars -= removed;
             }
-            ring.addLast(new Object[]{item, chars});
-            ringChars += chars;
-            while (ring.size() > 1 && (ring.size() > keep || ringChars > keepBytes)) {
-                Object[] eldest = ring.removeFirst();
-                ringChars -= (Long) eldest[1];
+            if (keep <= 0) {
+                // P51: some callers (verifyCured) pass keep=0 and ignore
+                // the ring; retain nothing rather than the old always-one.
                 st.hidden++;
+            } else {
+                ring.addLast(new Object[]{item, chars});
+                ringChars += chars;
+                while (ring.size() > 1
+                        && (ring.size() > keep || ringChars > keepBytes)) {
+                    Object[] eldest = ring.removeFirst();
+                    ringChars -= (Long) eldest[1];
+                    st.hidden++;
+                }
             }
         }
         if (sink != null) {

@@ -840,8 +840,24 @@ public final class Debian {
     /** Run one guest command, capture output. Returns exit code (-1 fail). */
     public static int runGuest(Context c, String command, StringBuilder out,
                                int timeoutSec) {
+        Process p = null;
+        Thread watchdog = null;
         try {
-            Process p = guestProcess(c, command).start();
+            p = guestProcess(c, command).start();
+            final Process fp = p;
+            // P52: readAll blocks to EOF with NO timeout, and waitFor ran
+            // only AFTER it returned — so a hung child (half-open
+            // connection) ignored the budget and pinned the caller forever.
+            // A watchdog enforces a REAL deadline by killing the child,
+            // which closes its stdout and unblocks the read.
+            watchdog = new Thread(() -> {
+                try {
+                    Thread.sleep(Math.max(0, (long) timeoutSec) * 1000L);
+                    fp.destroyForcibly();
+                } catch (InterruptedException ignored) {}
+            }, "oc-guest-timeout");
+            watchdog.setDaemon(true);
+            watchdog.start();
             String s = Api.readAll(p.getInputStream());
             if (out != null) out.append(s);
             if (!p.waitFor(timeoutSec, TimeUnit.SECONDS)) {
@@ -852,6 +868,12 @@ public final class Debian {
         } catch (Exception e) {
             if (out != null) out.append(e.toString());
             return -1;
+        } finally {
+            if (watchdog != null) watchdog.interrupt();
+            // P52: never leak the child when the read/catch path bails.
+            if (p != null && p.isAlive()) {
+                try { p.destroyForcibly(); } catch (Exception ignored) {}
+            }
         }
     }
 

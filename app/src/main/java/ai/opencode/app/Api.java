@@ -97,8 +97,12 @@ public final class Api {
             c.setRequestProperty("Content-Type", "application/json");
             byte[] b = jsonBody.getBytes(StandardCharsets.UTF_8);
             c.setFixedLengthStreamingMode(b.length);
-            c.getOutputStream().write(b);
-            c.getOutputStream().flush();
+            // P52: one stream handle, closed — the old code fetched it
+            // twice and never closed it (the request body was only
+            // committed on flush; close is the correct end-of-body signal).
+            try (java.io.OutputStream o = c.getOutputStream()) {
+                o.write(b);
+            }
         }
         return c;
     }

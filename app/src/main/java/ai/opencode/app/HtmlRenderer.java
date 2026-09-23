@@ -176,17 +176,41 @@ public final class HtmlRenderer {
         if (j.finished[0]) return;
         j.finished[0] = true;
         H.removeCallbacks(j.watchdog[0]);
+        Bitmap shot = null;
         try {
             if (j.extBlocked[0])
                 RenderCheck.addLine(j.notes,
                         "page tried external resources — self-contained pages only");
-            String look = null;
-            Bitmap shot = shot(j.wv);
-            if (shot != null && j.describe) look = describe(j.ctx, shot, j.notes);
-            if (shot != null) shot.recycle();
+            shot = shot(j.wv);          // WebView access stays on the main thread
             if (shot == null)
                 RenderCheck.addLine(j.notes,
                         "screenshot unavailable — console and DOM outline still apply");
+        } catch (Throwable t) {
+            if (shot != null) shot.recycle();
+            try { if (j.wv != null) j.wv.destroy(); } catch (Throwable ignored) {}
+            BUSY.set(false);
+            fail(j.cb, "internal", String.valueOf(t));
+            return;
+        }
+        if (shot != null && j.describe) {
+            // The vision ladder blocks on network (8 s connect + 45 s read
+            // per candidate) and this path runs on the main looper. Hand
+            // the captured bitmap to a worker; only the final callback
+            // returns to main.
+            final Bitmap bmp = shot;
+            new Thread(() -> {
+                final String look = describe(j.ctx, bmp, j.notes);
+                H.post(() -> complete(j, timedOut, look, bmp));
+            }, "html-render-vision").start();
+        } else {
+            complete(j, timedOut, null, shot);
+        }
+    }
+
+    /** Report + teardown + gate clear + callback once, on the main thread. */
+    private static void complete(final Job j, final boolean timedOut,
+                                 final String look, final Bitmap shot) {
+        try {
             Map<String, Object> rep = RenderCheck.report(
                     RenderCheck.verdict(j.console),
                     RenderCheck.capLines(j.console),
@@ -197,6 +221,7 @@ public final class HtmlRenderer {
         } catch (Throwable t) {
             fail(j.cb, "internal", String.valueOf(t));
         } finally {
+            if (shot != null) shot.recycle();
             try { if (j.wv != null) j.wv.destroy(); } catch (Throwable ignored) {}
             BUSY.set(false);
         }

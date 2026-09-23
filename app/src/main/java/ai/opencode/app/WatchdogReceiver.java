@@ -45,8 +45,13 @@ public final class WatchdogReceiver extends BroadcastReceiver {
             } catch (Exception ignored) {
                 // app in background restrictions — the next tick retries
             }
+            ServerService.scheduleWatchdog(context);   // keep the chain alive
+        } else {
+            // P52: the chain is immortal otherwise — with keep-alive OFF (or
+            // a deliberate stop) this allow-while-idle alarm must DIE, or it
+            // wakes the device every ~4 min forever and drains the battery.
+            ServerService.cancelWatchdog(context);
         }
-        ServerService.scheduleWatchdog(context);   // keep the chain alive
     }
 
     /** Pure decision — JVM-pinned. Boot only when the user wants both

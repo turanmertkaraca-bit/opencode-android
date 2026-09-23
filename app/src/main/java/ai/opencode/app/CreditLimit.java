@@ -41,8 +41,16 @@ public final class CreditLimit {
      */
     public static double parseCap(String raw) {
         if (raw == null) return 0;
-        String s = raw.trim().replace("$", "").replace(",", ".");
+        String s = raw.trim().replace("$", "");
         if (s.isEmpty()) return 0;
+        // P51: a comma is only a DECIMAL point when it is not thousands
+        // grouping — "5,50" → 5.50 but "1,000" → 1000 (the old blanket
+        // replace turned 1,000 into $1.00 and blocked sends after $1).
+        if (s.indexOf(',') >= 0) {
+            s = isThousandsGrouped(s)
+                    ? s.replace(",", "")
+                    : s.replace(',', '.');
+        }
         double v;
         try {
             v = Double.parseDouble(s);
@@ -54,6 +62,24 @@ public final class CreditLimit {
         if (v == 0) return 0;                    // "0" = no limit, same as empty
         if (v > CAP_MAX) return -1;
         return v;
+    }
+
+    /** True for "1,000" / "1,000,000" / "12,500.75" style thousands grouping
+     *  (integer groups of 1-3 then 3 digits; no comma in the fraction). */
+    private static boolean isThousandsGrouped(String s) {
+        int dot = s.indexOf('.');
+        String head = dot < 0 ? s : s.substring(0, dot);
+        if (dot >= 0 && s.indexOf(',', dot) >= 0) return false;
+        String[] g = head.split(",", -1);
+        if (g.length < 2 || g[0].isEmpty() || g[0].length() > 3) return false;
+        for (int i = 0; i < g[0].length(); i++)
+            if (!Character.isDigit(g[0].charAt(i))) return false;
+        for (int i = 1; i < g.length; i++) {
+            if (g[i].length() != 3) return false;
+            for (int j = 0; j < g[i].length(); j++)
+                if (!Character.isDigit(g[i].charAt(j))) return false;
+        }
+        return true;
     }
 
     /** OK / WARN (≥80% of cap) / BLOCK (≥ cap). cap ≤ 0 → always OK. */

@@ -39,6 +39,13 @@ public final class ProxyServer {
      *  64 is far above any real sandbox workload (apt/git/pip + a run). */
     private static final int MAX_CONNS = 64;
 
+    /** P52: a leaked half-open tunnel used to hold its slot forever
+     *  (`setSoTimeout(0)` + no upstream timeout) until the 64 cap killed
+     *  the proxy for the rest of the session. A finite read timeout makes
+     *  a stalled tunnel throw SocketTimeoutException, run the handler's
+     *  finally, and free the slot. */
+    private static final int TUNNEL_IDLE_MS = 60_000;
+
     /** Start once; returns the local port, or -1 if the proxy is unavailable. */
     public static int ensureStarted(Context c) {
         if (port > 0 && acceptor != null && !acceptor.isClosed()) return port;
@@ -173,6 +180,7 @@ public final class ProxyServer {
     private static void doPlainHttp(Socket client, InputStream cin,
                                     String reqline, String headers) {
         conns.incrementAndGet();
+        Socket up = null;
         try {
             String[] parts = reqline.split(" ");
             if (parts.length < 2) throw new IOException("bad request line");
@@ -180,7 +188,7 @@ public final class ProxyServer {
             String host = u.getHost();
             int p = u.getPort() > 0 ? u.getPort() : 80;
             if (host == null) throw new IOException("no host in " + parts[1]);
-            Socket up = new Socket();
+            up = new Socket();
             up.connect(new java.net.InetSocketAddress(InetAddress.getByName(host), p), 15_000);
             OutputStream uo = up.getOutputStream();
             String pathq = u.getRawPath() == null ? "/" : u.getRawPath()
@@ -195,6 +203,11 @@ public final class ProxyServer {
         } catch (Exception e) {
             note("HTTP " + reqline + " failed: " + e);
             try { client.close(); } catch (Exception ignored) {}
+        } finally {
+            // P52: a write failure before pump() used to leak the upstream
+            // socket; always close it (pump also closes it on success —
+            // double close is harmless).
+            if (up != null) try { up.close(); } catch (Exception ignored) {}
         }
     }
 
@@ -204,6 +217,10 @@ public final class ProxyServer {
             try { client.close(); } catch (Exception ignored) {}
             return;
         }
+        // P52: finite idle timeout on BOTH directions so a dead peer can
+        // never pin this thread (and its connection slot) forever.
+        try { client.setSoTimeout(TUNNEL_IDLE_MS); } catch (Exception ignored) {}
+        try { up.setSoTimeout(TUNNEL_IDLE_MS); } catch (Exception ignored) {}
         Thread c2u = new Thread(() -> copy(cin, up), "oc-proxy-c2u");
         c2u.setDaemon(true);
         c2u.start();

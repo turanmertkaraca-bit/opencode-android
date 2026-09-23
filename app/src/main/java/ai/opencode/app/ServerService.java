@@ -48,9 +48,21 @@ public class ServerService extends Service {
     private static volatile Thread runner;
     private static volatile boolean RUNNING = false;
     private static volatile HttpURLConnection sseConn;
+    /** P52: the one live SSE owner. Stored so stopServer can interrupt it
+     *  and so a superseded thread (fast restart / failed spawn) exits on
+     *  its generation check instead of double-ingesting /event. */
+    private static final Object SSE_LOCK = new Object();
+    private static volatile int sseGen;
+    private static volatile Thread sseThread;
     private static final StringBuilder tail = new StringBuilder();
     private static final Handler main = new Handler(Looper.getMainLooper());
     private static PowerManager.WakeLock wakeLock;
+    /** P52: acquire/release check-then-act used to race across the SSE
+     *  and supervisor threads, leaking a PARTIAL_WAKE_LOCK. One lock. */
+    private static final Object WAKE_LOCK = new Object();
+    /** P52: appendDiag/appendDiagStatic truncate+append is read-modify-
+     *  write; two threads can interleave and corrupt the file. One lock. */
+    private static final Object DIAG_LOCK = new Object();
 
     // ---- P17: eco idle — the wake lock exists ONLY while the agent works
     // The P16 code held a PARTIAL_WAKE_LOCK for the ENTIRE server lifetime
@@ -98,7 +110,9 @@ public class ServerService extends Service {
 
     private static void noteIdle() {
         agentActive = false;
-        if (ecoIdle) releaseWakeLock();
+        // P52: a session.idle for ONE session must not release the lock
+        // while another run is still in flight (mirrors the hibernate gate).
+        if (ecoIdle && !RunHub.busy()) releaseWakeLock();
     }
 
     public interface Evt { void on(int newState, String detail); }
@@ -139,13 +153,33 @@ public class ServerService extends Service {
     }
 
     private static final ConcurrentLinkedQueue<Map<String, Object>> PERMS = new ConcurrentLinkedQueue<>();
-    private static final Set<String> seenPermIds = ConcurrentHashMap.newKeySet();
-    // P46 long-session cap: seen ids grow by one per permission the server
-    // ever showed; a month of hard use must not grow the set forever
-    // (same hygiene rule answeredPermIds already follows).
+    // P46/P52 long-session cap: seen ids grow by one per permission the
+    // server ever showed; a month of hard use must not grow the set
+    // forever. The old ConcurrentHashMap.newKeySet() had no order, so the
+    // only way to bound it was `size() <= 256 && add(id)` — which
+    // SHORT-CIRCUITED the add once full and permanently disabled
+    // permission delivery (the long-session field report). An
+    // access-ordered LRU evicts the oldest id instead of refusing the
+    // newest, so delivery never stops. All access is under PERM_LOCK.
+    private static final Object PERM_LOCK = new Object();
+    private static final int PERM_ID_CAP = 256;
+    private static final Set<String> seenPermIds = java.util.Collections.newSetFromMap(
+            new java.util.LinkedHashMap<String, Boolean>(64, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Boolean> e) {
+                    return size() > PERM_ID_CAP;
+                }
+            });
     /** Request ids we already answered — tombstones so a re-seed/refresh can
-     *  never re-queue a stale ask and flap the dialog forever. */
-    private static final Set<String> answeredPermIds = ConcurrentHashMap.newKeySet();
+     *  never re-queue a stale ask and flap the dialog forever. Same bounded
+     *  LRU (P52 item 9: no clear() tombstone hole). */
+    private static final Set<String> answeredPermIds = java.util.Collections.newSetFromMap(
+            new java.util.LinkedHashMap<String, Boolean>(64, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Boolean> e) {
+                    return size() > PERM_ID_CAP;
+                }
+            });
 
     public static int getState() { return state; }
     public static String getTail() { synchronized (tail) { return tail.toString(); } }
@@ -178,7 +212,15 @@ public class ServerService extends Service {
         new Handler(Looper.getMainLooper()).postDelayed(() -> {
             if (Binaries.binaryReady(c)) {
                 try { c.startForegroundService(new Intent(c, ServerService.class)); }
-                catch (Exception ignored) {}
+                catch (Exception e) {
+                    // P52: a background-FGS refusal must not strand the
+                    // sandbox: pendingRestart=false lets every onResume
+                    // guard auto-start again, and the watchdog retries.
+                    pendingRestart = false;
+                    userStop = false;
+                    wantSvc(c, true);
+                    scheduleWatchdog(c);
+                }
             }
         }, 1200);
     }
@@ -211,10 +253,22 @@ public class ServerService extends Service {
      *  POST — covers both the dialog path and permission.replied events). */
     public static void noteAnswered(String id) {
         if (id == null) return;
-        answeredPermIds.add(id);
-        if (answeredPermIds.size() > 256) answeredPermIds.clear();
+        synchronized (PERM_LOCK) {
+            answeredPermIds.add(id);
+        }
         for (java.util.Iterator<Map<String, Object>> it = PERMS.iterator(); it.hasNext(); ) {
             if (id.equals(Json.str(it.next(), "id"))) it.remove();
+        }
+    }
+
+    /** True when this id is new (records it in the bounded LRU). Never
+     *  gates on size — the LRU evicts the oldest instead, so permission
+     *  delivery can never be permanently disabled (P52). */
+    private static boolean markSeenPerm(String id) {
+        if (id == null) return false;
+        synchronized (PERM_LOCK) {
+            if (answeredPermIds.contains(id)) return false;
+            return seenPermIds.add(id);
         }
     }
     public static int pendingPermissions() { return PERMS.size(); }
@@ -687,47 +741,51 @@ public class ServerService extends Service {
     /** Static twin of appendDiag for callers outside the service instance
      *  (Settings env-reset, App crash hook). Same 24 kB head-trim. */
     public static void appendDiagStatic(Context c, String event, String detail) {
-        try {
-            long mem = -1;
+        synchronized (DIAG_LOCK) {
             try {
-                String mi = Api.readAll(new java.io.FileInputStream("/proc/meminfo"));
-                mem = Resilience.parseMemAvailableKb(mi);
+                long mem = -1;
+                try {
+                    String mi = Api.readAll(new java.io.FileInputStream("/proc/meminfo"));
+                    mem = Resilience.parseMemAvailableKb(mi);
+                } catch (Exception ignored) {}
+                File f = new File(c.getFilesDir(), "sandbox-diag.log");
+                String line = Resilience.diagLine(System.currentTimeMillis(), event,
+                        detail, mem) + "\n";
+                if (f.length() > 24 * 1024) {
+                    String old = Api.readAll(new java.io.FileInputStream(f));
+                    int cut = Math.max(0, old.length() - 12 * 1024);
+                    cut = old.indexOf('\n', cut);
+                    if (cut > 0) line = old.substring(cut + 1) + line;
+                }
+                java.io.FileOutputStream fo = new java.io.FileOutputStream(f,
+                        f.length() <= 24 * 1024);
+                fo.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                fo.close();
             } catch (Exception ignored) {}
-            File f = new File(c.getFilesDir(), "sandbox-diag.log");
-            String line = Resilience.diagLine(System.currentTimeMillis(), event,
-                    detail, mem) + "\n";
-            if (f.length() > 24 * 1024) {
-                String old = Api.readAll(new java.io.FileInputStream(f));
-                int cut = Math.max(0, old.length() - 12 * 1024);
-                cut = old.indexOf('\n', cut);
-                if (cut > 0) line = old.substring(cut + 1) + line;
-            }
-            java.io.FileOutputStream fo = new java.io.FileOutputStream(f,
-                    f.length() <= 24 * 1024);
-            fo.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            fo.close();
-        } catch (Exception ignored) {}
+        }
     }
 
     private void appendDiag(String event, String detail) {
-        try {
-            long mem = -1;
+        synchronized (DIAG_LOCK) {
             try {
-                String mi = Api.readAll(new java.io.FileInputStream("/proc/meminfo"));
-                mem = Resilience.parseMemAvailableKb(mi);
+                long mem = -1;
+                try {
+                    String mi = Api.readAll(new java.io.FileInputStream("/proc/meminfo"));
+                    mem = Resilience.parseMemAvailableKb(mi);
+                } catch (Exception ignored) {}
+                File f = new File(getFilesDir(), "sandbox-diag.log");
+                String line = Resilience.diagLine(System.currentTimeMillis(), event, detail, mem) + "\n";
+                if (f.length() > 24 * 1024) {
+                    String old = Api.readAll(new java.io.FileInputStream(f));
+                    int cut = Math.max(0, old.length() - 12 * 1024);
+                    cut = old.indexOf('\n', cut);
+                    if (cut > 0) line = old.substring(cut + 1) + line;
+                }
+                java.io.FileOutputStream fo = new java.io.FileOutputStream(f, f.length() <= 24 * 1024);
+                fo.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                fo.close();
             } catch (Exception ignored) {}
-            File f = new File(getFilesDir(), "sandbox-diag.log");
-            String line = Resilience.diagLine(System.currentTimeMillis(), event, detail, mem) + "\n";
-            if (f.length() > 24 * 1024) {
-                String old = Api.readAll(new java.io.FileInputStream(f));
-                int cut = Math.max(0, old.length() - 12 * 1024);
-                cut = old.indexOf('\n', cut);
-                if (cut > 0) line = old.substring(cut + 1) + line;
-            }
-            java.io.FileOutputStream fo = new java.io.FileOutputStream(f, f.length() <= 24 * 1024);
-            fo.write(line.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            fo.close();
-        } catch (Exception ignored) {}
+        }
     }
 
     /** P19: kill every live process whose argv[0] is EXACTLY our opencode
@@ -868,8 +926,10 @@ public class ServerService extends Service {
      * Maps and: (a) rebroadcasts to UI listeners, (b) queues permissions.
      */
     private void startSse() {
+        final int gen;
+        synchronized (SSE_LOCK) { gen = ++sseGen; }   // supersede any old owner
         Thread t = new Thread(() -> {
-            while (RUNNING) {
+            while (RUNNING && gen == sseGen) {
                 if (state != ST_HEALTHY) {
                     try { Thread.sleep(1500); } catch (InterruptedException e) { return; }
                     continue;
@@ -893,7 +953,7 @@ public class ServerService extends Service {
                     try (BufferedReader r = new BufferedReader(
                             new InputStreamReader(c.getInputStream()), 32 * 1024)) {
                         String line;
-                        while (RUNNING && (line = r.readLine()) != null) {
+                        while (RUNNING && gen == sseGen && (line = r.readLine()) != null) {
                             if (line.startsWith("data:")) {
                                 String d = line.length() > 5 ? line.substring(5).trim() : "";
                                 if (data.length() > 0) data.append('\n');
@@ -917,12 +977,13 @@ public class ServerService extends Service {
                     // governor can never swallow a part's final state.
                     try { flushGovernor(); } catch (Throwable ignored) {}
                 }
-                if (RUNNING) {
+                if (RUNNING && gen == sseGen) {
                     try { Thread.sleep(2500); } catch (InterruptedException e) { return; }
                 }
             }
         }, "oc-sse");
         t.setDaemon(true);
+        sseThread = t;
         t.start();
     }
 
@@ -945,8 +1006,7 @@ public class ServerService extends Service {
             Map<String, Object> perm = normalizePermission(Json.map(ev, "properties"));
             if (perm != null) {
                 String id = Json.str(perm, "id");
-                if (id != null && !answeredPermIds.contains(id) && seenPermIds.size() <= 256
-                        && seenPermIds.add(id)) {
+                if (markSeenPerm(id)) {
                     PERMS.add(perm);
                     if (evtListeners.isEmpty()) {
                         updateNotif("⚠ permission requested — open OpenCode to review");
@@ -1003,8 +1063,7 @@ public class ServerService extends Service {
             for (Object o : arr) {
                 Map<String, Object> perm = normalizePermission(Json.obj(o));
                 String id = perm == null ? null : Json.str(perm, "id");
-                if (id != null && !answeredPermIds.contains(id) && seenPermIds.size() <= 256
-                        && seenPermIds.add(id)) {
+                if (markSeenPerm(id)) {
                     PERMS.add(perm);
                     added = true;
                 }
@@ -1018,21 +1077,25 @@ public class ServerService extends Service {
     // ------------------------------------------------------------- lifecycle
 
     private static void acquireWakeLock() {
-        if (wakeLock != null) return;
-        Context c = appCtx;
-        if (c == null) return;
-        try {
-            PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
-            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "opencode:server");
-            wakeLock.setReferenceCounted(false);
-            wakeLock.acquire();
-        } catch (Exception ignored) {}
+        synchronized (WAKE_LOCK) {
+            if (wakeLock != null) return;
+            Context c = appCtx;
+            if (c == null) return;
+            try {
+                PowerManager pm = (PowerManager) c.getSystemService(Context.POWER_SERVICE);
+                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "opencode:server");
+                wakeLock.setReferenceCounted(false);
+                wakeLock.acquire();
+            } catch (Exception ignored) {}
+        }
     }
 
     private static void releaseWakeLock() {
-        if (wakeLock != null) {
-            try { wakeLock.release(); } catch (Exception ignored) {}
-            wakeLock = null;
+        synchronized (WAKE_LOCK) {
+            if (wakeLock != null) {
+                try { wakeLock.release(); } catch (Exception ignored) {}
+                wakeLock = null;
+            }
         }
     }
 
@@ -1087,6 +1150,27 @@ public class ServerService extends Service {
                             at, 10 * 60_000L, pi);
                 } catch (Exception ignored) {}
             }
+        } catch (Exception ignored) {}
+    }
+
+    /** P52: tear the chain down when the user no longer wants it (keep-
+     *  alive off) or the sandbox is deliberately stopped (svcWant false).
+     *  Without this the allow-while-idle alarm fired forever, draining
+     *  battery after the feature was disabled. Same request code + Intent
+     *  as scheduleWatchdog so the PendingIntent matches; FLAG_NO_CREATE
+     *  avoids resurrecting an alarm that is already gone. */
+    static void cancelWatchdog(Context c) {
+        try {
+            android.app.AlarmManager am = (android.app.AlarmManager)
+                    c.getSystemService(Context.ALARM_SERVICE);
+            if (am == null) return;
+            android.app.PendingIntent pi = android.app.PendingIntent.getBroadcast(
+                    c, 1001, new Intent(c, WatchdogReceiver.class),
+                    android.app.PendingIntent.FLAG_NO_CREATE
+                            | android.app.PendingIntent.FLAG_IMMUTABLE);
+            if (pi == null) return;
+            am.cancel(pi);
+            pi.cancel();
         } catch (Exception ignored) {}
     }
 
@@ -1181,9 +1265,30 @@ public class ServerService extends Service {
         servingDir = null;
         HttpURLConnection c = sseConn;
         if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
+        // P52: supersede + reap the SSE owner so a fast restart can never
+        // leave two threads ingesting /event (double-delivered events).
+        synchronized (SSE_LOCK) { sseGen++; }
+        Thread st = sseThread;
+        sseThread = null;
+        if (st != null) {
+            st.interrupt();
+            try { st.join(1000); } catch (InterruptedException ignored) {}
+        }
         Process p = proc;
         proc = null;
-        if (p != null) p.destroy();
+        if (p != null) {
+            p.destroy();
+            // P52: SIGTERM may be ignored by a wedged child; escalate after
+            // a short grace. Direct child only — killing the process GROUP
+            // would kill this app (same pgid), so that is deliberately NOT
+            // done (see report).
+            try {
+                if (!p.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS))
+                    p.destroyForcibly();
+            } catch (InterruptedException ignored) {
+                try { p.destroyForcibly(); } catch (Exception ignored2) {}
+            }
+        }
         Thread r = runner;
         if (r != null) r.interrupt();
         releaseWakeLock();

@@ -188,6 +188,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         sb.addView(divider());
         sb.addView(rowLink("Import arm64 tools", "bring your own static binaries",
                 "⇩", v -> startActivity(new Intent(this, DiagnosticsActivity.class))));
+        sb.addView(divider());
+        // P?? DNS bridge: the README documents this under Settings → sandbox.
+        // The pref was fully wired (Binaries.applyEnv reads it at spawn) but
+        // had no row here, so the documented remedy was unreachable.
+        sb.addView(switchRow("DNS bridge", "dns_bridge",
+                "escape hatch for exotic VPN/DNS setups: route the agent through a local proxy — leave OFF unless provider calls fail with DNS errors"));
         root.addView(sb);
 
         // ---- environment (P12: Debian 12 + apt via proot)
@@ -1537,10 +1543,12 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         // defaults: motion ON (matches Theme.motionOn), dns_bridge OFF,
         // auto_allow OFF (approving tool calls silently is opt-in — P14),
         // hibernate OFF (P50: the background killer, now opt-in),
+        // boot_start OFF (matches BootReceiver's getBoolean(..., false)),
         // compact_auto OFF
         boolean dflt = !("dns_bridge".equals(keyOrNull)
                 || "auto_allow".equals(keyOrNull)
                 || "hibernate".equals(keyOrNull)
+                || "boot_start".equals(keyOrNull)
                 || "compact_auto".equals(keyOrNull));
         boolean on = getSharedPreferences("oc", MODE_PRIVATE).getBoolean(keyOrNull, dflt);
         FrameLayout sw = new FrameLayout(this);
@@ -1577,9 +1585,16 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             tv.getBackground().setColorFilter(null);
             track.setColor(now ? Theme.ACCENT : Theme.SURFACE2);
             tv.setBackground(track);
-            if ("dns_bridge".equals(keyOrNull) && now) {
-                Toast.makeText(this, "bridge on — restart server to apply",
-                        Toast.LENGTH_LONG).show();
+            if ("dns_bridge".equals(keyOrNull)) {
+                Sheet.show(this, "DNS bridge " + (now ? "on" : "off"))
+                        .msg(now
+                                ? "The agent routes through the local DNS bridge "
+                                        + "once the server restarts."
+                                : "The agent returns to normal OS DNS once the "
+                                        + "server restarts.")
+                        .pill("Restart server", Sheet.PRIMARY,
+                                () -> ServerService.restart(this))
+                        .pill("Later", Sheet.QUIET, null);
             }
             // P45: the compaction kill switch writes THROUGH to
             // opencode.json (the click is the user's newest intent) and
