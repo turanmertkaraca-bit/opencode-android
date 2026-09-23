@@ -117,6 +117,7 @@ public class CanvasActivity extends Activity {
         s.setDomStorageEnabled(true);        // page-local state (sliders etc.)
         s.setAllowFileAccess(false);         // no device files
         s.setAllowContentAccess(false);      // no content providers
+        s.setBlockNetworkLoads(true);        // self-contained pages only
         s.setAllowFileAccessFromFileURLs(false);
         s.setAllowUniversalAccessFromFileURLs(false);
         s.setMediaPlaybackRequiresUserGesture(true);

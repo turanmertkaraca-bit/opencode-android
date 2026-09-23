@@ -85,7 +85,13 @@ public final class PartGovernor {
 
         String type = envelopeType(raw);
         String key = null;
-        if ("message.part.updated".equals(type)) key = partKey(raw, type.length());
+        if ("message.part.updated".equals(type)) {
+            // P51: scan MUST start just past the envelope type token, not
+            // type.length() chars in (a longer frame with keys before
+            // "type" could re-read the envelope's own type as the part's).
+            int from = envelopeTypeEnd(raw);
+            key = partKey(raw, from < 0 ? type.length() : from);
+        }
         if (key == null || raw.length() > MAX_HOLD_BYTES) {
             out.add(raw);                       // unknown shape / huge → pass through
             return out;
@@ -175,6 +181,17 @@ public final class PartGovernor {
         return e < 0 ? null : raw.substring(s, e);
     }
 
+    /** Index just past the FIRST "type":"…" token (its closing quote + 1),
+     *  or -1 when absent — the correct scan anchor for {@link #partKey}. */
+    private static int envelopeTypeEnd(String raw) {
+        if (raw == null) return -1;
+        int i = raw.indexOf("\"type\":\"");
+        if (i < 0) return -1;
+        int s = i + 8;
+        int e = raw.indexOf('"', s);
+        return e < 0 ? -1 : e + 1;
+    }
+
     /**
      * Cheap part key for message.part.updated frames: the FIRST
      * sessionID, messageID and prt_ id occurrences after the envelope
@@ -182,18 +199,19 @@ public final class PartGovernor {
      * candidate (missing ids, non-text/reasoning part) — the caller then
      * passes it through unthrottled, so a scan miss can never lose data.
      *
-     * @param typeLen length of the envelope type token — scanning starts
-     *                after it, so "type" here means the PART's type field
+     * @param from   index just past the envelope type token (see
+     *               {@link #envelopeTypeEnd}) — scanning starts there, so
+     *               the next "type" found is the PART's type field
      */
-    static String partKey(String raw, int typeLen) {
-        String sid = scanStr(raw, typeLen, "\"sessionID\":\"");
+    static String partKey(String raw, int from) {
+        String sid = scanStr(raw, from, "\"sessionID\":\"");
         if (sid == null) return null;
-        String mid = scanStr(raw, typeLen, "\"messageID\":\"");
+        String mid = scanStr(raw, from, "\"messageID\":\"");
         if (mid == null) return null;
         // only text/reasoning flood; prt_ prefix pins the part id field
-        String pt = scanStr(raw, typeLen, "\"type\":\"");
+        String pt = scanStr(raw, from, "\"type\":\"");
         if (!"text".equals(pt) && !"reasoning".equals(pt)) return null;
-        String pid = scanStr(raw, typeLen, "\"id\":\"prt_");
+        String pid = scanStr(raw, from, "\"id\":\"prt_");
         if (pid == null) return sid + "|" + mid + "|-";
         return sid + "|" + mid + "|prt_" + pid;
     }

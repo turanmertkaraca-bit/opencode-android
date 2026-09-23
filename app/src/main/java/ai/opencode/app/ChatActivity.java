@@ -205,6 +205,12 @@ public class ChatActivity extends Activity
     private LinearLayout liveSlot;   // P26: pinned live-tree footer (always visible while a run works)
     private TextView scrollPill;
     private boolean pillShown;
+    /** P-fix: the pill's 450 ms bracket reset, tracked so onPause can
+     *  cancel it (the anonymous lambda used to outlive the screen). */
+    private final Runnable pillProgReset = () -> {
+        progScroll = false;
+        lastScrollY = scroll == null ? 0 : scroll.getScrollY();
+    };
     private final List<ObjectAnimator> typingAnims = new ArrayList<>();
 
     // ---- P17/P25: live edit feed — STATE lives in RunHub, the VIEW here
@@ -429,6 +435,7 @@ public class ChatActivity extends Activity
         buildTyping();
         buildPill();
         buildSuggestions();
+        applyWideLayout();   // P-fix: re-apply after typing built its padding
 
         refreshChips();
         refreshServerUi();
@@ -533,6 +540,11 @@ public class ChatActivity extends Activity
 
     @Override
     protected void onPause() {
+        // P-fix: subscribe() lives in onResume and the listener list has
+        // no dedupe, so unsubscribe here too — otherwise every pause/
+        // resume cycle appends another reference that onDestroy can't
+        // clear. (onResume re-syncs all server state on return.)
+        ServerService.unsubscribe(this);
         RunHub.unbindUi(this);
         stopBeatClock();                     // P43: beats live only on the open screen
         // P42 keyboard fix, second half: drop input focus on pause so a
@@ -555,6 +567,11 @@ public class ChatActivity extends Activity
         // P15: drop pending paint work with the unbind — the flush would
         // fire into a detached view tree on return (harmless but wasteful).
         ui.removeCallbacks(flushPaints);
+        // P-fix: the deferred live-card refresh and the pill's bracket
+        // reset are screen-scoped — drop them with the other posts.
+        ui.removeCallbacks(deferredLiveUpdate);
+        if (scroll != null) scroll.removeCallbacks(pillProgReset);
+        progScroll = false;
         // P42-check: the veil ticker re-posts itself every second while
         // the veil is VISIBLE — leave during a boot and it holds the
         // finished activity (and its view tree) forever, waking the CPU.
@@ -584,6 +601,16 @@ public class ChatActivity extends Activity
         // edit watcher — all live in RunHub now. Leaving to the deck keeps
         // the run streaming; nothing here can abort it (only ■ can).
         super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        // P-fix: ServerService's listener list is static and has no
+        // dedupe — every activity that subscribes MUST unsubscribe, or a
+        // destroyed chat (and its whole view tree) is retained and
+        // refreshed forever. Mirrors HomeActivity/MainActivity/Settings.
+        ServerService.unsubscribe(this);
+        super.onDestroy();
     }
 
     /** P26: back takes the same journey as the ‹ button — chat → project
@@ -721,6 +748,16 @@ public class ChatActivity extends Activity
                 dp(8), inset > 0 ? inset : dp(12), dp(10));
         if (permSlot != null) permSlot.setPadding(inset > 0 ? inset : dp(10),
                 0, inset > 0 ? inset : dp(10), 0);
+        // P-fix: the remaining pinned slots follow the same centered
+        // column on wide windows (they used to stretch edge-to-edge).
+        if (liveSlot != null) liveSlot.setPadding(inset > 0 ? inset : dp(10),
+                dp(2), inset > 0 ? inset : dp(10), 0);
+        if (qSlot != null) qSlot.setPadding(inset > 0 ? inset : dp(10),
+                0, inset > 0 ? inset : dp(10), 0);
+        if (typing != null) typing.setPadding(inset > 0 ? inset : dp(18),
+                dp(2), inset > 0 ? inset : dp(16), dp(2));
+        if (tvStatus != null) tvStatus.setPadding(inset > 0 ? inset : dp(18),
+                dp(4), inset > 0 ? inset : dp(16), dp(2));
     }
 
     @Override
@@ -1323,10 +1360,7 @@ public class ChatActivity extends Activity
             progScroll = true;
             scroll.smoothScrollTo(0,
                     Math.max(0, list.getHeight() - scroll.getHeight()));
-            scroll.postDelayed(() -> {
-                progScroll = false;
-                lastScrollY = scroll.getScrollY();
-            }, 450);
+            scroll.postDelayed(pillProgReset, 450);
             syncPill();
         });
     }
@@ -1439,7 +1473,7 @@ public class ChatActivity extends Activity
 
     private void syncLiveFooter() {
         if (liveSlot == null) return;
-        if (!RunHub.busy()) {
+        if (!RunHub.busyFor(RunHub.displayedSession())) {
             // run over (settleBusyUi also cleared liveOpen/liveSel) — the
             // whole card disappears, exactly as the field asked.
             if (liveSlot.getVisibility() != View.GONE
@@ -2802,7 +2836,20 @@ public class ChatActivity extends Activity
                                 self.openInFiles(abs);
                             }
                         };
-                        md = Markdown.render(NoteStrip.trimTail(r.text.toString()), mres);
+                        String full = NoteStrip.trimTail(r.text.toString());
+                        if (full.length() > 30000) {
+                            // P-fix: Markdown.render fast-paths >30000 chars
+                            // to raw text; render a bounded prefix richly and
+                            // append the remainder as plain text instead of
+                            // dropping all formatting.
+                            SpannableStringBuilder sb = new SpannableStringBuilder(
+                                    Markdown.render(full.substring(0, 30000), mres));
+                            sb.append("\n…\n");
+                            sb.append(full, 30000, full.length());
+                            md = sb;
+                        } else {
+                            md = Markdown.render(full, mres);
+                        }
                     }
                     catch (Exception e) { md = NoteStrip.trimTail(r.text.toString()); }
                     body.setText(md.length() == 0 ? "…" : md);
@@ -2989,6 +3036,10 @@ public class ChatActivity extends Activity
                         c.addView(label("output"));
                         c.addView(codeBlock(r.output.toString(), 12000));
                     }
+                    if (failed) {
+                        View dns = dnsHint(r.output);
+                        if (dns != null) c.addView(dns);
+                    }
                     // P27 phase 4: tap-through to the Files viewer for the
                     // file this tool touched — added as its OWN row so it
                     // never conflicts with the head/card toggle. Only when
@@ -3062,6 +3113,8 @@ public class ChatActivity extends Activity
                     t2.setPadding(0, dp(3), 0, 0);
                     c.addView(t2);
                 }
+                View dns = dnsHint(r.text, r.output);
+                if (dns != null) c.addView(dns);
                 c.setOnClickListener(v -> Sheet.show(this, r.text.toString())
                         .msg(r.output.toString())
                         .pill("Copy", Sheet.PRIMARY, () -> {
@@ -3176,6 +3229,62 @@ public class ChatActivity extends Activity
         lp.topMargin = dp(2);
         tv.setLayoutParams(lp);
         return tv;
+    }
+
+    /** P-fix: when an error/tool output reads as a DNS resolution failure,
+     *  surface one small tappable chip that turns on the documented DNS
+     *  bridge and restarts the server. Stateless: the decision is made
+     *  from the rendered text alone, no new row field. Returns null when
+     *  the text is not a DNS failure or the bridge is already on. */
+    private View dnsHint(CharSequence... sources) {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (CharSequence s : sources) {
+                if (s == null) continue;
+                int n = Math.min(s.length(), 8000);
+                sb.append(s, 0, n).append(' ');
+            }
+            String low = sb.toString().toLowerCase(Locale.US);
+            boolean dns = low.contains("could not resolve")
+                    || low.contains("enotfound")
+                    || low.contains("getaddrinfo")
+                    || low.contains("nodename nor servname")
+                    || low.contains("temporary failure in name resolution")
+                    || low.contains("name or service not known")
+                    || low.contains("could not resolve host")
+                    || low.contains("dns resolution")
+                    || low.contains("dns lookup")
+                    || low.contains("dns error")
+                    || low.contains("dns server");
+            if (!dns) return null;
+            if (getSharedPreferences("oc", MODE_PRIVATE)
+                    .getBoolean("dns_bridge", false)) return null;
+            TextView hint = text(12, R.color.accent_light, true);
+            hint.setText("⚠ DNS error — enable DNS bridge?");
+            hint.setBackgroundResource(R.drawable.bg_chip);
+            int hp = dp(10);
+            hint.setPadding(hp, dp(6), hp, dp(6));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.topMargin = dp(8);
+            hint.setLayoutParams(lp);
+            Theme.press(hint);
+            hint.setOnClickListener(v -> {
+                Theme.haptic(v);
+                try {
+                    getSharedPreferences("oc", MODE_PRIVATE).edit()
+                            .putBoolean("dns_bridge", true).apply();
+                } catch (Exception ignored) {}
+                Toast.makeText(ChatActivity.this,
+                        "DNS bridge on — restarting server…",
+                        Toast.LENGTH_SHORT).show();
+                ServerService.restart(ChatActivity.this);
+            });
+            return hint;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void copyText(String s, String label) {

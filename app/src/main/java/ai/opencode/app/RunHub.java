@@ -358,6 +358,29 @@ public final class RunHub implements ServerService.EventListener {
         if (t != null) t.lastEventAt = System.currentTimeMillis();
     }
 
+    /** P43: the beat's own send refreshed the provider cache — advance the
+     *  quiet clock so the NEXT beat waits a full IDLE_MS, but do NOT count
+     *  it as real activity: re-arm beatArmedAt to the same instant so the
+     *  stretch-reset in cacheBeatTick does not zero beatCount. Without
+     *  this the successful beat reset its own counter and MAX_BEATS never
+     *  bit (a billed beat every idle window, forever). */
+    private static void noteBeatActivity(String sid) {
+        if (sid == null) return;
+        long now = System.currentTimeMillis();
+        // Hold lastActivity across the beatArmedAt update so a concurrent
+        // cacheBeatTick can never read the new act with the old armed value
+        // (the window that would zero beatCount). Lock order is always
+        // lastActivity → beatArmedAt; the tick never nests them.
+        synchronized (lastActivity) {
+            lastActivity.put(sid, now);
+            synchronized (beatArmedAt) {
+                beatArmedAt.put(sid, now);
+            }
+        }
+        Tx t = txnFor(sid);
+        if (t != null) t.lastEventAt = now;
+    }
+
     /** The Settings switch (default ON — the field asked for exactly
      *  this behavior; the switch is the off-ramp). */
     public static boolean beatsEnabled() {
@@ -414,7 +437,11 @@ public final class RunHub implements ServerService.EventListener {
         }
         IO.execute(() -> {
             try {
-                touchRun(sid);
+                // P51: advance the quiet clock AND re-arm the beat counter
+                // up front. `touchRun` would go through noteActivity and the
+                // in-flight POST lets the next tick treat the beat as real
+                // activity, zeroing beatCount — MAX_BEATS never bit.
+                noteBeatActivity(sid);
                 List<String> bodies = buildBodies(CacheBeat.beatBlock(),
                         Models.selected(appCtx), agent);
                 Api.Resp r = null;
@@ -430,7 +457,7 @@ public final class RunHub implements ServerService.EventListener {
                     return;                    // quiet backoff — never spam
                 }
                 synchronized (beatFails) { beatFails.remove(sid); }
-                noteActivity(sid);             // the beat itself is activity
+                noteBeatActivity(sid);         // beat activity — NOT a stretch reset
             } catch (Throwable ignored) {}
         });
     }
@@ -556,8 +583,11 @@ public final class RunHub implements ServerService.EventListener {
     private static void persistToldSoon() {
         if (!toldFlushPending.compareAndSet(false, true)) return;
         IO.execute(() -> {
-            toldFlushPending.set(false);
-            persistTold();
+            // P51: reset the latch only AFTER the build finishes — clearing
+            // it first let the next booking schedule a second O(N) ledger
+            // snapshot while this one was still serializing (O(N^2) work).
+            try { persistTold(); }
+            finally { toldFlushPending.set(false); }
         });
     }
 
@@ -716,7 +746,9 @@ public final class RunHub implements ServerService.EventListener {
             }
             synchronized (peekCache) { peekCache.clear(); }
             synchronized (editFeed) { editFeed.clear(); }
-            synchronized (QUESTIONS) { QUESTIONS.clear(); }
+            // P50: QUESTIONS are deliberately NOT cleared — they are tiny,
+            // and a pending ask means the server is BLOCKED on the user;
+            // dropping it under memory pressure stranded the run forever.
             System.gc();
         } catch (Throwable ignored) {
             // relief must never become the crash
@@ -1446,6 +1478,7 @@ public final class RunHub implements ServerService.EventListener {
             }
         } catch (Exception e) {
             // never let a malformed frame kill the hub
+            Trail.record(appCtx, "hub event", e);
         } catch (Throwable e) {
             Trail.record(appCtx, "hub event", e);
         }
@@ -1732,6 +1765,7 @@ public final class RunHub implements ServerService.EventListener {
             }
         } catch (Exception e) {
             // a malformed part must never take the hub down
+            Trail.record(appCtx, "hub part", e);
         } catch (Throwable e) {
             Trail.record(appCtx, "hub part", e);
         }
@@ -1767,6 +1801,7 @@ public final class RunHub implements ServerService.EventListener {
             });
         } catch (Exception e) {
             // a malformed delta must never take the hub down
+            Trail.record(appCtx, "hub delta", e);
         } catch (Throwable e) {
             Trail.record(appCtx, "hub delta", e);
         }
@@ -2391,17 +2426,20 @@ public final class RunHub implements ServerService.EventListener {
                 mi.cost = fCost;
                 mi.tok = fTok;
                 mi.cacheRead = fCacheRead;   // P27: Σ popover cache line
-                // refresh recency: the freshest messages survive the cap
-                t.msgs.remove(fMid);
-                t.msgs.put(fMid, mi);
-                while (t.msgs.size() > MSG_CAP) {
-                    String eldest = t.msgs.keySet().iterator().next();
-                    MsgInfo ev = t.msgs.remove(eldest);
-                    // P42-check: remember what the sums already hold —
-                    // recreated rows delta against these, not zero.
-                    if (ev != null && (ev.cost != 0 || ev.tok != 0))
-                        t.evictedSums.put(eldest, new double[]{ev.cost, ev.tok});
-                }
+            }
+            // P51: recency refresh + cap ENFORCEMENT run for EVERY message,
+            // spend or not — the old spot inside `if (hasSpend)` let a long
+            // run of zero-spend messages grow t.msgs past MSG_CAP unbounded.
+            // Evicting a spend-less entry is safe: it contributes 0.
+            t.msgs.remove(fMid);
+            t.msgs.put(fMid, mi);
+            while (t.msgs.size() > MSG_CAP) {
+                String eldest = t.msgs.keySet().iterator().next();
+                MsgInfo ev = t.msgs.remove(eldest);
+                // P42-check: remember what the sums already hold —
+                // recreated rows delta against these, not zero.
+                if (ev != null && (ev.cost != 0 || ev.tok != 0))
+                    t.evictedSums.put(eldest, new double[]{ev.cost, ev.tok});
             }
             // (P37 note: the card view already draws its own ✕.)
             // P42: only a repainting pass may fire the error card — the
@@ -2428,7 +2466,11 @@ public final class RunHub implements ServerService.EventListener {
                 }
             });
         }
-        if (hasSpend) notifySpend();
+        // P51: only a repainting pass may poke the UI — the replay's
+        // accounting pass (repaint=false) walks the WHOLE store and would
+        // otherwise queue one main-thread runnable per message on open.
+        // The final totals still fire: the render window passes repaint=true.
+        if (repaint && hasSpend) notifySpend();
         if (showError) {
             err(fErrName, fErrMsg == null ? "" : fErrMsg,
                     String.valueOf(info));
@@ -3254,12 +3296,38 @@ public final class RunHub implements ServerService.EventListener {
                     // the repair runs before the amnesia is ever felt.
                     IO.execute(() -> {
                         try { Thread.sleep(1200); } catch (Exception ignored) {}
+                        // P51: this check used to Json.parse() the WHOLE
+                        // store into one String/tree — the exact OOM the P51
+                        // streaming replay fixed. Route it through the same
+                        // bounded StoreWalk path (verifyCured does); the
+                        // poisoning decision is unchanged.
+                        HttpURLConnection conn = null;
                         try {
-                            Api.Resp g = Api.get("/session/" + sid + "/message");
-                            if (g.ok()) diagnosePoison(sid,
-                                    Json.arr(Json.parse(g.body)));
+                            conn = Api.open("GET", "/session/" + sid + "/message",
+                                    null, 60_000);
+                            int code = conn.getResponseCode();
+                            if (code >= 200 && code < 300) {
+                                Reader in = new BufferedReader(
+                                        new InputStreamReader(conn.getInputStream(),
+                                                StandardCharsets.UTF_8), 64 * 1024);
+                                final List<CompactionPoison.Msg> msgs =
+                                        new ArrayList<>();
+                                StoreWalk.walk(in, 0, 0, new StoreWalk.Sink() {
+                                    @Override public boolean abort() { return false; }
+                                    @Override public void message(
+                                            Map<String, Object> item, int index) {
+                                        CompactionPoison.collectMsg(item, msgs);
+                                    }
+                                    @Override public void renderEnd(
+                                            List<Map<String, Object>> items,
+                                            StoreWalk.Stats st) { /* check only */ }
+                                });
+                                diagnosePoisonMsgs(sid, msgs);
+                            }
                         } catch (Throwable t2) {
                             Trail.record(appCtx, "hub compact check", t2);
+                        } finally {
+                            if (conn != null) conn.disconnect();
                         }
                     });
                 } else {
@@ -3734,6 +3802,7 @@ public final class RunHub implements ServerService.EventListener {
             }
         } catch (Exception e) {
             // response shape drift must never break the send path
+            Trail.record(appCtx, "hub reconcile", e);
         } catch (Throwable e) {
             Trail.record(appCtx, "hub reconcile", e);
         }

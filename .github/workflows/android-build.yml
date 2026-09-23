@@ -1,0 +1,89 @@
+name: android build & test
+
+# The Android toolchain (JDK + SDK + Gradle) does not fit in the on-device
+# guest, so this workflow is the sanctioned compiler: it compiles the app,
+# runs the Robolectric JVM suite, and packages a debug APK for inspection.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # AGP 8.5.2 needs JDK 17+; the project's build_apk.sh uses 21.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # The runner image already ships the Android SDK; the setup-android action
+      # is avoided because it runs `sdkmanager tools`, a package removed from
+      # current cmdline-tools. Point Gradle at the preinstalled SDK instead.
+      - name: Install Android SDK packages
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          SDKMANAGER="$(find "$SDK_ROOT" -name sdkmanager -type f 2>/dev/null | head -n1)"
+          echo "using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # Best effort: the ~60 MB opencode payload is not in git. When present the
+      # packaged APK is complete; when the download fails the compile/test still run.
+      - name: Restore bundled payload (best effort)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p app/src/main/assets
+          gh release download --repo "$GITHUB_REPOSITORY" -p 'opencode-linux-arm64-android.tar.gz' \
+            -O app/src/main/assets/oc_pkg.bin --clobber || echo "payload unavailable; continuing"
+          ls -la app/src/main/assets/oc_pkg.bin 2>/dev/null || true
+
+      - name: Compile + run JVM tests
+        run: gradle testDebugUnitTest --no-daemon --stacktrace --continue
+
+      - name: Package debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Test summary
+        if: always()
+        run: |
+          echo "== test result files =="
+          find app/build/test-results -name '*.xml' 2>/dev/null | wc -l
+          grep -h '<testsuite ' app/build/test-results/testDebugUnitTest/*.xml 2>/dev/null \
+            | sed -E 's/.*name="([^"]+)".*tests="([0-9]+)".*failures="([0-9]+)".*errors="([0-9]+)".*/\1: tests=\2 failures=\3 errors=\4/' \
+            | sort || true
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: app/build/reports/tests/testDebugUnitTest
+          if-no-files-found: ignore
+
+      - name: Upload debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: ignore
