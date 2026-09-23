@@ -52,6 +52,11 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private LinearLayout root;
     private TextView dot, stateTxt, pkgStatus, debStatus, debTitle;
+    private TextView storageSub;
+    /** P53: memo for the Settings storage-row subtitle — a full walk is
+     *  heavy, so it is reused for 60 s instead of re-run on every resume. */
+    private static volatile long storageSizeCache;
+    private static volatile long storageSizeAt;
     private ObjectAnimator pulse;
     private LinearLayout heroCard;
 
@@ -70,6 +75,7 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         super.onResume();
         Theme.syncIfNeeded(this);        // P32: a theme switch elsewhere re-skins here too
         refreshPkg();
+        refreshStorageSub();             // P53: storage row size, measured off-thread
     }
 
     @Override
@@ -185,6 +191,11 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
         sb.addView(divider());
         sb.addView(rowLink("Logs & shell console", "live server log + native shell",
                 "›_", v -> startActivity(new Intent(this, DiagnosticsActivity.class))));
+        sb.addView(divider());
+        // P53: the storage manager — see what is eating space and clear the
+        // safe parts (caches/logs/exports). The subtitle is measured
+        // off-thread; the row never blocks Settings.
+        sb.addView(storageRow());
         sb.addView(divider());
         sb.addView(rowLink("Import arm64 tools", "bring your own static binaries",
                 "⇩", v -> startActivity(new Intent(this, DiagnosticsActivity.class))));
@@ -563,6 +574,85 @@ public class SettingsActivity extends Activity implements ServerService.Evt {
             pkgStatus.setText("not installed yet — installing on first boot…");
             pkgStatus.setTextColor(Theme.WARN);
         }
+    }
+
+    /** P53: the storage-manager row. Subtitle is measured OFF the main
+     *  thread (the full breakdown walk can touch tens of thousands of
+     *  files in a grown rootfs) and posted back to this row only. */
+    private View storageRow() {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setClickable(true);
+        r.setBackground(Theme.ripple(this, null));
+        r.setPadding(Theme.dp(this, 16), Theme.dp(this, 11),
+                Theme.dp(this, 16), Theme.dp(this, 11));
+
+        TextView ic = new TextView(this);
+        ic.setText("◧");
+        ic.setTextSize(14);
+        ic.setTextColor(Theme.ACCENT_LT);
+        ic.setGravity(Gravity.CENTER);
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(Theme.ICON_DISC);
+        g.setShape(GradientDrawable.OVAL);
+        ic.setBackground(g);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
+                Theme.dp(this, 30), Theme.dp(this, 30));
+        ilp.rightMargin = Theme.dp(this, 12);
+        r.addView(ic, ilp);
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        TextView t = new TextView(this);
+        t.setText("Storage manager");
+        t.setTextSize(14);
+        t.setTextColor(Theme.TXT);
+        col.addView(t);
+        storageSub = new TextView(this);
+        storageSub.setText("measuring…");
+        storageSub.setTextSize(11);
+        storageSub.setTextColor(Theme.TXT_DIM);
+        storageSub.setPadding(0, 2, 0, 0);
+        col.addView(storageSub);
+        r.addView(col, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView chev = new TextView(this);
+        chev.setText("›");
+        chev.setTextSize(16);
+        chev.setTextColor(Theme.TXT_DIM);
+        r.addView(chev);
+        Theme.press(r);
+        r.setOnClickListener(v -> {
+            Theme.haptic(r);
+            storageSizeAt = 0;           // force a fresh measure on return
+            startActivity(new Intent(this, StorageActivity.class));
+        });
+        return r;
+    }
+
+    private void refreshStorageSub() {
+        if (storageSub == null) return;
+        long now = System.currentTimeMillis();
+        if (storageSizeAt > 0 && now - storageSizeAt < 60_000L) {
+            storageSub.setText("storage — " + Storage.human(storageSizeCache)
+                    + " used · tap to manage");
+            return;
+        }
+        new Thread(() -> {
+            long total = 0;
+            try { total = Storage.total(Storage.scan(this)); }
+            catch (Throwable ignored) {}
+            storageSizeCache = total;
+            storageSizeAt = System.currentTimeMillis();
+            final long t = total;
+            ui.post(() -> {
+                if (storageSub == null || isFinishing() || isDestroyed()) return;
+                storageSub.setText("storage — " + Storage.human(t)
+                        + " used · tap to manage");
+            });
+        }, "oc-storage-size").start();
     }
 
     private void installToolkit() {

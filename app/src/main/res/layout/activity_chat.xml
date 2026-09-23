@@ -222,8 +222,8 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
         android:paddingTop="2dp"
         android:visibility="gone"/>
 
@@ -234,8 +234,8 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
         android:visibility="gone"/>
 
     <!-- P50: question card slot — the question tool / plan approval,
@@ -246,15 +246,15 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
         android:visibility="gone"/>
 
     <TextView
         android:id="@+id/tvStatus"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingStart="18dp"
+        android:paddingStart="16dp"
         android:paddingEnd="16dp"
         android:paddingTop="4dp"
         android:paddingBottom="2dp"
@@ -273,7 +273,7 @@
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingStart="18dp"
+        android:paddingStart="16dp"
         android:paddingEnd="16dp"
         android:paddingTop="2dp"
         android:paddingBottom="2dp"
@@ -291,8 +291,8 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
         android:paddingTop="4dp"
         android:paddingBottom="8dp">
 
@@ -373,8 +373,8 @@
                 <!-- P17: vision — share a screenshot with the agent -->
                 <TextView
                     android:id="@+id/btnVision"
-                    android:layout_width="38dp"
-                    android:layout_height="38dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:background="@drawable/bg_chip"
                     android:contentDescription="Attach image"
                     android:gravity="center"
@@ -384,8 +384,8 @@
 
                 <TextView
                     android:id="@+id/btnPalette"
-                    android:layout_width="38dp"
-                    android:layout_height="38dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:layout_marginStart="4dp"
                     android:background="@drawable/bg_chip"
                     android:contentDescription="Command palette"

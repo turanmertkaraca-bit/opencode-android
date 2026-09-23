@@ -2,14 +2,16 @@ name: android build & test
 
 # The Android toolchain (JDK + SDK + Gradle) does not fit in the on-device
 # guest, so this workflow is the sanctioned compiler: it compiles the app,
-# runs the Robolectric JVM suite, and packages a debug APK for inspection.
+# runs the Robolectric JVM suite, packages a signed debug APK, renders UI
+# screenshots, and (on a version tag) publishes a GitHub Release.
 on:
   workflow_dispatch:
   push:
     branches: ["**"]
+    tags: ["v*"]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-${{ github.ref }}
@@ -28,9 +30,9 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      # The runner image already ships the Android SDK; the setup-android action
-      # is avoided because it runs `sdkmanager tools`, a package removed from
-      # current cmdline-tools. Point Gradle at the preinstalled SDK instead.
+      # The runner image already ships the Android SDK; the setup-android
+      # action is avoided because it runs `sdkmanager tools`, a removed
+      # package. Point Gradle at the preinstalled SDK instead.
       - name: Install Android SDK packages
         run: |
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
@@ -60,7 +62,7 @@ jobs:
       - name: Compile + run JVM tests
         run: gradle testDebugUnitTest --no-daemon --stacktrace --continue
 
-      - name: Package debug APK
+      - name: Package debug APK (signed with the in-repo persistent keystore)
         run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Test summary
@@ -80,6 +82,14 @@ jobs:
           path: app/build/reports/tests/testDebugUnitTest
           if-no-files-found: ignore
 
+      - name: Upload UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: app/build/screenshots
+          if-no-files-found: ignore
+
       - name: Upload debug APK
         if: always()
         uses: actions/upload-artifact@v4
@@ -87,3 +97,15 @@ jobs:
           name: app-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: ignore
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          sha256sum "$APK" > SHA256SUMS.txt
+          TAG="${GITHUB_REF_NAME}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "$TAG" --notes "Automated build from ${GITHUB_SHA}."
+          gh release upload "$TAG" "$APK" SHA256SUMS.txt --clobber

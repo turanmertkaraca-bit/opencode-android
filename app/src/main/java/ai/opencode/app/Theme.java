@@ -237,6 +237,9 @@ public final class Theme {
     public static int radiusRow(Context c)    { return dp(c, 14); }
     public static int radiusChip(Context c)   { return dp(c, 22); }
     public static int radiusWell(Context c)   { return dp(c, 12); }
+    /** Transcript card / pinned-card corner (tool, thought, error,
+     *  permission, question) — ONE radius for every block in the chat. */
+    public static int radiusBlock(Context c)  { return dp(c, 16); }
 
     // ---- apply / AMOLED switch --------------------------------------------
 
@@ -796,7 +799,7 @@ public final class Theme {
     public static GradientDrawable thoughtCard(Context c) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE);
-        d.setCornerRadius(dp(c, 16));
+        d.setCornerRadius(radiusBlock(c));
         d.setStroke(dp(c, 1), (TINT_ACCENT & 0x00FFFFFF) | 0x33000000);
         return d;
     }
@@ -805,7 +808,7 @@ public final class Theme {
     public static GradientDrawable errCard(Context c) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(TINT_DANGER);
-        d.setCornerRadius(dp(c, 16));
+        d.setCornerRadius(radiusBlock(c));
         d.setStroke(dp(c, 1), (ERR & 0x00FFFFFF) | 0x66000000);
         return d;
     }
@@ -814,8 +817,22 @@ public final class Theme {
     public static GradientDrawable toolCard(Context c) {
         GradientDrawable d = new GradientDrawable();
         d.setColor(SURFACE);
-        d.setCornerRadius(dp(c, 16));
+        d.setCornerRadius(radiusBlock(c));
         d.setStroke(dp(c, 1), STROKE);
+        return d;
+    }
+
+    /** P52: permission + question cards — the "the agent is waiting on
+     *  YOU" treatment, built from the LIVE tokens so it is palette-correct
+     *  on all six faces (the old bg_perm_card was a frozen indigo hex that
+     *  retint() could not remap: it stayed indigo on Paper). Same radius
+     *  and hairline as every other transcript block; the accent-subtle
+     *  fill + accent rim keep it distinct. */
+    public static GradientDrawable permCard(Context c) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(ACCENT_BG);
+        d.setCornerRadius(radiusBlock(c));
+        d.setStroke(dp(c, 1), (ACCENT & 0x00FFFFFF) | 0x66000000);
         return d;
     }
 

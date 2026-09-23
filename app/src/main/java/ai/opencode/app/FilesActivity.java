@@ -6,7 +6,9 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -140,7 +142,7 @@ public class FilesActivity extends Activity {
                 cwd = dir;
                 render();
             }
-            preview(f);
+            openFile(f);
         } catch (Exception e) {
             Toast.makeText(this, "could not open that file", Toast.LENGTH_SHORT).show();
         }
@@ -520,7 +522,7 @@ public class FilesActivity extends Activity {
 
         box.setOnClickListener(v -> {
             if (f.isDirectory()) { cwd = f; render(); }
-            else preview(f);
+            else openFile(f);
         });
         box.setOnLongClickListener(v -> { actions(f); return true; });
         if (Theme.motionOn(this) && delay > 0) Theme.enter(box, delay);
@@ -549,28 +551,276 @@ public class FilesActivity extends Activity {
             int n = k == null ? 0 : k.length;
             return n + (n == 1 ? " item" : " items");
         }
-        long len = f.length();
-        String sz = len < 1024 ? len + " B"
-                : len < 1048576 ? String.format(Locale.US, "%.1f kB", len / 1024.0)
-                : String.format(Locale.US, "%.1f MB", len / 1048576.0);
         // P42: a stale row can reference a deleted file — lastModified() is
         // then 0 and the raw age math rendered "20090 d ago". ago() renders
         // "—" for unknown time instead.
         String when = Resilience.ago(f.lastModified(), System.currentTimeMillis());
-        return sz + " · " + when;
+        return typeLabel(f) + " · " + humanSize(f.length()) + " · " + when;
     }
 
+    /** P52: short uppercase type tag for the row meta ("APK", "PNG", "MD",
+     *  "file" when there is no extension). */
+    private static String typeLabel(File f) {
+        String e = extOf(f.getName());
+        return e.isEmpty() ? "file" : e.toUpperCase(Locale.US);
+    }
+
+    /** P52: B / KB / MB / GB — never a raw byte count twice. */
+    private static String humanSize(long b) {
+        if (b < 1024) return b + " B";
+        if (b < 1048576L) return String.format(Locale.US, "%.1f KB", b / 1024.0);
+        if (b < 1073741824L) return String.format(Locale.US, "%.1f MB", b / 1048576.0);
+        return String.format(Locale.US, "%.1f GB", b / 1073741824.0);
+    }
+
+    private static String extOf(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot >= 0 && dot < name.length() - 1
+                ? name.substring(dot + 1).toLowerCase(Locale.US) : "";
+    }
+
+    /** P52: per-type glyph — images, audio, video, archives, packages and
+     *  docs all read at a glance now, not just code/text. */
     private String extGlyph(String name) {
-        String n = name.toLowerCase(Locale.US);
-        if (n.endsWith(".java") || n.endsWith(".c") || n.endsWith(".cpp")
-                || n.endsWith(".h") || n.endsWith(".py") || n.endsWith(".sh")
-                || n.endsWith(".js") || n.endsWith(".ts")) return "{}";
-        if (n.endsWith(".md") || n.endsWith(".txt")) return "≡";
-        if (n.endsWith(".png") || n.endsWith(".jpg") || n.endsWith(".jpeg")
-                || n.endsWith(".gif") || n.endsWith(".webp")) return "▢";
-        if (n.endsWith(".zip") || n.endsWith(".tar") || n.endsWith(".gz")
-                || n.endsWith(".apk")) return "◍";
-        return "·";
+        String e = extOf(name);
+        switch (e) {
+            case "java": case "kt": case "kts": case "c": case "h": case "cc":
+            case "cpp": case "hpp": case "cs": case "py": case "rb": case "go":
+            case "rs": case "js": case "mjs": case "cjs": case "ts": case "tsx":
+            case "jsx": case "sh": case "bash": case "php": case "lua": case "swift":
+            case "dart": case "sql": case "gradle": case "vue": case "svelte":
+                return "{}";
+            case "md": case "markdown": case "txt": case "text": case "log":
+            case "csv": case "tsv": case "json": case "xml": case "yml":
+            case "yaml": case "toml": case "ini": case "conf": case "properties":
+                return "≡";
+            case "png": case "jpg": case "jpeg": case "gif": case "webp":
+            case "bmp": case "ico": case "tif": case "tiff": case "heic":
+            case "avif": case "svg":
+                return "▢";
+            case "mp3": case "m4a": case "aac": case "ogg": case "oga":
+            case "opus": case "wav": case "flac": case "mid":
+                return "♪";
+            case "mp4": case "mkv": case "webm": case "avi": case "mov":
+            case "3gp": case "m4v": case "wmv": case "flv":
+                return "▶";
+            case "apk": case "apks": case "xapk": case "aab":
+                return "⊞";
+            case "pdf": case "doc": case "docx": case "xls": case "xlsx":
+            case "ppt": case "pptx":
+                return "▤";
+            case "zip": case "jar": case "rar": case "7z": case "tar":
+            case "gz": case "tgz": case "bz2": case "xz": case "deb":
+            case "rpm": case "iso":
+                return "◍";
+            default:
+                return "·";
+        }
+    }
+
+    // ------------------------------------------------ P52: MIME-aware open
+
+    /** P52: route a tap. Text-like files keep the text viewer; everything
+     *  else (or anything unreadable) goes to the action sheet instead of
+     *  being force-decoded into a String (the field bug: an APK opened as
+     *  mojibake text). */
+    private void openFile(final File f) {
+        ex(() -> {
+            final boolean text = isTextLike(f);
+            ui.post(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                if (text) preview(f);
+                else binarySheet(f);
+            });
+        });
+    }
+
+    /** True only when an extension says text, or when an unknown file
+     *  contains no NUL in its first 8 KB. */
+    private static boolean isTextLike(File f) {
+        String e = extOf(f.getName());
+        if (isTextExt(e)) return true;
+        if (isBinaryExt(e)) return false;
+        return !looksBinary(f);
+    }
+
+    private static boolean isTextExt(String e) {
+        switch (e) {
+            case "txt": case "text": case "md": case "markdown": case "json":
+            case "xml": case "java": case "kt": case "kts": case "js": case "mjs":
+            case "cjs": case "ts": case "tsx": case "jsx": case "py": case "rb":
+            case "go": case "rs": case "c": case "h": case "cc": case "cpp":
+            case "hpp": case "cs": case "sh": case "bash": case "zsh": case "fish":
+            case "gradle": case "properties": case "property": case "yml":
+            case "yaml": case "toml": case "ini": case "cfg": case "conf":
+            case "csv": case "tsv": case "log": case "html": case "htm": case "css":
+            case "scss": case "less": case "sql": case "svg": case "env":
+            case "dockerfile": case "makefile": case "mk": case "bat": case "cmd":
+            case "ps1": case "pl": case "php": case "swift": case "dart": case "lua":
+            case "r": case "m": case "vue": case "svelte": case "graphql": case "proto":
+            case "diff": case "patch": case "srt": case "vtt": case "pem": case "crt":
+            case "key":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static boolean isBinaryExt(String e) {
+        switch (e) {
+            case "apk": case "apks": case "xapk": case "aab": case "zip": case "jar":
+            case "rar": case "7z": case "tar": case "gz": case "tgz": case "bz2":
+            case "xz": case "deb": case "rpm": case "iso": case "img": case "bin":
+            case "so": case "o": case "a": case "dex": case "class": case "elf":
+            case "exe": case "dll": case "dylib": case "wasm": case "png": case "jpg":
+            case "jpeg": case "gif": case "webp": case "bmp": case "ico": case "tif":
+            case "tiff": case "heic": case "avif": case "mp3": case "m4a": case "aac":
+            case "ogg": case "oga": case "opus": case "wav": case "flac": case "mid":
+            case "mp4": case "mkv": case "webm": case "avi": case "mov": case "3gp":
+            case "m4v": case "wmv": case "flv": case "pdf": case "doc": case "docx":
+            case "xls": case "xlsx": case "ppt": case "pptx": case "ttf": case "otf":
+            case "woff": case "woff2": case "eot": case "db": case "sqlite":
+            case "sqlite3": case "mdb": case "pak": case "dat": case "npy": case "npz":
+            case "pt": case "onnx": case "tflite": case "pb": case "safetensors":
+                return false;
+            default:
+                return false;
+        }
+    }
+
+    /** Cheap binary sniff: a NUL in the first 8 KB means "do not decode
+     *  this as text". Unreadable files are treated as binary so a bad file
+     *  degrades to an action sheet, never a crash. */
+    private static boolean looksBinary(File f) {
+        java.io.FileInputStream in = null;
+        try {
+            in = new java.io.FileInputStream(f);
+            byte[] buf = new byte[8192];
+            int n = in.read(buf);
+            if (n <= 0) return false;
+            for (int i = 0; i < n; i++) if (buf[i] == 0) return true;
+            return false;
+        } catch (Exception e) {
+            return true;
+        } finally {
+            if (in != null) try { in.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static boolean isApk(File f) {
+        return f.getName().toLowerCase(Locale.US).endsWith(".apk");
+    }
+
+    /** The binary/unknown action sheet: real OS hand-offs plus the reliable
+     *  "make it visible in a file manager" export. */
+    private void binarySheet(final File f) {
+        final String mime = FileProvider.mimeOf(f);
+        Sheet sh = Sheet.show(this, f.getName());
+        if (!sh.showing()) return;
+        sh.sub(typeLabel(f) + " · " + humanSize(f.length()) + " · " + mime);
+        sh.row("↗", "Open with", "hand off to another app", Theme.ACCENT_LT,
+                () -> { sh.dismiss(); openWith(f, mime); });
+        sh.row("⇪", "Share", "send this file to another app", Theme.TXT,
+                () -> { sh.dismiss(); share(f, mime); });
+        if (isApk(f)) {
+            sh.row("⊞", "Install", "run the package installer", Theme.OK,
+                    () -> { sh.dismiss(); install(f); });
+        }
+        sh.row("⤓", "Export to Downloads", "so any file manager can find it",
+                Theme.TXT_DIM, () -> { sh.dismiss(); exportDownloads(f); });
+        sh.row("ⓘ", "Info", "size, type and path", Theme.TXT_DIM,
+                () -> { sh.dismiss(); info(f, mime); });
+        sh.pill("Cancel", Sheet.QUIET, null);
+    }
+
+    private void openWith(File f, String mime) {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(FileProvider.uriFor(f), mime);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(i, "Open " + f.getName()));
+        } catch (Exception e) {
+            toast("no app can open this file");
+        }
+    }
+
+    private void share(File f, String mime) {
+        try {
+            Intent i = new Intent(Intent.ACTION_SEND);
+            i.setType(mime);
+            i.putExtra(Intent.EXTRA_STREAM, FileProvider.uriFor(f));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(i, "Share " + f.getName()));
+        } catch (Exception e) {
+            toast("nothing to share with");
+        }
+    }
+
+    private void install(File f) {
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(FileProvider.uriFor(f),
+                    "application/vnd.android.package-archive");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(i);
+        } catch (Exception e) {
+            toast("cannot start installer: " + e.getMessage());
+        }
+    }
+
+    /** No standard reveal-in-folder intent exists, so the reliable path is a
+     *  real copy into public Downloads; any file manager then sees it. */
+    private void exportDownloads(final File f) {
+        ex(() -> {
+            String dest = null;
+            try {
+                File dir = Environment.getExternalStoragePublicDirectory(
+                        Environment.DIRECTORY_DOWNLOADS);
+                if (dir == null) throw new java.io.IOException("no Downloads dir");
+                if (!dir.exists() && !dir.mkdirs())
+                    throw new java.io.IOException("cannot create " + dir);
+                File out = uniqueDest(dir, f.getName());
+                copyFile(f, out);
+                dest = out.getAbsolutePath();
+            } catch (Exception e) {
+                toast("export failed: " + e.getMessage());
+            }
+            if (dest != null) toast("exported → " + dest);
+        });
+    }
+
+    private static File uniqueDest(File dir, String name) {
+        File out = new File(dir, name);
+        if (!out.exists()) return out;
+        int dot = name.lastIndexOf('.');
+        String stem = dot > 0 ? name.substring(0, dot) : name;
+        String ext = dot > 0 ? name.substring(dot) : "";
+        for (int i = 1; i < 1000; i++) {
+            File c = new File(dir, stem + "-" + i + ext);
+            if (!c.exists()) return c;
+        }
+        return new File(dir, stem + "-" + System.currentTimeMillis() + ext);
+    }
+
+    private static void copyFile(File src, File dst) throws java.io.IOException {
+        try (java.io.FileInputStream in = new java.io.FileInputStream(src);
+             java.io.FileOutputStream out = new java.io.FileOutputStream(dst)) {
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        }
+    }
+
+    private void info(final File f, final String mime) {
+        Sheet sh = Sheet.show(this, f.getName());
+        if (!sh.showing()) return;
+        TextView t = Sheet.note(this,
+                typeLabel(f) + "  ·  " + humanSize(f.length()) + "\n"
+                        + mime + "\n" + f.getAbsolutePath());
+        t.setTextIsSelectable(true);
+        sh.add(t);
+        sh.pill("open with", Sheet.PRIMARY, () -> openWith(f, mime));
+        sh.pill("close", Sheet.QUIET, null);
     }
 
     // ------------------------------------------------------------ actions

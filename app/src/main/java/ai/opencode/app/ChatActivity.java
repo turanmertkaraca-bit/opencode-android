@@ -135,6 +135,16 @@ public class ChatActivity extends Activity
     private final Map<String, TextView> metaByKey = new HashMap<>();
     private final Handler smoother = new Handler(Looper.getMainLooper());
     private boolean smootherRunning;
+    /** P52: above this tail length the ticker repaints on a 48 ms cadence
+     *  instead of 24 ms (see tick) — the pacer still owns the reveal rate. */
+    private static final int STREAM_LONG_CHARS = 24000;
+    /** P52: chars of {@link RunHub.Row#text} currently in each streaming
+     *  body (the caret excluded). Lets paintStreaming APPEND the newly
+     *  revealed delta to the body's Editable instead of re-copying the
+     *  whole answer every tick (O(n²) → O(n) on long replies). Cleared
+     *  wherever the view maps are (renderAll/hubReset) and on every row
+     *  rebuild. */
+    private final Map<String, Integer> paintPrefix = new HashMap<>();
     /** P43: one pacer per streaming row — the arrival-rate reveal that
      *  turns provider bursts into a continuous glide (StreamPacer).
      *  P48: the profile follows the row kind — THINKING rows reveal on
@@ -302,22 +312,29 @@ public class ChatActivity extends Activity
             }, 350);
         }
 
-        findViewById(R.id.btnPalette).setOnClickListener(v -> palette());
+        View btnPaletteV = findViewById(R.id.btnPalette);
+        btnPaletteV.setOnClickListener(v -> palette());
+        Theme.press(btnPaletteV);        // P52: every header control reacts
         // P10: visible back affordance — chat → project deck. P34: ALWAYS.
         // The update-launch path boots straight into the last chat and
         // finishes the splash, which used to make the chat the task root:
         // finish() then had nothing beneath it and BOTH backs closed the
         // whole app (the field report). The pure back rule sends the deck
         // explicitly in exactly that case.
-        findViewById(R.id.btnBack).setOnClickListener(v -> {
+        View btnBackV = findViewById(R.id.btnBack);
+        btnBackV.setOnClickListener(v -> {
             Theme.pop(v);
             leaveToDeck();
         });
+        Theme.press(btnBackV);
         btnSessions = findViewById(R.id.btnSessions);
-        if (btnSessions != null) btnSessions.setOnClickListener(v -> {
-            Theme.haptic(v);
-            sessionsSheet();
-        });
+        if (btnSessions != null) {
+            btnSessions.setOnClickListener(v -> {
+                Theme.haptic(v);
+                sessionsSheet();
+            });
+            Theme.press(btnSessions);
+        }
         emptyHero = findViewById(R.id.emptyHero);
         suggestBox = findViewById(R.id.suggestBox);
         // P45: the Claude-Android empty state — a time-of-day greeting
@@ -341,10 +358,13 @@ public class ChatActivity extends Activity
             if (cc != null) cc.setBackground(Theme.composerWell(this));
         } catch (Exception ignored) {}
         btnVision = findViewById(R.id.btnVision);
-        if (btnVision != null) btnVision.setOnClickListener(v -> {
-            Theme.haptic(v);
-            pickImage();
-        });
+        if (btnVision != null) {
+            btnVision.setOnClickListener(v -> {
+                Theme.haptic(v);
+                pickImage();
+            });
+            Theme.press(btnVision);
+        }
         attachScroll = findViewById(R.id.attachScroll);
         attachSlot = findViewById(R.id.attachSlot);
         costHint = findViewById(R.id.costHint);
@@ -696,6 +716,7 @@ public class ChatActivity extends Activity
             ui.removeCallbacks(flushPaints);
             cancelFinalizes();               // P49: the transcript is being replaced
             liveStreamViews.clear();         // P49: the view maps are going too
+            paintPrefix.clear();             // P52: …and the caret-stage cache
             dirState.clear();
             viewByKey.clear();
             bodyByKey.clear();
@@ -737,27 +758,26 @@ public class ChatActivity extends Activity
         boolean wide = wdp >= 600;
         int inset = wide ? Theme.dp(this,
                 Math.min(200, Math.max(14, (wdp - 720) / 2 + 14))) : 0;
-        // P42-check: narrow windows too — the composer keeps the XML's
-        // 12dp side padding (the old inset(0) sat the input well flush
-        // against the rounded bar), and the list bottom holds the
-        // project's own ≥14dp clipping floor.
-        if (list != null) list.setPadding(inset > 0 ? inset : dp(14),
-                dp(14), inset > 0 ? inset : dp(14), dp(14));
+        // P52: ONE content inset for every column — transcript, composer,
+        // pinned cards (permission/question/live), status and typing lines
+        // all share the same left/right edge. The old ad-hoc 10/12/14/16/18
+        // mix made the transcript rows, pinned cards and composer look
+        // like they belonged to different screens (the "rushed" feel).
+        // Wide windows keep the centered ~720dp column; narrow uses the
+        // shared 16dp token (step 5).
+        int side = inset > 0 ? inset : Theme.space(this, 5);
+        // P42-check: the list bottom holds the project's own ≥14dp
+        // clipping floor (16dp here).
+        if (list != null) list.setPadding(side, dp(14), side, dp(14));
         View composer = findViewById(R.id.composerBar);
-        if (composer != null) composer.setPadding(inset > 0 ? inset : dp(12),
-                dp(8), inset > 0 ? inset : dp(12), dp(10));
-        if (permSlot != null) permSlot.setPadding(inset > 0 ? inset : dp(10),
-                0, inset > 0 ? inset : dp(10), 0);
+        if (composer != null) composer.setPadding(side, dp(8), side, dp(10));
+        if (permSlot != null) permSlot.setPadding(side, 0, side, 0);
         // P-fix: the remaining pinned slots follow the same centered
         // column on wide windows (they used to stretch edge-to-edge).
-        if (liveSlot != null) liveSlot.setPadding(inset > 0 ? inset : dp(10),
-                dp(2), inset > 0 ? inset : dp(10), 0);
-        if (qSlot != null) qSlot.setPadding(inset > 0 ? inset : dp(10),
-                0, inset > 0 ? inset : dp(10), 0);
-        if (typing != null) typing.setPadding(inset > 0 ? inset : dp(18),
-                dp(2), inset > 0 ? inset : dp(16), dp(2));
-        if (tvStatus != null) tvStatus.setPadding(inset > 0 ? inset : dp(18),
-                dp(4), inset > 0 ? inset : dp(16), dp(2));
+        if (liveSlot != null) liveSlot.setPadding(side, dp(2), side, 0);
+        if (qSlot != null) qSlot.setPadding(side, 0, side, 0);
+        if (typing != null) typing.setPadding(side, dp(2), side, dp(2));
+        if (tvStatus != null) tvStatus.setPadding(side, dp(4), side, dp(2));
     }
 
     @Override
@@ -933,10 +953,12 @@ public class ChatActivity extends Activity
             Throwable t = Resilience.guard(() -> {
                 boolean[] moreBox = {false};
                 boolean[] paintedBox = {false};   // P48: did this tick actually paint?
+                int[] tailLenBox = {0};           // P52: tail length → cadence
                 synchronized (lock) {
                     for (int i = rows.size() - 1; i >= 0; i--) {
                         RunHub.Row r = rows.get(i);
                         int len = r.text.length();
+                        if (i == rows.size() - 1) tailLenBox[0] = len;
                         if (r.shown > len) r.shown = len;
                         if ((r.kind != K_ASSISTANT && r.kind != K_REASON)
                                 || r.shown >= len) continue;
@@ -984,7 +1006,16 @@ public class ChatActivity extends Activity
                 // stale child height every 24 ms and the pin chased its own
                 // tail (the field's "it goes up and down").
                 if (paintedBox[0] && pinnedBottom) scroll.post(() -> scrollToEnd());
-                if (moreBox[0]) smoother.postDelayed(this, 24);
+                // P52: once an answer is long, halve the repaint cadence.
+                // The per-tick substring+setText is O(len); at 24 ms on a
+                // 24k+ answer the main thread was doing thousands of full
+                // copies and layout passes (the "it gets heavy on long
+                // answers" feel). The pacer still controls the reveal RATE
+                // from elapsedRealtime, `shown` stays monotonic, and the
+                // quiet finalize is untouched — only the frame cadence
+                // relaxes. Short answers keep the 24 ms glide.
+                if (moreBox[0]) smoother.postDelayed(this,
+                        tailLenBox[0] > STREAM_LONG_CHARS ? 48 : 24);
                 else smootherRunning = false;
             });
             if (t != null) {
@@ -1009,8 +1040,34 @@ public class ChatActivity extends Activity
             String win = Resilience.thinkWindow(r.text.toString(), upto, 240);
             body.setText(win.length() == 0 ? "…" : win + "▍");
         } else {
-            String s = r.text.substring(0, upto);
-            body.setText(s.length() == 0 ? "…" : s + "▍");
+            // P52: incremental append. The body holds `prefix + "▍"`; when
+            // only more of the SAME prefix has been revealed, replace the
+            // trailing caret with the delta and re-add it — O(delta), not
+            // a fresh O(len) substring + setText every tick. Any mismatch
+            // (first paint, rebuild, trim, kind flip) falls back to the
+            // full repaint, so `shown`/finalize semantics are unchanged.
+            boolean appended = false;
+            String key = r.key;
+            if (key != null) {
+                Integer prev = paintPrefix.get(key);
+                Editable ed = body.getEditableText();
+                if (prev != null && prev >= 0 && prev <= upto
+                        && ed != null && ed.length() == prev + 1) {
+                    ed.replace(prev, prev + 1, r.text.subSequence(prev, upto));
+                    ed.append("▍");
+                    paintPrefix.put(key, upto);
+                    appended = true;
+                }
+            }
+            if (!appended) {
+                String s = r.text.substring(0, upto);
+                body.setText(s.length() == 0 ? "…" : s + "▍",
+                        TextView.BufferType.EDITABLE);
+                if (key != null) {
+                    if (paintPrefix.size() > 256) paintPrefix.clear();
+                    paintPrefix.put(key, upto);
+                }
+            }
         }
         if (r.shown >= len) {
             // P49: caught up → the markdown rebuild lands ONCE, after the
@@ -2700,6 +2757,7 @@ public class ChatActivity extends Activity
             viewByKey.clear(); bodyByKey.clear(); metaByKey.clear();
             liveStreamViews.clear();          // P49: fresh render, fresh stages
             pacerByKey.clear();                 // P43: fresh render, fresh pace
+            paintPrefix.clear();                // P52: fresh render, fresh caret
             for (RunHub.Row r : snapshot) r.shown = r.text.length(); // history: no caret
         }
         list.removeAllViews();
@@ -2823,7 +2881,11 @@ public class ChatActivity extends Activity
                     // plain tail with caret — cheap, re-painted by the smoother
                     int upto = Math.min(r.shown, r.text.length());
                     String s = r.text.substring(0, upto);
-                    body.setText(s.length() == 0 ? "…" : s + "▍");
+                    // P52: seed the caret-stage cache (editable body) so the
+                    // next tick APPENDS the delta instead of re-copying.
+                    if (r.key != null) paintPrefix.put(r.key, upto);
+                    body.setText(s.length() == 0 ? "…" : s + "▍",
+                            TextView.BufferType.EDITABLE);
                 } else {
                     CharSequence md;
                     try {
@@ -2928,8 +2990,17 @@ public class ChatActivity extends Activity
                         t = r.text.toString();
                         if (t.length() > 20000) t = t.substring(0, 20000) + "…";
                     }
-                    body.setText(t.length() == 0 ? "…"
-                            : streaming ? t + "▍" : t);
+                    // P52: keep the open thought on the incremental caret
+                    // stage too (seed = chars already painted, caret off).
+                    if (streaming) {
+                        if (r.key != null) {
+                            paintPrefix.put(r.key, Math.min(r.shown, r.text.length()));
+                        }
+                        body.setText(t.length() == 0 ? "…" : t + "▍",
+                                TextView.BufferType.EDITABLE);
+                    } else {
+                        body.setText(t.length() == 0 ? "…" : t);
+                    }
                     body.setPadding(dp(2), dp(8), 0, 0);
                     c.addView(body);
                     viewByKey.put(key, c);
@@ -3151,7 +3222,10 @@ public class ChatActivity extends Activity
         TextView tv = text(10, R.color.text_secondary, false);
         tv.setText(s.toUpperCase(Locale.US));
         tv.setLetterSpacing(0.1f);
-        tv.setPadding(0, dp(8), 0, dp(2));
+        // clipping audit: letterspaced caps carry a trailing advance —
+        // match it with end padding so the last glyph never kisses the
+        // next element (a code block's first line here).
+        tv.setPadding(0, dp(8), dp(3), dp(2));
         return tv;
     }
 
@@ -3411,7 +3485,7 @@ public class ChatActivity extends Activity
         // to miss and impossible to mis-tap.
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackgroundResource(R.drawable.bg_perm_card);
+        c.setBackground(Theme.permCard(this));
         int cp = dp(14);
         c.setPadding(cp, cp, cp, cp);
 
@@ -3542,7 +3616,7 @@ public class ChatActivity extends Activity
 
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setBackgroundResource(R.drawable.bg_perm_card);
+        c.setBackground(Theme.permCard(this));
         int cp = dp(14);
         c.setPadding(cp, cp, cp, cp);
 
@@ -3616,11 +3690,11 @@ public class ChatActivity extends Activity
                         if (cur.contains(o.label)) {
                             cur.remove(o.label);
                             chip.setBackground(Theme.outlinePill(this));
-                            chip.setTextColor(getResources().getColor(R.color.text_primary));
+                            chip.setTextColor(Theme.cr(this, R.color.text_primary));
                         } else {
                             cur.add(o.label);
                             chip.setBackground(Theme.allowPill(this));
-                            chip.setTextColor(getResources().getColor(R.color.on_accent));
+                            chip.setTextColor(Theme.cr(this, R.color.on_accent));
                         }
                     } else {
                         cur.clear();
@@ -3631,11 +3705,11 @@ public class ChatActivity extends Activity
                             if (cv instanceof TextView) {
                                 ((TextView) cv).setBackground(Theme.outlinePill(this));
                                 ((TextView) cv).setTextColor(
-                                        getResources().getColor(R.color.text_primary));
+                                        Theme.cr(this, R.color.text_primary));
                             }
                         }
                         chip.setBackground(Theme.allowPill(this));
-                        chip.setTextColor(getResources().getColor(R.color.on_accent));
+                        chip.setTextColor(Theme.cr(this, R.color.on_accent));
                     }
                 });
                 row.addView(chip, new LinearLayout.LayoutParams(
