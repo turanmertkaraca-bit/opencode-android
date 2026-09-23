@@ -116,6 +116,7 @@ public class HomeActivity extends Activity implements ServerService.Evt {
     protected void onDestroy() {
         ServerService.unsubscribe(this);
         if (pulse != null) pulse.cancel();
+        if (ex != null) ex.shutdownNow();
         super.onDestroy();
     }
 

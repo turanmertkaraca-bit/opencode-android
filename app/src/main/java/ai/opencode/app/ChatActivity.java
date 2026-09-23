@@ -630,6 +630,7 @@ public class ChatActivity extends Activity
         // destroyed chat (and its whole view tree) is retained and
         // refreshed forever. Mirrors HomeActivity/MainActivity/Settings.
         ServerService.unsubscribe(this);
+        if (ex != null) ex.shutdownNow();
         super.onDestroy();
     }
 

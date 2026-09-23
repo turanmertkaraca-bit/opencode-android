@@ -240,9 +240,9 @@ public class ServerService extends Service {
         try { c.startService(stop); } catch (Exception ignored) {}
     }
 
-    public static void subscribe(Evt e) { listeners.add(e); }
+    public static void subscribe(Evt e) { if (!listeners.contains(e)) listeners.add(e); }
     public static void unsubscribe(Evt e) { listeners.remove(e); }
-    public static void subscribeEvents(EventListener e) { evtListeners.add(e); }
+    public static void subscribeEvents(EventListener e) { if (!evtListeners.contains(e)) evtListeners.add(e); }
     public static void unsubscribeEvents(EventListener e) { evtListeners.remove(e); }
 
     /** Head of the pending permission queue (null if none). */
@@ -1291,6 +1291,7 @@ public class ServerService extends Service {
         }
         Thread r = runner;
         if (r != null) r.interrupt();
+        runner = null;
         releaseWakeLock();
         RenderServer.stop();   // P35: the endpoint dies with the service
         agentActive = false;

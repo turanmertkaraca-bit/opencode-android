@@ -87,6 +87,61 @@ public class ScreenshotTest {
         }
     }
 
+    /**
+     * ChatActivity's full-screen "starting sandbox" veil is a PRIVATE field
+     * ({@code private View veil}, ChatActivity.java:194) with no
+     * public/package-private seam that hides it synchronously. The only
+     * hide path is the private {@code syncVeil(int)} — and on the healthy
+     * branch it FADES via an animator, which does not settle before
+     * {@code view.draw()}. So: clear the field directly (immediate GONE),
+     * falling back to {@code syncVeil(ServerService.ST_HEALTHY)}, then to
+     * zero scrim alpha. A miss just leaves the veil as-is; nothing throws.
+     */
+    private static void hideVeil(Activity a) {
+        if (!(a instanceof ChatActivity)) return;
+        // 1. the field: no animation, immediate GONE (preferred)
+        try {
+            Field f = ChatActivity.class.getDeclaredField("veil");
+            f.setAccessible(true);
+            Object v = f.get(a);
+            if (v instanceof View) {
+                View veil = (View) v;
+                veil.animate().cancel();
+                veil.setAlpha(0f);
+                veil.setVisibility(View.GONE);
+                return;
+            }
+        } catch (Throwable ignored) {
+            // fall through to the method seam
+        }
+        // 2. the real hide path the healthy-server flip calls
+        try {
+            Method m = ChatActivity.class.getDeclaredMethod("syncVeil", int.class);
+            m.setAccessible(true);
+            m.invoke(a, ServerService.ST_HEALTHY);
+            Field f = ChatActivity.class.getDeclaredField("veil");
+            f.setAccessible(true);
+            Object v = f.get(a);
+            if (v instanceof View) {
+                View veil = (View) v;
+                veil.animate().cancel();
+                veil.setVisibility(View.GONE);
+            }
+            return;
+        } catch (Throwable ignored) {
+            // fall through to the scrim-alpha last resort
+        }
+        // 3. last resort: make the scrim transparent only
+        try {
+            Field f = ChatActivity.class.getDeclaredField("veil");
+            f.setAccessible(true);
+            Object v = f.get(a);
+            if (v instanceof View) ((View) v).setAlpha(0f);
+        } catch (Throwable ignored) {
+            // the chat screenshot just shows the veil, as before
+        }
+    }
+
     // ---- synthetic transcript --------------------------------------------
 
     private static RunHub.Row addRow(int kind, String key, String text) {
@@ -105,21 +160,47 @@ public class ScreenshotTest {
     }
 
     private static void chatTranscript() {
+        // user message
         addRow(RunHub.K_USER, "s|u1", "How is the chat transcript structured?");
-        addRow(RunHub.K_ASSISTANT, "s|a1",
-                "## Short answer\n\nIt is one `LinearLayout` inside a "
+
+        // assistant markdown reply: heading, bold, inline code, list, fence
+        RunHub.Row answer = addRow(RunHub.K_ASSISTANT, "s|a1",
+                "## Short answer\n\n"
+                        + "The transcript is one `LinearLayout` inside a "
                         + "`ScrollView`, painted row by row.\n\n"
+                        + "**Each row kind has its own card:**\n\n"
                         + "- user rows are neutral rounded pills\n"
                         + "- assistant rows render **markdown**\n"
-                        + "- tool + thought cards collapse by default");
+                        + "- tool + thought cards collapse by default\n\n"
+                        + "```java\n"
+                        + "for (RunHub.Row r : RunHub.rows()) {\n"
+                        + "    paintRowOnce(r);\n"
+                        + "}\n"
+                        + "```\n\n"
+                        + "That is the whole feed loop.");
+        answer.meta = "⇅ 1.2k tok · $0.0041";
+
+        // tool card (expanded so input/output are visible)
         RunHub.Row tool = addRow(RunHub.K_TOOL, "s|t1", "");
         tool.tool = "bash";
         tool.status = "completed";
         tool.title = "npm test";
         tool.input.append("npm test --silent");
         tool.output.append("42 passing (1.2s)");
-        addRow(RunHub.K_REASON, "s|r1",
-                "Checking the project layout before answering…");
+        tool.open = true;
+
+        // thought / reasoning card (expanded)
+        RunHub.Row think = addRow(RunHub.K_REASON, "s|r1",
+                "Checking the project layout before answering — the row "
+                        + "model lives in RunHub, so the view only paints.");
+        think.open = true;
+
+        // error row (title + detail)
+        RunHub.Row err = addRow(RunHub.K_ERR, "s|e1",
+                "provider request failed");
+        err.output.append("HTTP 429: rate limit exceeded — retrying in 2 s");
+
+        // a transcript note
         addRow(RunHub.K_SYS, "s|sys1", "⏵ server ready · sandbox warm");
     }
 
@@ -132,6 +213,7 @@ public class ScreenshotTest {
         snapSettings();
         snapFiles();
         snapSheet();
+        snapStorage();
     }
 
     private void snapChat() {
@@ -143,12 +225,14 @@ public class ScreenshotTest {
             // empty state first (hero + suggestion chips)
             invoke(act, "renderAll");
             idleMain();
+            hideVeil(act);
             shoot(act, "chat_empty");
 
-            // then a populated transcript
+            // then a populated transcript — no boot veil over the design
             chatTranscript();
             invoke(act, "renderAll");
             idleMain();
+            hideVeil(act);
             shoot(act, "chat");
         } catch (Throwable t) {
             log("chat", t);
@@ -213,6 +297,19 @@ public class ScreenshotTest {
             shootView(d.getWindow().getDecorView(), "sheet");
         } catch (Throwable t) {
             log("sheet", t);
+        }
+    }
+
+    private void snapStorage() {
+        // P53: the scan runs on a worker thread; the first frame renders
+        // "calculating…", which is the honest state under Robolectric.
+        try (ActivityController<StorageActivity> ctl =
+                     Robolectric.buildActivity(StorageActivity.class)) {
+            StorageActivity act = ctl.setup().get();
+            idleMain();
+            shoot(act, "storage");
+        } catch (Throwable t) {
+            log("storage", t);
         }
     }
 

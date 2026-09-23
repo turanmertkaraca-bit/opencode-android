@@ -59,7 +59,12 @@ public class App extends Application {
             @Override public void onActivityStarted(android.app.Activity a) {}
             @Override public void onActivityStopped(android.app.Activity a) {}
             @Override public void onActivitySaveInstanceState(android.app.Activity a, android.os.Bundle out) {}
-            @Override public void onActivityDestroyed(android.app.Activity a) {}
+            @Override public void onActivityDestroyed(android.app.Activity a) {
+                if (TOP == a) {
+                    TOP = null;
+                    bgSince = System.currentTimeMillis();
+                }
+            }
         });
         final Thread.UncaughtExceptionHandler prev =
                 Thread.getDefaultUncaughtExceptionHandler();

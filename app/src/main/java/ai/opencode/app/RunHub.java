@@ -143,7 +143,13 @@ public final class RunHub implements ServerService.EventListener {
          *  a full-store pass recreates one, the delta must come from the
          *  evicted values, not from zero, or every bind re-books the
          *  evicted tail into the session Σ. */
-        public final Map<String, double[]> evictedSums = new HashMap<>();
+        public final Map<String, double[]> evictedSums =
+                new java.util.LinkedHashMap<String, double[]>(64, 0.75f, true) {
+                    @Override protected boolean removeEldestEntry(
+                            java.util.Map.Entry<String, double[]> e) {
+                        return size() > 2 * MSG_CAP;
+                    }
+                };
         /** P42-check: set when a compaction summary lands live; the FIRST
          *  token-bearing assistant update after it resets the depth inputs
          *  (the note itself often arrives tokenless — keying the reset to
@@ -338,14 +344,38 @@ public final class RunHub implements ServerService.EventListener {
 
     /** Session → last activity ms (event or send). The beat decision
      *  reads "how long has THIS session been quiet". */
-    private static final Map<String, Long> lastActivity = new HashMap<>();
+    private static final Map<String, Long> lastActivity =
+            new java.util.LinkedHashMap<String, Long>(16, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Long> e) {
+                    return size() > 64;
+                }
+            };
     /** Session → beats fired in the current quiet stretch. */
-    private static final Map<String, Integer> beatCount = new HashMap<>();
+    private static final Map<String, Integer> beatCount =
+            new java.util.LinkedHashMap<String, Integer>(16, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Integer> e) {
+                    return size() > 64;
+                }
+            };
     /** Session → consecutive failed beats (drives the backoff). */
-    private static final Map<String, Long> beatFails = new HashMap<>();
+    private static final Map<String, Long> beatFails =
+            new java.util.LinkedHashMap<String, Long>(16, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Long> e) {
+                    return size() > 64;
+                }
+            };
     /** Session → activity value the beat counter was armed on; when real
      *  activity lands past it, the stretch resets and the count zeroes. */
-    private static final Map<String, Long> beatArmedAt = new HashMap<>();
+    private static final Map<String, Long> beatArmedAt =
+            new java.util.LinkedHashMap<String, Long>(16, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, Long> e) {
+                    return size() > 64;
+                }
+            };
 
     /** Record that {@code sid} just did something (any event, any send,
      *  any part delta) — the provider's prompt cache was refreshed now. */
@@ -1491,26 +1521,59 @@ public final class RunHub implements ServerService.EventListener {
     /** Sessions diagnosed with an empty compaction root (the model sees
      *  only the latest message). The Context repair note rides sends for
      *  these until the repair lands — the one-send bridge, never a tax. */
-    private static final java.util.Set<String> poisonKnown = new java.util.HashSet<>();
+    private static final java.util.Set<String> poisonKnown =
+            java.util.Collections.newSetFromMap(
+                    new java.util.LinkedHashMap<String, Boolean>(16, 0.75f, true) {
+                        @Override protected boolean removeEldestEntry(
+                                java.util.Map.Entry<String, Boolean> e) {
+                            return size() > 64;
+                        }
+                    });
     /** Sessions with a repair in flight (server stop → store edit →
      *  restart → verify). Sends for these are politely held. */
-    private static final java.util.Set<String> poisonCuring = new java.util.HashSet<>();
+    private static final java.util.Set<String> poisonCuring =
+            java.util.Collections.newSetFromMap(
+                    new java.util.LinkedHashMap<String, Boolean>(16, 0.75f, true) {
+                        @Override protected boolean removeEldestEntry(
+                                java.util.Map.Entry<String, Boolean> e) {
+                            return size() > 64;
+                        }
+                    });
     /** P44: sessions with a pending post-compaction anchor. Armed when
      *  a compaction summary is FIRST seen for the session (live SSE or
      *  replay); consumed only by that session's next REAL user send —
      *  never by cache beats (they post their own block directly) and
      *  never on a failed POST (the retry path rides it again). */
-    private static final java.util.HashSet<String> compactAnchorPending =
-            new java.util.HashSet<>();
+    private static final java.util.Set<String> compactAnchorPending =
+            java.util.Collections.newSetFromMap(
+                    new java.util.LinkedHashMap<String, Boolean>(16, 0.75f, true) {
+                        @Override protected boolean removeEldestEntry(
+                                java.util.Map.Entry<String, Boolean> e) {
+                            return size() > 64;
+                        }
+                    });
 
     /** P41: compaction-summary message ids already announced in the
      *  chat. The summarize row would otherwise paint as an ordinary
      *  assistant bubble while it actually rewrote the model's memory —
      *  the field report was exactly that silence. Per-message dedupe;
      *  bounded by the same session lifetime as poisonKnown. */
-    private static final java.util.Set<String> compactionNoted = new java.util.HashSet<>();
+    private static final java.util.Set<String> compactionNoted =
+            java.util.Collections.newSetFromMap(
+                    new java.util.LinkedHashMap<String, Boolean>(64, 0.75f, true) {
+                        @Override protected boolean removeEldestEntry(
+                                java.util.Map.Entry<String, Boolean> e) {
+                            return size() > 256;
+                        }
+                    });
     /** sid → victim message ids the repair will delete. */
-    private static final Map<String, List<String>> poisonVictims = new HashMap<>();
+    private static final Map<String, List<String>> poisonVictims =
+            new java.util.LinkedHashMap<String, List<String>>(16, 0.75f, true) {
+                @Override protected boolean removeEldestEntry(
+                        java.util.Map.Entry<String, List<String>> e) {
+                    return size() > 64;
+                }
+            };
 
     /** P40: diagnose a session from the raw message array the hub just
      *  pulled (loadSession / reconcileOnBind / post-compact check). When
@@ -3708,7 +3771,11 @@ public final class RunHub implements ServerService.EventListener {
             synchronized (LOCK) {
                 archive.clear();
                 cur = new Tx();
+                poisonKnown.clear();
+                poisonVictims.clear();
+                poisonCuring.clear();
             }
+            synchronized (compactAnchorPending) { compactAnchorPending.clear(); }
             sessionId = null;
             sessionTitle = "New chat";
             runs.clear();                    // P31: the old server (and its runs) died with the switch
@@ -4179,7 +4246,14 @@ public final class RunHub implements ServerService.EventListener {
                 }
             };
     /** rows whose image decode failed — never retried (no repaint loops). */
-    private static final java.util.Set<String> failedImgs = new java.util.HashSet<>();
+    private static final java.util.Set<String> failedImgs =
+            java.util.Collections.newSetFromMap(
+                    new java.util.LinkedHashMap<String, Boolean>(64, 0.75f, true) {
+                        @Override protected boolean removeEldestEntry(
+                                java.util.Map.Entry<String, Boolean> e) {
+                            return size() > 512;
+                        }
+                    });
 
     static void upsertImage(final Tx t, final String key, final String dataUrl,
                             final String localPath, final String caption,
