@@ -96,7 +96,13 @@ cd opencode-android
 bash scripts/p0_setup_toolchain.sh   # gradle 8.9 + android-sdk into ~/p0-tools
 # restore the payload (not in git): opencode-linux-arm64-android.tar.gz
 # from any release → app/src/main/assets/oc_pkg.bin
+# the persistent debug keystore IS in git (keystore/debug.keystore) so every
+# machine and CI sign with the same key and updates install in place
 bash scripts/build_apk.sh            # → app/build/outputs/apk/debug/app-debug.apk
+
+CI (`.github/workflows/android-build.yml`) compiles, runs the JVM suite,
+renders UI screenshots, gates on the signing certificate, and publishes a
+GitHub Release with the APK + SHA256SUMS on any `v*` tag.
 ```
 
 JVM test suite (Robolectric, ~550 tests):
@@ -109,6 +115,7 @@ JVM test suite (Robolectric, ~550 tests):
 
 | Version | The release |
 |---|---|
+| v0.52.0 | find-and-manage: MIME-aware file manager (open/share/install/export real files, no more binary-as-text), in-app storage manager, bounded long-session retention, deterministic signed builds with a CI signing gate |
 | v0.51.0 | no-more-OOM: the replay streams the session store with hard bounds, row-text walls, OOM-safe notify lanes + a relief valve, opencode.json healed before every server start |
 | v0.50.0 | background made certain: auto-hibernate opt-in, watchdog resurrection chain, battery-exemption one-tap, question tool answerable in place |
 | v0.49.0 | consistency: Settings ANR cured at the source, keyboard re-anchor, quiet markdown finalize, honest scroll base |
